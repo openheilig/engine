@@ -532,6 +532,12 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions) -> Node3D:
 			# (byte-identical) with the POSITIVE representative depth --
 			# negation differed from byte 723166. Recorded as a FINDING row in
 			# analysis/autoresearch-results.tsv.
+			# A3 (02-RESEARCH.md Assumptions Log, closed in 02-01-PLAN.md Task 3):
+			# the engine default (sorting_use_aabb_center = true, no explicit
+			# sorting_offset) was tested directly at --sector=64,39 --zoom=2
+			# --bands=8 and did NOT reproduce /tmp/p2/base_wide.png (differed at
+			# byte 1096647) -- this explicit assignment is load-bearing, not
+			# merely one working choice among several. See findings log.
 			band_mesh.sorting_offset = band_repr[b]
 			root.add_child(band_mesh)
 	if not mark_idx.is_empty():
