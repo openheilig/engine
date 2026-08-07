@@ -87,6 +87,10 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--onlyflag="):
 			only_flag = int(a.trim_prefix("--onlyflag="))
+	var band_count := 1
+	for a in argv:
+		if a.begins_with("--bands="):
+			band_count = clampi(int(a.trim_prefix("--bands=")), 1, SectorView.BAND_MAX)
 	for a in argv:
 		if a.begins_with("--tickhz="):
 			_tick_hz = clampi(int(a.trim_prefix("--tickhz=")), 1, 240)
@@ -121,7 +125,7 @@ func _ready() -> void:
 	_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {
 		"stats": stats, "markers": markers, "objects": objects, "interiors": interiors,
 		"regions": show_regions, "exterior": exterior, "hide_levels": hide_levels,
-		"only_flag": only_flag,
+		"only_flag": only_flag, "band_count": band_count,
 	})
 	add_child(_view)
 

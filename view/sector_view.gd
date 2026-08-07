@@ -24,6 +24,13 @@ const HH: float = IsoCamera.HH
 ## sector meshes. 12800 max depth * 0.05 = 640 world units, well inside `far`.
 const DEPTH_STEP := 0.05
 
+## --bands= upper clamp. 4096 is one band per sector cell (SECT*SECT / SECT =
+## SECT bands would already over-separate; this is a hard ceiling regardless
+## of SECT), the point past which more bands cannot separate more objects.
+## Also removes the divide-by-zero a --bands=0 would otherwise cause in
+## _band_of before main.gd's own clamp turns 0 into 1 (T-02-01).
+const BAND_MAX := 4096
+
 ## Decoded 256x256 RGBA8 tiles are 256 KB each and the whole world uses 4328 of
 ## them (1.1 GB). Adjacent sectors share ~54% of their textures, so a cache pays
 ## for itself, but it has to be bounded.
@@ -69,6 +76,7 @@ var _stats := false
 var _objects := true                      ## draw static object sprites
 var _markers := false                     ## ...as flat coloured squares instead
 var _only_flag := -1                      ## debug: draw only objects with this +0x08 flag
+var _band_count := 1                      ## --bands=N: object depth bands per sector
 
 ## Sector unload/(re)load counters. Not gated on anything view-side (a view has
 ## no notion of "probe") -- counted unconditionally, cheaply, on every event.
@@ -93,6 +101,7 @@ var probe_reloaded := 0
 ##   exterior: bool     -- --exterior
 ##   hide_levels: int   -- --hidelevel= bitmask (default 0)
 ##   only_flag: int     -- --onlyflag=, or -1 for "off" (default -1)
+##   band_count: int    -- --bands=N object depth bands per sector (default 1)
 func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacred.World,
 		statics: Sacred.Statics, mixed: Sacred.Mixed, items: Sacred.Items, opts: Dictionary) -> void:
 	_cam = cam
@@ -110,6 +119,9 @@ func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacr
 	_exterior = opts.get("exterior", false)
 	_hide_levels = opts.get("hide_levels", 0)
 	_only_flag = opts.get("only_flag", -1)
+	# maxi(1, ...) so a caller that reaches setup() from outside main.gd's own
+	# clamp (e.g. a future test harness) can never hand _band_of a divisor of 0.
+	_band_count = maxi(1, opts.get("band_count", 1))
 
 
 ## The streaming body, moved out of main.gd's _process verbatim (its early
@@ -317,10 +329,6 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions) -> Node3D:
 		return null
 	var layer_of: Dictionary[int, int] = {}   ## texture.pak id -> layer in this sector's array
 	var images: Array[Image] = []
-	var pos := PackedVector3Array()
-	var uv := PackedVector2Array()
-	var uv2 := PackedVector2Array()
-	var idx := PackedInt32Array()
 	var marks := PackedVector3Array()
 	var mark_col := PackedColorArray()
 	var mark_idx := PackedInt32Array()
@@ -382,8 +390,38 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions) -> Node3D:
 		# pos.y is Godot-up, so DESCENDING y is north-to-south = back-to-front.
 		return pa.y > pb.y if not is_equal_approx(pa.y, pb.y) else pa.x < pb.x)
 
-	for obj: Dictionary in objs:
+	var n := objs.size()
+	# One geometry set per band; layer_of/images stay function-scoped (Pattern
+	# 2) -- the sector's Texture2DArray/ShaderMaterial are still built once and
+	# shared by every band, only pos/uv/uv2/idx are repartitioned.
+	var band_pos: Array[PackedVector3Array] = []
+	var band_uv: Array[PackedVector2Array] = []
+	var band_uv2: Array[PackedVector2Array] = []
+	var band_idx: Array[PackedInt32Array] = []
+	var band_repr: Array[float] = []
+	var band_has_repr: Array[bool] = []
+	for _b in _band_count:
+		band_pos.append(PackedVector3Array())
+		band_uv.append(PackedVector2Array())
+		band_uv2.append(PackedVector2Array())
+		band_idx.append(PackedInt32Array())
+		band_repr.append(0.0)
+		band_has_repr.append(false)
+
+	for i in n:
+		var obj: Dictionary = objs[i]
 		var p: Vector2 = obj["pos"]
+		# Binned by INDEX into the already-sorted objs array, never by tile --
+		# every object's whole floor-then-walls-then-roof tile run lands inside
+		# exactly one band (Pattern 1). Computed for every object regardless of
+		# whether it ends up drawing anything (marker fallback, missing art),
+		# so a band's representative depth always comes from the first index
+		# assigned to that band's range, not the first index that happened to
+		# emit geometry.
+		var band := _band_of(i, n, _band_count)
+		if not band_has_repr[band]:
+			band_repr[band] = _band_depth(p)
+			band_has_repr[band] = true
 		var spr := _mixed.sprite(obj["type"]) if not _markers else {}
 		if spr.is_empty():
 			if not _markers:
@@ -413,7 +451,8 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions) -> Node3D:
 		var pz := ((-p.y + size.y) / HH) * DEPTH_STEP + 2.0
 		# Tiles are emitted in mixed.pak order, which IS the retail compositor's
 		# paint order for the parts of one object -- floor, then walls, then
-		# roof. Preserving it is the whole point of the single surface.
+		# roof. Preserving it is the whole point of the single surface -- now
+		# one surface PER BAND, never split across two.
 		for tile: Dictionary in spr["tiles"]:
 			var tid: int = tile["tex"]
 			if not layer_of.has(tid):
@@ -429,13 +468,26 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions) -> Node3D:
 			var y0 := origin.y - d.position.y
 			var x1 := x0 + d.size.x
 			var y1 := y0 - d.size.y
-			var v: int = pos.size()
-			pos.append_array([Vector3(x0, y0, pz), Vector3(x1, y0, pz),
+			# Packed*Array elements of a typed Array are value types (COW): a
+			# mutating call on band_pos[band] directly would not necessarily
+			# write back through the outer Array, so read, mutate the local
+			# copy, then explicitly reassign -- correct regardless of whether
+			# [] returns a reference or a copy.
+			var bp: PackedVector3Array = band_pos[band]
+			var v: int = bp.size()
+			bp.append_array([Vector3(x0, y0, pz), Vector3(x1, y0, pz),
 				Vector3(x1, y1, pz), Vector3(x0, y1, pz)])
-			uv.append_array([s.position, Vector2(s.end.x, s.position.y), s.end,
+			band_pos[band] = bp
+			var bu: PackedVector2Array = band_uv[band]
+			bu.append_array([s.position, Vector2(s.end.x, s.position.y), s.end,
 				Vector2(s.position.x, s.end.y)])
-			uv2.append_array([Vector2(l, 0), Vector2(l, 0), Vector2(l, 0), Vector2(l, 0)])
-			idx.append_array([v, v + 1, v + 2, v, v + 2, v + 3])
+			band_uv[band] = bu
+			var bu2: PackedVector2Array = band_uv2[band]
+			bu2.append_array([Vector2(l, 0), Vector2(l, 0), Vector2(l, 0), Vector2(l, 0)])
+			band_uv2[band] = bu2
+			var bidx: PackedInt32Array = band_idx[band]
+			bidx.append_array([v, v + 1, v + 2, v, v + 2, v + 3])
+			band_idx[band] = bidx
 
 	var root := Node3D.new()
 	root.name = "Objects"
@@ -445,7 +497,19 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions) -> Node3D:
 		var mat := ShaderMaterial.new()
 		mat.shader = OBJECT_SHADER
 		mat.set_shader_parameter(&"tex", tex)
-		root.add_child(_mesh_of(pos, uv, idx, PackedColorArray(), mat, uv2))
+		for b in _band_count:
+			if band_idx[b].is_empty():
+				continue                   # matches the images.is_empty() guard idiom
+			var band_mesh := _mesh_of(band_pos[b], band_uv[b], band_idx[b],
+				PackedColorArray(), mat, band_uv2[b])
+			band_mesh.sorting_use_aabb_center = false
+			# Sign determined empirically, not assumed: --bands=2 on sector
+			# 64,39 against /tmp/p2/base_6439.png only reproduces the baseline
+			# (byte-identical) with the POSITIVE representative depth --
+			# negation differed from byte 723166. Recorded as a FINDING row in
+			# analysis/autoresearch-results.tsv.
+			band_mesh.sorting_offset = band_repr[b]
+			root.add_child(band_mesh)
 	if not mark_idx.is_empty():
 		var mm := StandardMaterial3D.new()
 		mm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -504,6 +568,22 @@ func _build_regions(regions: Sacred.Regions) -> Node3D:
 	root.name = "Regions"
 	root.add_child(_mesh_of(pos, PackedVector2Array(), idx, col, mat))
 	return root
+
+
+## Which of `bands` contiguous slices index `i` of `n` (already back-to-front
+## sorted) objects falls into. Binned by INDEX, never by tile, so one object's
+## whole floor-then-walls-then-roof run always lands in exactly one band.
+## Never called when n == 0 (the loop over objs simply doesn't iterate then).
+func _band_of(i: int, n: int, bands: int) -> int:
+	return mini(int(floor(float(i) * bands / n)), bands - 1)
+
+
+## Same absolute iso-depth scale as the marker formula at _build_objects'
+## sprite-less path (`mz`) -- deliberately NOT the taller sprite `pz` formula,
+## so a band's representative depth depends only on the object's own ground
+## position, not on which object happened to be first in the band.
+func _band_depth(p: Vector2) -> float:
+	return (-p.y / HH) * DEPTH_STEP + 2.0
 
 
 func _mesh_of(pos: PackedVector3Array, uv: PackedVector2Array, idx: PackedInt32Array,
