@@ -64,6 +64,21 @@ var _objects := true                      ## draw static object sprites
 var _markers := false                     ## ...as flat coloured squares instead
 var _only_flag := -1                      ## debug: draw only objects with this +0x08 flag
 
+## Actor world layer (world/actor_registry.gd, world/sim.gd). Constructed
+## once in _ready(), never added to the scene tree -- see
+## world/actor_registry.gd's header for why (the OpenMW-regret this phase
+## exists to avoid).
+var _registry: ActorRegistry
+var _sim: Sim
+var _tick_hz: int = Sim.TICK_HZ           ## --tickhz=N override, clamped [1,240]
+var _probe_ticks := 0                     ## --actor-probe=N; <= 0 disables the probe
+var _probe_route := "a"                   ## --probe-route=a|b
+var _probe_active := false                ## true while _actor_probe() drives ticks by exact count
+var _probe_unloaded := 0                  ## sector unloads counted during the probe's route walk
+var _probe_reloaded := 0                  ## sector (re)loads counted during the probe's route walk
+const PROBE_FOCUS := Vector2(3232.0, 3232.0)  ## middle of sector 50,50
+const PROBE_FRAME_BUDGET := 600           ## matches _maybe_screenshot's settle budget
+
 
 func _ready() -> void:
 	var install := Sacred.find_install()
@@ -101,6 +116,16 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--onlyflag="):
 			_only_flag = int(a.trim_prefix("--onlyflag="))
+	for a in argv:
+		if a.begins_with("--tickhz="):
+			_tick_hz = clampi(int(a.trim_prefix("--tickhz=")), 1, 240)
+		elif a.begins_with("--actor-probe="):
+			_probe_ticks = int(a.trim_prefix("--actor-probe="))
+		elif a.begins_with("--probe-route="):
+			_probe_route = a.trim_prefix("--probe-route=")
+
+	_registry = ActorRegistry.new()
+	_sim = Sim.new(_tick_hz)
 
 	# Streaming mode otherwise prints nothing at all, so a successful run and a
 	# silently-failed one look identical from the terminal.
@@ -111,6 +136,7 @@ func _ready() -> void:
 	print("  statics\t%s\titems\t%s" % [
 		"%d" % _statics.count() if _statics else "unavailable",
 		"%d interior, %d levelled" % [_items.count(), _items.level_count()] if _items else "unavailable"])
+	print("  sim\ttick %d Hz\tr_sim %.0f cells\tactors %d" % [_tick_hz, Sim.R_SIM, _registry.count()])
 
 	_cam = IsoCamera.new()
 	_cam.cell_limit = Vector2(_world.size) * SECT
@@ -138,10 +164,38 @@ func _ready() -> void:
 		at.x, at.y, at.x / SECT, at.y / SECT, _cam.size,
 		"fixed region" if not _streaming else "streaming",
 		"\tmarkers on" if _markers else ""])
-	await _maybe_screenshot()
+	if _probe_ticks > 0:
+		await _actor_probe(_probe_ticks, _probe_route)
+	else:
+		await _maybe_screenshot()
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_stream(delta)
+	if not _probe_active:
+		_advance_sim(delta, _focus_cell())
+
+
+## The ONLY Sim.advance call site outside godot-port/world/ -- a hard
+## constraint, not a style preference: it is what makes "one tick loop" a
+## greppable fact rather than a claim. Every caller of the sim goes through
+## this one function.
+func _advance_sim(dt: float, focus: Vector2) -> int:
+	if _sim == null:
+		return 0
+	return _sim.advance(dt, _registry, focus)
+
+
+func _focus_cell() -> Vector2:
+	if _cam == null:
+		return start_cell
+	return _cam.world_to_cell(Vector2(_cam.position.x, _cam.position.y))
+
+
+## The streaming body, moved out of _process verbatim (its early returns are
+## now local to it) so _process can also drive the sim accumulator on frames
+## the streamer itself has nothing to do on.
+func _stream(_delta: float) -> void:
 	if not _streaming or _cam == null:
 		return
 	# The visible set only changes when the camera does. Re-deriving it every
@@ -163,6 +217,8 @@ func _process(_delta: float) -> void:
 			if node != null:
 				node.queue_free()
 			_loaded.erase(key)
+			if _probe_active:
+				_probe_unloaded += 1
 
 	var missing: Array[int] = []
 	for key: int in want:
@@ -214,6 +270,8 @@ func _add_sector(key: int) -> void:
 	_loaded[key] = node
 	if node != null:
 		add_child(node)
+	if _probe_active:
+		_probe_reloaded += 1
 
 
 ## One sector -> one MeshInstance3D with its own Texture2DArray. Returns null if
@@ -614,6 +672,91 @@ func _region_arg() -> Vector3i:
 		if p.size() == 3:
 			return Vector3i(int(p[0]), int(p[1]), int(p[2]))
 	return Vector3i.ZERO
+
+
+## Pumps frames until the streamer's wanted set matches its loaded set, or
+## `budget` frames pass. Mirrors _maybe_screenshot's await + is_instance_valid
+## idiom -- this node can be freed mid-coroutine.
+func _pump_until_settled(budget: int) -> void:
+	for _i in budget:
+		# process_frame, not RenderingServer.frame_post_draw: under plain
+		# --headless there is no draw pass, so frame_post_draw never fires and
+		# this coroutine would park forever (observed directly -- see the
+		# deviation note in 01-01-SUMMARY.md). process_frame fires once per
+		# main-loop iteration regardless of whether anything is drawn.
+		await get_tree().process_frame
+		if not is_instance_valid(self):
+			return
+		if _wanted_sectors().size() == _loaded.size():
+			return
+
+
+## --actor-probe=N end-to-end demonstration: spawns a fixed, deterministic
+## actor set, ticks it by exact count through the real Sim.advance, then
+## walks a real streaming route that queue_free's and rebuilds sector 50,50
+## -- printing facts that let the survival and route-independence checks in
+## 01-01-PLAN.md's acceptance criteria be asserted with plain grep/diff.
+func _actor_probe(n: int, route: String) -> void:
+	# Set before anything else, so no frame pumped below can inject a
+	# wall-clock tick via _process's normal _advance_sim call.
+	_probe_active = true
+
+	# 1. Settle on the probe's home sector before spawning or ticking.
+	_cam.set_zoom_index(1)
+	_cam.look_at_cell(PROBE_FOCUS)
+	await _pump_until_settled(PROBE_FRAME_BUDGET)
+	if not is_instance_valid(self):
+		return
+
+	# 2. A fixed, deterministic actor set. Actor 1 is stationary and wounded
+	# -- its hp is the survival witness, untouched by Sim._step_actor by
+	# construction. record_id is the actor's spawn-order index for now;
+	# plan 02 resolves it against the record store.
+	var id1 := _registry.spawn(0, PROBE_FOCUS, 7, 149)
+	_registry.get_actor(id1).heading = Vector2.ZERO
+	var id2 := _registry.spawn(1, Vector2(3234.0, 3232.0), 149, 149)
+	_registry.get_actor(id2).heading = Vector2(1.0, 0.0)
+	var id3 := _registry.spawn(2, Vector2(3232.0, 3234.0), 149, 149)
+	_registry.get_actor(id3).heading = Vector2(0.0, 1.0)
+	var id4 := _registry.spawn(3, Vector2(3234.0, 3234.0), 149, 149)
+	_registry.get_actor(id4).heading = Vector2(1.0, 1.0).normalized()
+
+	# 3. Exactly n ticks, driven by count, through the one real accumulator --
+	# never by frame-delta, which would make the tick count route-dependent.
+	for _i in n:
+		_advance_sim(Sim.TICK_DT, PROBE_FOCUS)
+
+	# 4. Walk the streaming route far enough that sector 50,50 leaves the
+	# wanted set and is queue_free'd, then re-enters it. No ticks run during
+	# the walk -- _probe_active is still true.
+	_probe_unloaded = 0
+	_probe_reloaded = 0
+	var route_a: Array[Vector2] = [
+		Vector2(3232.0, 3232.0), Vector2(3232.0, 3600.0), Vector2(3232.0, 3232.0)]
+	var route_b: Array[Vector2] = [
+		Vector2(3232.0, 3232.0), Vector2(3600.0, 3232.0),
+		Vector2(3600.0, 3600.0), Vector2(3232.0, 3232.0)]
+	var waypoints: Array[Vector2] = route_a if route == "a" else route_b
+	for wp: Vector2 in waypoints:
+		_cam.look_at_cell(wp)
+		await _pump_until_settled(PROBE_FRAME_BUDGET)
+		if not is_instance_valid(self):
+			return
+
+	# 5. Print, in this exact order: every registry dump line, the sim
+	# summary, then one probe-diag line carrying every route-varying fact.
+	# Nothing route-varying appears on any other line, so the non-diag
+	# stdout is byte-identical between routes.
+	var lines: Array[String] = []
+	_registry.dump(lines)
+	for line: String in lines:
+		print(line)
+	print("sim\ttick=%d\tdropped=%d" % [_sim.tick, _sim.dropped])
+	print("probe-diag\troute=%s\tunloaded=%d\treloaded=%d\twaypoints=%d" % [
+		route, _probe_unloaded, _probe_reloaded, waypoints.size()])
+
+	# 6. The probe writes no files -- stdout only, then exit.
+	get_tree().quit()
 
 
 ## --shot=FILE renders one frame, writes it, and exits. The counts are the unit
