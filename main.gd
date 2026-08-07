@@ -51,6 +51,12 @@ func _ready() -> void:
 	var world := Sacred.World.new(install.path_join("world"))
 	if not (tiles_pak.is_open() and tex_pak.is_open() and world.is_open()):
 		return
+	# Sacred's own pointer, straight from texture.pak. Cosmetic and non-fatal --
+	# a failure warns and leaves the platform cursor. Skipped under --headless,
+	# where there is no cursor to set and the scan would be pure waste.
+	if DisplayServer.get_name() != "headless":
+		RetailCursor.apply(tex_pak)
+
 	var tiles := Sacred.Tiles.new(tiles_pak)
 	var statics: Sacred.Statics
 	var static_pak := Sacred.Pak.new(install.path_join("world/static.pak"))
@@ -145,6 +151,13 @@ func _ready() -> void:
 		await _actor_probe(_probe_ticks, _probe_route)
 	else:
 		await _maybe_screenshot()
+
+
+## Releases the retail cursor texture before RenderingServer teardown. Without
+## this, Input holds the ImageTexture past shutdown and its RID leaks -- see
+## RetailCursor.clear() for the measurement.
+func _exit_tree() -> void:
+	RetailCursor.clear()
 
 
 func _process(delta: float) -> void:
