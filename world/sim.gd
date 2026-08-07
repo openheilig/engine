@@ -26,10 +26,28 @@ const TICK_DT := 1.0 / float(TICK_HZ)
 ## "Performance") cannot spiral into an unbounded tick burst.
 const MAX_CATCHUP_TICKS := 5
 
-## Simulation radius: actors farther than this from `focus` are not ticked.
-## Plan 02 promotes this into the three-radius set r_sim < r_render < r_load;
-## until then it is a single module constant here.
-const R_SIM := 96.0
+## Three activity radii, all in cells, all with a real consumer (R10.2,
+## R10.4). `R_SIM < R_RENDER < R_LOAD` is checked at runtime in `_init()`
+## below -- `assert()` alone is not enough, because it is stripped out of
+## release builds and this relation must hold in every build.
+##
+## ponytail: none of the three numbers is measured against retail -- they
+## are chosen only to (a) satisfy the ordering relation and (b) sit outside
+## the streamer's actual footprint, `IsoCamera.visible_cells(load_margin)`
+## with `load_margin = 64.0` (main.gd) at the widest of `IsoCamera`'s three
+## `ZOOM_SCALES` steps. `load_margin` is NOT changed here -- it is
+## load-bearing for the image-cache sizing and for the
+## `28672 quads, 63 textures` load-path invariant. The upgrade path for all
+## three is a retail capture that measures Sacred's own real activity
+## radius; until then these are placeholders with a checked shape, not
+## recovered constants.
+const R_SIM := 96.0      ## actors inside this TICK. Consumed by tick_once().
+const R_RENDER := 128.0  ## actors inside this are eligible for a view node.
+                          ## Reported now as a band count; view/actor_view.gd
+                          ## (a later phase) is its second consumer.
+const R_LOAD := 160.0    ## the documented outer bound: terrain inside this is
+                          ## expected resident, so an actor inside R_SIM can
+                          ## assume its ground already exists.
 
 const STEP_CELLS_PER_TICK := 0.01
 
@@ -45,6 +63,8 @@ var _accum: float = 0.0
 
 func _init(hz: int = TICK_HZ) -> void:
 	tick_hz = clampi(hz, 1, 240)
+	if not (R_SIM < R_RENDER and R_RENDER < R_LOAD):
+		push_error("Sim: radius ordering violated -- R_SIM=%.1f R_RENDER=%.1f R_LOAD=%.1f, expected R_SIM < R_RENDER < R_LOAD" % [R_SIM, R_RENDER, R_LOAD])
 
 
 func _tick_dt() -> float:
@@ -75,7 +95,10 @@ func advance(delta: float, reg: ActorRegistry, focus: Vector2) -> int:
 
 
 ## Iterates reg.in_radius(focus, R_SIM) -- ascending id order -- calling
-## _step_actor on each.
+## _step_actor on each. in_radius compares squared distance with `<=`
+## (actor_registry.gd), so an actor at EXACTLY R_SIM cells from focus IS
+## ticked -- a decision, not an accident; `<` is equally defensible and is
+## recorded here so it is not silently inferred from the code later.
 func tick_once(reg: ActorRegistry, focus: Vector2) -> void:
 	tick += 1
 	for id: int in reg.in_radius(focus, R_SIM):

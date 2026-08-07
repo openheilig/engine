@@ -139,7 +139,9 @@ func _ready() -> void:
 		"%d" % _statics.count() if _statics else "unavailable",
 		"%d interior, %d levelled" % [_items.count(), _items.level_count()] if _items else "unavailable",
 		"%d" % _records.count() if _records.is_open() else "unavailable"])
-	print("  sim\ttick %d Hz\tr_sim %.0f cells\tactors %d" % [_tick_hz, Sim.R_SIM, _registry.count()])
+	print("  sim\ttick %d Hz\tr_sim %.0f\tr_render %.0f\tr_load %.0f\tordered %s" % [
+		_tick_hz, Sim.R_SIM, Sim.R_RENDER, Sim.R_LOAD,
+		Sim.R_SIM < Sim.R_RENDER and Sim.R_RENDER < Sim.R_LOAD])
 
 	_cam = IsoCamera.new()
 	_cam.cell_limit = Vector2(_world.size) * SECT
@@ -765,6 +767,17 @@ func _actor_probe(n: int, route: String) -> void:
 		var tid := _registry.spawn(rec_id, PROBE_FOCUS + offset, 149, 149)
 		_registry.get_actor(tid).heading = Vector2.ZERO
 
+	# ids 17..19: the three-radius boundary set (task 4, R10.2/R10.4), all
+	# stationary. 17 sits at EXACTLY R_SIM -- in_radius's <= means it must
+	# still tick. 18 is one cell further out -- outside R_SIM, inside
+	# R_RENDER, must NOT tick. 19 sits inside R_LOAD, outside R_RENDER.
+	var id17 := _registry.spawn(rec_id, PROBE_FOCUS + Vector2(Sim.R_SIM, 0.0), 149, 149)
+	_registry.get_actor(id17).heading = Vector2.ZERO
+	var id18 := _registry.spawn(rec_id, PROBE_FOCUS + Vector2(Sim.R_SIM + 1.0, 0.0), 149, 149)
+	_registry.get_actor(id18).heading = Vector2.ZERO
+	var id19 := _registry.spawn(rec_id, PROBE_FOCUS + Vector2(150.0, 0.0), 149, 149)
+	_registry.get_actor(id19).heading = Vector2.ZERO
+
 	# record\t... -- before any tick runs. Placed immediately before the
 	# order (task 3) and bands (task 4) lines that land in this same slot.
 	var rd := _records.def(rec_id)
@@ -782,6 +795,16 @@ func _actor_probe(n: int, route: String) -> void:
 	for id: int in order:
 		order_strs.append(str(id))
 	print("order\t%s" % ",".join(order_strs))
+
+	# bands\t... -- in_radius(PROBE_FOCUS, r) counts at each of the three
+	# radii, before any tick (task 4, R10.2/R10.4). With the layout above,
+	# 17 is exactly the sim boundary (inclusive), 18 the render boundary,
+	# 19 the load boundary, so each band's count equals the id of the actor
+	# that boundary is named after.
+	print("bands\tsim=%d\trender=%d\tload=%d" % [
+		_registry.in_radius(PROBE_FOCUS, Sim.R_SIM).size(),
+		_registry.in_radius(PROBE_FOCUS, Sim.R_RENDER).size(),
+		_registry.in_radius(PROBE_FOCUS, Sim.R_LOAD).size()])
 
 	# 3. Exactly n ticks, driven by count, through the one real accumulator --
 	# never by frame-delta, which would make the tick count route-dependent.
