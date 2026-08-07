@@ -1,0 +1,9 @@
+# Godot editor cache -- regenerable
+.godot/
+export/
+*.pck
+
+# Terrain blobs extracted from the retail game files. Derived from commercial,
+# non-redistributable media -- never commit, never upload. Regenerate with:
+#   analysis/tools/export_terrain.py
+data/
