@@ -369,24 +369,50 @@ func _actor_probe(n: int, route: String) -> void:
 	get_tree().quit()
 
 
-## --shot=FILE renders one frame, writes it, and exits. The counts are the unit
-## check; this is the only thing that catches "right numbers, wrong pixels".
-func _maybe_screenshot() -> void:
-	for arg in OS.get_cmdline_user_args() + OS.get_cmdline_args():
-		if not arg.begins_with("--shot="):
-			continue
-		# Wait for the streamer to settle, so the shot shows a finished view
-		# rather than whatever one frame of loading happened to produce.
-		for _i in 600:
+## Waits for the streamer to settle, so a measurement/screenshot reflects a
+## finished view rather than whatever one frame of loading happened to
+## produce. Shared by every --shot=/--drawcalls consumer below -- a second,
+## differently-timed wait is the mistake this factoring exists to prevent.
+## Returns false if this node was freed while the coroutine was parked on an
+## await (the caller must not touch `self`/`_view` after that), true
+## otherwise.
+func _await_settled() -> bool:
+	for _i in 600:
+		await RenderingServer.frame_post_draw
+		# The node can be freed while a coroutine is parked on an await.
+		if not is_instance_valid(self):
+			return false
+		if _view.is_settled():
 			await RenderingServer.frame_post_draw
-			# The node can be freed while a coroutine is parked on an await.
-			if not is_instance_valid(self):
-				return
-			if _view.is_settled():
-				await RenderingServer.frame_post_draw
-				break
-		var path := arg.trim_prefix("--shot=")
-		var err := get_viewport().get_texture().get_image().save_png(path)
-		print("shot\t%s\t%s" % [path, error_string(err)])
-		get_tree().quit()
+			break
+	return true
+
+
+## --shot=FILE renders one frame, writes it, and exits. --drawcalls prints the
+## per-frame RenderingServer draw-call count, read only after the same
+## settle-await --shot= uses, so the value is guaranteed populated (plain
+## --headless never submits a draw call and always reads 0 here). Either or
+## both flags may be present in one invocation -- both share _await_settled()
+## and the process quits once, after whichever branches ran. Neither flag
+## present -> return immediately, preserving streaming mode's existing
+## behaviour (never quits).
+func _maybe_screenshot() -> void:
+	var argv := OS.get_cmdline_user_args() + OS.get_cmdline_args()
+	var want_drawcalls := "--drawcalls" in argv
+	var shot_path := ""
+	for arg in argv:
+		if arg.begins_with("--shot="):
+			shot_path = arg.trim_prefix("--shot=")
+			break
+	if not want_drawcalls and shot_path == "":
 		return
+	if not await _await_settled():
+		return
+	if want_drawcalls:
+		var draw_calls := RenderingServer.get_rendering_info(
+			RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+		print("drawcalls\t%d" % draw_calls)
+	if shot_path != "":
+		var err := get_viewport().get_texture().get_image().save_png(shot_path)
+		print("shot\t%s\t%s" % [shot_path, error_string(err)])
+	get_tree().quit()
