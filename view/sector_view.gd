@@ -31,6 +31,23 @@ const DEPTH_STEP := 0.05
 ## _band_of before main.gd's own clamp turns 0 into 1 (T-02-01).
 const BAND_MAX := 4096
 
+## _band_depth is only NON-decreasing across bands (proven empirically at
+## --bands=100000: two adjacent bands whose first object shares an exact
+## pos.y tie -- common in a grid-aligned world -- get an identical
+## sorting_offset, and unlike triangles inside one mesh, whose submission
+## order alone decided this before banding, Godot's transparent sort has no
+## other tiebreaker between distinct MeshInstance3D nodes; the visible result
+## was thin sliver mis-ordering along a handful of overlapping sprite edges).
+## sorting_offset is a rendering-server real_t (32-bit float internally, even
+## though GDScript's own float is 64-bit); at this scale's worst-case
+## magnitude (640, per DEPTH_STEP's own comment above) float32's ULP is
+## ~7.6e-5, so a naively "far below any real depth step" epsilon like 1e-6
+## rounds away to nothing when added -- measured directly: it left the
+## --bands=100000 mis-order artifact almost unchanged. 0.001 clears that ULP
+## floor by >10x while staying under DEPTH_STEP / HH (~0.0021 per world unit
+## of pos.y), the smallest step a genuinely distinct object can produce.
+const BAND_TIE_EPS := 0.001
+
 ## Decoded 256x256 RGBA8 tiles are 256 KB each and the whole world uses 4328 of
 ## them (1.1 GB). Adjacent sectors share ~54% of their textures, so a cache pays
 ## for itself, but it has to be bounded.
@@ -488,6 +505,13 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions) -> Node3D:
 			var bidx: PackedInt32Array = band_idx[band]
 			bidx.append_array([v, v + 1, v + 2, v, v + 2, v + 3])
 			band_idx[band] = bidx
+
+	# See BAND_TIE_EPS: band_repr is only non-decreasing by construction, so
+	# force it strictly increasing here -- a no-op for every band whose depth
+	# already differs from its predecessor.
+	for b in range(1, _band_count):
+		if band_repr[b] <= band_repr[b - 1]:
+			band_repr[b] = band_repr[b - 1] + BAND_TIE_EPS
 
 	var root := Node3D.new()
 	root.name = "Objects"
