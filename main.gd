@@ -91,6 +91,12 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--bands="):
 			band_count = clampi(int(a.trim_prefix("--bands=")), 1, SectorView.BAND_MAX)
+	var sortcube := Vector2i(-1, -1)
+	for a in argv:
+		if a.begins_with("--sortcube="):
+			var p := a.trim_prefix("--sortcube=").split(",")
+			if p.size() == 2:
+				sortcube = Vector2i(int(p[0]), int(p[1]))
 	for a in argv:
 		if a.begins_with("--tickhz="):
 			_tick_hz = clampi(int(a.trim_prefix("--tickhz=")), 1, 240)
@@ -125,7 +131,7 @@ func _ready() -> void:
 	_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {
 		"stats": stats, "markers": markers, "objects": objects, "interiors": interiors,
 		"regions": show_regions, "exterior": exterior, "hide_levels": hide_levels,
-		"only_flag": only_flag, "band_count": band_count,
+		"only_flag": only_flag, "band_count": band_count, "sortcube": sortcube,
 	})
 	add_child(_view)
 

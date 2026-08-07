@@ -48,6 +48,11 @@ const BAND_MAX := 4096
 ## of pos.y), the smallest step a genuinely distinct object can produce.
 const BAND_TIE_EPS := 0.001
 
+## --sortcube=CX,CY marker-cube side length in screen pixels -- one retail cell
+## width (IsoCamera.HW * 2), so the proxy reads at the same scale a character
+## sprite would.
+const SORTCUBE_PX := 96.0
+
 ## Decoded 256x256 RGBA8 tiles are 256 KB each and the whole world uses 4328 of
 ## them (1.1 GB). Adjacent sectors share ~54% of their textures, so a cache pays
 ## for itself, but it has to be bounded.
@@ -94,6 +99,7 @@ var _objects := true                      ## draw static object sprites
 var _markers := false                     ## ...as flat coloured squares instead
 var _only_flag := -1                      ## debug: draw only objects with this +0x08 flag
 var _band_count := 1                      ## --bands=N: object depth bands per sector
+var _sortcube := Vector2i(-1, -1)         ## --sortcube=CX,CY: character-proxy marker cube cell, (-1,-1) = off
 
 ## Sector unload/(re)load counters. Not gated on anything view-side (a view has
 ## no notion of "probe") -- counted unconditionally, cheaply, on every event.
@@ -119,6 +125,8 @@ var probe_reloaded := 0
 ##   hide_levels: int   -- --hidelevel= bitmask (default 0)
 ##   only_flag: int     -- --onlyflag=, or -1 for "off" (default -1)
 ##   band_count: int    -- --bands=N object depth bands per sector (default 1)
+##   sortcube: Vector2i -- --sortcube=CX,CY character-proxy marker cube cell,
+##                         or Vector2i(-1,-1) for "off" (default Vector2i(-1,-1))
 func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacred.World,
 		statics: Sacred.Statics, mixed: Sacred.Mixed, items: Sacred.Items, opts: Dictionary) -> void:
 	_cam = cam
@@ -139,6 +147,13 @@ func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacr
 	# maxi(1, ...) so a caller that reaches setup() from outside main.gd's own
 	# clamp (e.g. a future test harness) can never hand _band_of a divisor of 0.
 	_band_count = maxi(1, opts.get("band_count", 1))
+	_sortcube = opts.get("sortcube", Vector2i(-1, -1))
+	# Added once, here, as a direct child of self -- never a child of a sector
+	# node, which stream()/_add_sector() frees on unload (T-02-05). A direct
+	# child persists across every sector load/unload the streamer performs.
+	if _sortcube.x >= 0:
+		var _sortcube_mesh := _build_sortcube()
+		add_child(_sortcube_mesh)
 
 
 ## The streaming body, moved out of main.gd's _process verbatim (its early
@@ -614,6 +629,63 @@ func _band_of(i: int, n: int, bands: int) -> int:
 ## position, not on which object happened to be first in the band.
 func _band_depth(p: Vector2) -> float:
 	return (-p.y / HH) * DEPTH_STEP + 2.0
+
+
+## Character-proxy marker cube for --sortcube=CX,CY (Phase 2 Plan 03): one
+## transparent-pass instance standing in for a skinned character (Phase 3+
+## builds the real thing), which is likewise one instance carrying one sort
+## key. Two constraints are load-bearing, both from the class doc invariant at
+## 15-17 ("Sits at Transform3D.IDENTITY... every sector mesh keeps the exact
+## global transform"):
+##   1. Every coordinate lives in the geometry below, never in the returned
+##      node's position/transform/global_position -- the caller must leave it
+##      at IDENTITY, matching every band mesh, or its base sort key would come
+##      from a different origin than theirs.
+##   2. It renders in the transparent pass, like the object sprites it is
+##      being sorted against -- an opaque instance would be ordered by the
+##      depth buffer instead, answering a different question than this phase
+##      asks.
+func _build_sortcube() -> MeshInstance3D:
+	var px := (float(_sortcube.x) - float(_sortcube.y)) * HW
+	var py := -(float(_sortcube.x) + float(_sortcube.y)) * HH
+	# Same absolute iso-depth scale and sign the object bands use (_band_depth
+	# is the identical formula _build_objects' sprite-less marker path and
+	# every band's representative depth already share).
+	var pz := _band_depth(Vector2(px, py))
+	var half := SORTCUBE_PX * 0.5
+	# A small Z extent (not a zero-thickness plane) so this is a real six-face
+	# box, ground point at (px, py), top edge SORTCUBE_PX above it (screen Y is
+	# up).
+	var z0 := pz - DEPTH_STEP
+	var z1 := pz + DEPTH_STEP
+	var pos := PackedVector3Array([
+		Vector3(px - half, py, z0), Vector3(px + half, py, z0),
+		Vector3(px + half, py + SORTCUBE_PX, z0), Vector3(px - half, py + SORTCUBE_PX, z0),
+		Vector3(px - half, py, z1), Vector3(px + half, py, z1),
+		Vector3(px + half, py + SORTCUBE_PX, z1), Vector3(px - half, py + SORTCUBE_PX, z1),
+	])
+	var idx := PackedInt32Array([
+		0, 1, 2, 0, 2, 3,   # near (z0)
+		4, 5, 6, 4, 6, 7,   # far (z1)
+		0, 4, 7, 0, 7, 3,   # left
+		1, 5, 6, 1, 6, 2,   # right
+		0, 1, 5, 0, 5, 4,   # bottom
+		3, 2, 6, 3, 6, 7,   # top
+	])
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_OPAQUE_ONLY
+	mat.albedo_color = Color(1.0, 0.0, 1.0, 0.9)
+	# cull_disabled: the box's exact winding is not load-bearing (unlike the
+	# object/terrain shaders' own cull_disabled choice, this mirrors that
+	# convention) -- every face must stay visible regardless of which side the
+	# orthogonal camera ends up on.
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var mi := _mesh_of(pos, PackedVector2Array(), idx, PackedColorArray(), mat)
+	mi.sorting_use_aabb_center = false
+	mi.sorting_offset = pz
+	return mi
 
 
 func _mesh_of(pos: PackedVector3Array, uv: PackedVector2Array, idx: PackedInt32Array,
