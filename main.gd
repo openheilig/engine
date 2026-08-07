@@ -69,6 +69,7 @@ var _only_flag := -1                      ## debug: draw only objects with this 
 ## world/actor_registry.gd's header for why (the OpenMW-regret this phase
 ## exists to avoid).
 var _registry: ActorRegistry
+var _records: RecordStore
 var _sim: Sim
 var _tick_hz: int = Sim.TICK_HZ           ## --tickhz=N override, clamped [1,240]
 var _probe_ticks := 0                     ## --actor-probe=N; <= 0 disables the probe
@@ -102,6 +103,7 @@ func _ready() -> void:
 	var items_pak := Sacred.Pak.new(install.path_join("pak/items.pak"))
 	if items_pak.is_open():
 		_items = Sacred.Items.new(items_pak)
+	_records = RecordStore.new(_items, _mixed)
 	var argv := OS.get_cmdline_user_args() + OS.get_cmdline_args()
 	_stats = "--stats" in argv
 	_markers = "--markers" in argv
@@ -133,9 +135,10 @@ func _ready() -> void:
 	print("  world\t%d of %d sectors present, %dx%d grid" % [
 		_world.count(), _world.size.x * _world.size.y, _world.size.x, _world.size.y])
 	print("  tiles\t%d records -> %d textures" % [_tiles.count(), _tex_pak.count()])
-	print("  statics\t%s\titems\t%s" % [
+	print("  statics\t%s\titems\t%s\trecords\t%s" % [
 		"%d" % _statics.count() if _statics else "unavailable",
-		"%d interior, %d levelled" % [_items.count(), _items.level_count()] if _items else "unavailable"])
+		"%d interior, %d levelled" % [_items.count(), _items.level_count()] if _items else "unavailable",
+		"%d" % _records.count() if _records.is_open() else "unavailable"])
 	print("  sim\ttick %d Hz\tr_sim %.0f cells\tactors %d" % [_tick_hz, Sim.R_SIM, _registry.count()])
 
 	_cam = IsoCamera.new()
@@ -691,6 +694,24 @@ func _pump_until_settled(budget: int) -> void:
 			return
 
 
+## Scans mixed.pak source indices upward from 1 for the first record that
+## resolves to REAL art (def() non-empty and tiles > 0) -- 15840 of 32096
+## mixed.pak entries have zero tiles, so picking blindly would land on one
+## roughly half the time. Falls back to record_id 0 (an out-of-range kind,
+## always resolving to the shared empty def) if none is found, which should
+## not happen against any real install.
+func _first_real_record_id() -> int:
+	var source := 1
+	while source < _records.count():
+		var id := RecordStore.make_id(RecordStore.KIND_STATIC_ART, source)
+		var d := _records.def(id)
+		if not d.is_empty() and int(d.get("tiles", 0)) > 0:
+			return id
+		source += 1
+	push_error("_first_real_record_id: no mixed.pak entry with tiles > 0 found")
+	return 0
+
+
 ## --actor-probe=N end-to-end demonstration: spawns a fixed, deterministic
 ## actor set, ticks it by exact count through the real Sim.advance, then
 ## walks a real streaming route that queue_free's and rebuilds sector 50,50
@@ -710,16 +731,25 @@ func _actor_probe(n: int, route: String) -> void:
 
 	# 2. A fixed, deterministic actor set. Actor 1 is stationary and wounded
 	# -- its hp is the survival witness, untouched by Sim._step_actor by
-	# construction. record_id is the actor's spawn-order index for now;
-	# plan 02 resolves it against the record store.
-	var id1 := _registry.spawn(0, PROBE_FOCUS, 7, 149)
+	# construction. Every probe actor carries a REAL record_id, resolved
+	# through RecordStore (plan 02) -- never a bare placeholder index.
+	var rec_id := _first_real_record_id()
+	var id1 := _registry.spawn(rec_id, PROBE_FOCUS, 7, 149)
 	_registry.get_actor(id1).heading = Vector2.ZERO
-	var id2 := _registry.spawn(1, Vector2(3234.0, 3232.0), 149, 149)
+	var id2 := _registry.spawn(rec_id, Vector2(3234.0, 3232.0), 149, 149)
 	_registry.get_actor(id2).heading = Vector2(1.0, 0.0)
-	var id3 := _registry.spawn(2, Vector2(3232.0, 3234.0), 149, 149)
+	var id3 := _registry.spawn(rec_id, Vector2(3232.0, 3234.0), 149, 149)
 	_registry.get_actor(id3).heading = Vector2(0.0, 1.0)
-	var id4 := _registry.spawn(3, Vector2(3234.0, 3234.0), 149, 149)
+	var id4 := _registry.spawn(rec_id, Vector2(3234.0, 3234.0), 149, 149)
 	_registry.get_actor(id4).heading = Vector2(1.0, 1.0).normalized()
+
+	# record\t... -- before any tick runs. Placed immediately before the
+	# order (task 3) and bands (task 4) lines that land in this same slot.
+	var rd := _records.def(rec_id)
+	print("record\tid=%d\tkind=%d\tsprite=%d\tname=%s\ttiles=%d\treadonly=%s\tshared=%s" % [
+		rec_id, RecordStore.kind_of(rec_id), RecordStore.source_of(rec_id),
+		rd.get("name", ""), rd.get("tiles", 0), rd.is_read_only(),
+		is_same(_records.def(rec_id), _records.def(rec_id))])
 
 	# 3. Exactly n ticks, driven by count, through the one real accumulator --
 	# never by frame-delta, which would make the tick count route-dependent.

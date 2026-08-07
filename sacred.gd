@@ -473,6 +473,13 @@ class Items extends RefCounted:
 	var _fam_of: Dictionary[int, String] = {}    ## sprite -> family
 	var _lvl_of: Dictionary[int, int] = {}       ## sprite -> its own level
 
+	## mixed.pak sprite id -> an authoring name (RecordStore's name_of()).
+	## HONEST AMBIGUITY: several items.pak records can carry the same +0x10
+	## sprite id, so this stores the LAST one seen in file order, not "the"
+	## name -- there is no guarantee a sprite has only one. The map is also
+	## one-way: sprite -> a name, never name -> sprite.
+	var _name: Dictionary[int, String] = {}
+
 	func _init(pak: Sacred.Pak) -> void:
 		var lv := RegEx.create_from_string("_(\\d)(?:U(\\d))?_\\d+$")
 		for i in pak.count():
@@ -480,6 +487,8 @@ class Items extends RefCounted:
 			if r.size() < REC_MIN:
 				continue
 			var nm := r.slice(NAME_OFF).get_string_from_ascii()
+			if nm != "":
+				_name[r.decode_u32(SPRITE_OFF)] = nm
 			var m := lv.search(nm)
 			if m != null:
 				var mask := 1 << int(m.get_string(1))
@@ -521,6 +530,11 @@ class Items extends RefCounted:
 		if not _fam_of.has(sprite_id):
 			return false
 		return _lvl_of[sprite_id] == _fam_top[_fam_of[sprite_id]]
+
+	## An authoring name for this mixed.pak sprite id, or "" if none was seen.
+	## See _name's header for the one-way, last-wins ambiguity this carries.
+	func name_of(sprite_id: int) -> String:
+		return _name.get(sprite_id, "")
 
 
 ## texture.pak entry -> Image. Type 4 is ARGB4444.
