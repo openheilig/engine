@@ -733,15 +733,37 @@ func _actor_probe(n: int, route: String) -> void:
 	# -- its hp is the survival witness, untouched by Sim._step_actor by
 	# construction. Every probe actor carries a REAL record_id, resolved
 	# through RecordStore (plan 02) -- never a bare placeholder index.
+	#
+	# Offsets (task 3, R10.3) are chosen so id1/id3/id4/id2 land at strictly
+	# increasing d^2 (0, 4, 36, 64) while ids 5..16 form a twelve-actor ring
+	# whose d^2 is EXACTLY 25 for every member -- small-integer offsets whose
+	# squares sum to 25 exactly, so the primary sort key is exactly, not
+	# approximately, tied. An approximate tie would not exercise
+	# Array.sort_custom's heapsort instability (R10.3, order_by_distance).
 	var rec_id := _first_real_record_id()
 	var id1 := _registry.spawn(rec_id, PROBE_FOCUS, 7, 149)
 	_registry.get_actor(id1).heading = Vector2.ZERO
-	var id2 := _registry.spawn(rec_id, Vector2(3234.0, 3232.0), 149, 149)
+	var id2 := _registry.spawn(rec_id, PROBE_FOCUS + Vector2(0.0, 8.0), 149, 149)
 	_registry.get_actor(id2).heading = Vector2(1.0, 0.0)
-	var id3 := _registry.spawn(rec_id, Vector2(3232.0, 3234.0), 149, 149)
+	var id3 := _registry.spawn(rec_id, PROBE_FOCUS + Vector2(2.0, 0.0), 149, 149)
 	_registry.get_actor(id3).heading = Vector2(0.0, 1.0)
-	var id4 := _registry.spawn(rec_id, Vector2(3234.0, 3234.0), 149, 149)
+	var id4 := _registry.spawn(rec_id, PROBE_FOCUS + Vector2(0.0, 6.0), 149, 149)
 	_registry.get_actor(id4).heading = Vector2(1.0, 1.0).normalized()
+
+	# ids 5..16: the tie ring, stationary (heading=ZERO) so it cannot drift
+	# and the order printed below stays exact for the whole run, not just
+	# before the first tick. Spawned in exactly this order -- the order line
+	# asserts the ids came out in SPAWN order among themselves, which is what
+	# distinguishes "comparator broke the tie by id" from "comparator left
+	# heapsort's internal order showing through".
+	var tie_ring: Array[Vector2] = [
+		Vector2(5.0, 0.0), Vector2(-5.0, 0.0), Vector2(0.0, 5.0), Vector2(0.0, -5.0),
+		Vector2(3.0, 4.0), Vector2(4.0, 3.0), Vector2(-3.0, 4.0), Vector2(-4.0, 3.0),
+		Vector2(3.0, -4.0), Vector2(4.0, -3.0), Vector2(-3.0, -4.0), Vector2(-4.0, -3.0),
+	]
+	for offset: Vector2 in tie_ring:
+		var tid := _registry.spawn(rec_id, PROBE_FOCUS + offset, 149, 149)
+		_registry.get_actor(tid).heading = Vector2.ZERO
 
 	# record\t... -- before any tick runs. Placed immediately before the
 	# order (task 3) and bands (task 4) lines that land in this same slot.
@@ -750,6 +772,16 @@ func _actor_probe(n: int, route: String) -> void:
 		rec_id, RecordStore.kind_of(rec_id), RecordStore.source_of(rec_id),
 		rd.get("name", ""), rd.get("tiles", 0), rd.is_read_only(),
 		is_same(_records.def(rec_id), _records.def(rec_id))])
+
+	# order\t... -- order_by_distance's composite key (dist_sq, then id) over
+	# the whole registry, printed BEFORE any tick has moved actors 2/3/4 off
+	# their spawn offsets -- printing after even one tick would make the
+	# assertion approximate rather than exact (R10.3).
+	var order := _sim.order_by_distance(_registry, PROBE_FOCUS)
+	var order_strs: Array[String] = []
+	for id: int in order:
+		order_strs.append(str(id))
+	print("order\t%s" % ",".join(order_strs))
 
 	# 3. Exactly n ticks, driven by count, through the one real accumulator --
 	# never by frame-delta, which would make the tick count route-dependent.

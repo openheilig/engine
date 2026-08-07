@@ -90,3 +90,40 @@ func tick_once(reg: ActorRegistry, focus: Vector2) -> void:
 func _step_actor(a: ActorState) -> void:
 	a.ticks_simulated += 1
 	a.cell += a.heading * STEP_CELLS_PER_TICK
+
+
+## Simulation order over the full registry, nearest-to-`centre` first (R10.3).
+## `Array.sort_custom` is heapsort and explicitly UNSTABLE in Godot 4.7 --
+## two elements that compare equal can come out in either relative order,
+## and that order is not even guaranteed consistent between runs of the same
+## process. The comparator below ends its key in the actor id: ids are
+## unique (ActorRegistry's own guarantee -- monotonic, never reused), so no
+## two elements can ever compare equal, and heapsort's instability becomes
+## structurally UNREACHABLE rather than merely unlikely. Any future
+## simulation sort added anywhere in godot-port/world/ must end its key in
+## the actor id for the same reason -- this is the one place that reasoning
+## is spelled out; every later sort just follows the shape.
+##
+## dist_sq is compared with exact float equality, not is_equal_approx: an
+## approximate primary comparison would silently merge two genuinely
+## different distances into a tie and hand the outcome to the id, which is
+## a different ordering rule than the one specified here.
+##
+## Combat's Phase 8 target selection is this function's first real consumer
+## -- written correctly now rather than retrofitted.
+func order_by_distance(reg: ActorRegistry, centre: Vector2) -> PackedInt64Array:
+	var pairs: Array[Array] = []
+	for id: int in reg.ids():
+		var a := reg.get_actor(id)
+		pairs.append([centre.distance_squared_to(a.cell), id])
+	pairs.sort_custom(func(x: Array, y: Array) -> bool:
+		var dx: float = x[0]
+		var dy: float = y[0]
+		if dx != dy:
+			return dx < dy
+		return int(x[1]) < int(y[1]))
+	var out := PackedInt64Array()
+	out.resize(pairs.size())
+	for i in pairs.size():
+		out[i] = pairs[i][1]
+	return out
