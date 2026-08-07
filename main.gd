@@ -220,6 +220,9 @@ func _first_real_record_id() -> int:
 ## walks a real streaming route that queue_free's and rebuilds sector 50,50
 ## -- printing facts that let the survival and route-independence checks in
 ## 01-01-PLAN.md's acceptance criteria be asserted with plain grep/diff.
+## "Exactly n ticks" holds at ANY --tickhz=: the loop below drives advance()
+## with _sim.tick_dt() (the instance's own configured delta), not the class
+## constant, so tick=n regardless of the tick rate in effect.
 func _actor_probe(n: int, route: String) -> void:
 	# Set before anything else, so no frame pumped below can inject a
 	# wall-clock tick via _process's normal _advance_sim call.
@@ -309,8 +312,12 @@ func _actor_probe(n: int, route: String) -> void:
 
 	# 3. Exactly n ticks, driven by count, through the one real accumulator --
 	# never by frame-delta, which would make the tick count route-dependent.
+	# Uses _sim.tick_dt(), the INSTANCE's own configured delta (honors
+	# --tickhz=), not the class constant Sim.TICK_DT -- the latter is sized
+	# for the 30 Hz default only, so feeding it in here would silently drift
+	# the tick count away from n whenever --tickhz differs from 30.
 	for _i in n:
-		_advance_sim(Sim.TICK_DT, PROBE_FOCUS)
+		_advance_sim(_sim.tick_dt(), PROBE_FOCUS)
 
 	# 4. Walk the streaming route far enough that sector 50,50 leaves the
 	# wanted set and is queue_free'd, then re-enters it. No ticks run during

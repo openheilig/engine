@@ -16,9 +16,12 @@ extends RefCounted
 ## tick rate has been made -- the upgrade path is a retail capture through
 ## install/shim/autopilot.c. Do not read this as a measured constant. It is
 ## also the DEFAULT tick rate; per-instance tick_hz (below) is what --tickhz=
-## on main.gd actually overrides, so the class constant stays a fixed
-## reference point that callers such as the --actor-probe route can drive
-## deterministically regardless of any override in effect.
+## on main.gd actually overrides. TICK_DT is sized for that default only --
+## any caller that needs to drive advance() by an exact tick count (the
+## --actor-probe route, for instance) MUST feed in this instance's own
+## tick_dt(), not this class constant, or the delta fed to advance() and the
+## delta the accumulator drains it at will disagree the moment --tickhz
+## differs from 30, and the promised "exactly N ticks" silently breaks.
 const TICK_HZ := 30
 const TICK_DT := 1.0 / float(TICK_HZ)
 
@@ -55,7 +58,7 @@ var tick: int = 0
 var dropped: int = 0
 ## Per-instance tick rate, defaulting to TICK_HZ. main.gd's --tickhz=N
 ## overrides this via the constructor, already clamped to [1, 240] before it
-## ever reaches the division in _tick_dt() -- see main.gd's CLI parsing and
+## ever reaches the division in tick_dt() -- see main.gd's CLI parsing and
 ## threat T-01-02.
 var tick_hz: int = TICK_HZ
 var _accum: float = 0.0
@@ -67,7 +70,12 @@ func _init(hz: int = TICK_HZ) -> void:
 		push_error("Sim: radius ordering violated -- R_SIM=%.1f R_RENDER=%.1f R_LOAD=%.1f, expected R_SIM < R_RENDER < R_LOAD" % [R_SIM, R_RENDER, R_LOAD])
 
 
-func _tick_dt() -> float:
+## Public: the instance's actual per-tick delta, honoring any --tickhz=
+## override in effect. Callers that need advance() to consume an exact tick
+## count -- main.gd's --actor-probe route is the one that matters today --
+## must feed this in, not the class constant TICK_DT, which stays sized for
+## the DEFAULT tick rate only.
+func tick_dt() -> float:
 	return 1.0 / float(tick_hz)
 
 
@@ -80,7 +88,7 @@ func advance(delta: float, reg: ActorRegistry, focus: Vector2) -> int:
 	if delta == 0.0:
 		return 0
 	_accum += delta
-	var dt := _tick_dt()
+	var dt := tick_dt()
 	var ran := 0
 	while ran < MAX_CATCHUP_TICKS and _accum >= dt:
 		_accum -= dt
