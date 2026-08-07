@@ -10,6 +10,14 @@ extends SceneTree
 const SECTORS := [[49, 49], [50, 50], [51, 51], [0, 15], [14, 19], [31, 24], [99, 99]]
 const TEXTURES := [0, 1, 2, 1000, 5000, 20000]
 
+## world/ never touches the scene tree/threads; view/ never names a world
+## type or defines its own per-frame entry point -- checked, not just written.
+const LAYER_RULES := {
+	"res://world": ["Node3D", "MeshInstance3D", "add_child", "get_tree", "queue_free",
+		"SectorView", "IsoCamera", "Thread", "WorkerThreadPool", "call_deferred"],
+	"res://view": ["ActorRegistry", "ActorState", "RecordStore", "Sim.",
+		"func _process(", "func _physics_process("],
+}
 
 func _init() -> void:
 	var install := Sacred.find_install()
@@ -48,6 +56,7 @@ func _init() -> void:
 			id, img.get_width(), img.get_height(), _md5(img.get_data()),
 			Time.get_ticks_usec() - t0])
 
+	_layer_check()
 	quit(0)
 
 
@@ -62,3 +71,40 @@ func _md5(b: PackedByteArray) -> String:
 	ctx.start(HashingContext.HASH_MD5)
 	ctx.update(b)
 	return ctx.finish().hex_encode()
+
+
+## Forbidden-token scan; violations print file:line:token on stderr, last
+## stdout line is always "layer\tfiles=<n>\tviolations=<n>".
+func _layer_check() -> void:
+	var files := 0
+	var violations := 0
+	var dirs := LAYER_RULES.keys()
+	dirs.sort()
+	for dir_path: String in dirs:
+		var forbidden: Array = LAYER_RULES[dir_path]
+		var names := DirAccess.get_files_at(dir_path)
+		names.sort()
+		for name: String in names:
+			if not name.ends_with(".gd"):
+				continue
+			files += 1
+			var path := dir_path.path_join(name)
+			var lines := _strip_comments(FileAccess.get_file_as_string(path)).split("\n")
+			for i in lines.size():
+				for token: String in forbidden:
+					if token in lines[i]:
+						violations += 1
+						printerr("%s:%d:%s" % [path, i + 1, token])
+	print("layer\tfiles=%d\tviolations=%d" % [files, violations])
+
+
+## Blanks comment-only lines, truncates inline ones -- preserves line count.
+func _strip_comments(src: String) -> String:
+	var out: Array[String] = []
+	for line: String in src.split("\n"):
+		if line.strip_edges().begins_with("#"):
+			out.append("")
+			continue
+		var hash_idx := line.find("#")
+		out.append(line if hash_idx == -1 else line.substr(0, hash_idx))
+	return "\n".join(out)

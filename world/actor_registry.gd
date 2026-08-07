@@ -22,6 +22,11 @@ extends RefCounted
 ## backtrack (_stream / _add_sector); an actor parented to one of them would
 ## be destroyed with it. Registry-owned RefCounted state cannot be, because
 ## nothing here is ever a child of anything the streamer frees.
+##
+## LAYERING (01-03 task 3, godot-port/verify.gd _layer_check): this file must
+## never call Node3D, add_child, or queue_free in real code -- the three
+## tokens named here, in prose, on purpose, to prove the checker strips
+## comments rather than merely never seeing these words.
 
 const INVALID_ID := 0
 const MAX_ACTORS := 4096
