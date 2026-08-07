@@ -60,7 +60,19 @@ func _init(items: Sacred.Items, mixed: Sacred.Mixed) -> void:
 	_empty.make_read_only()
 
 
+## `source` outside [0, RECORD_SOURCE_MASK] is rejected loudly rather than
+## silently aliased into a different, in-range id by the `&` below --
+## matching the house pattern in sacred.gd (Mixed.sprite(),
+## Statics.get_object()): push_error + a safe fallback, not assert, because
+## assert() is stripped from release builds (see sim.gd's _init() radius
+## check for the same reasoning). This is a static helper reachable from
+## data-driven callers, so it cannot raise -- it warns and falls back to
+## source 0 for the offending call rather than propagating a bad index into
+## the id space.
 static func make_id(kind: int, source: int) -> int:
+	if source < 0 or source > RECORD_SOURCE_MASK:
+		push_error("RecordStore.make_id: source %d out of range [0, %d]; using 0" % [source, RECORD_SOURCE_MASK])
+		source = 0
 	return (kind << RECORD_KIND_SHIFT) | (source & RECORD_SOURCE_MASK)
 
 
