@@ -9,6 +9,9 @@ extends SceneTree
 
 const SECTORS := [[49, 49], [50, 50], [51, 51], [0, 15], [14, 19], [31, 24], [99, 99]]
 const TEXTURES := [0, 1, 2, 1000, 5000, 20000]
+## BAT.GRN, GLADIATOR.GRN, GLAD_SA5_SHOULDER.GRN -- mirrored verbatim in
+## analysis/tools/verify_ref.py's MODELS constant, 03-PATTERNS.md's sample.
+const MODELS := [1, 589, 203]
 
 ## world/ never touches the scene tree/threads; view/ never names a world
 ## type or defines its own per-frame entry point -- checked, not just written.
@@ -29,13 +32,15 @@ func _init() -> void:
 
 	var tiles_pak := Sacred.Pak.new(install.path_join("pak/tiles.pak"))
 	var tex_pak := Sacred.Pak.new(install.path_join("pak/texture.pak"))
+	var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 	var world := Sacred.World.new(install.path_join("world"))
-	if not (tiles_pak.is_open() and tex_pak.is_open() and world.is_open()):
+	if not (tiles_pak.is_open() and tex_pak.is_open() and models_pak.is_open() and world.is_open()):
 		quit(1)
 		return
 
 	_pak_facts("tiles.pak", tiles_pak)
 	_pak_facts("texture.pak", tex_pak)
+	_pak_facts("models.pak", models_pak)
 	print("world\tcount=%d\tgrid=%dx%d" % [world.count(), world.size.x, world.size.y])
 
 	for s: Array in SECTORS:
@@ -55,6 +60,30 @@ func _init() -> void:
 		print("texture\t%d\t%dx%d\tmd5=%s\t%d us" % [
 			id, img.get_width(), img.get_height(), _md5(img.get_data()),
 			Time.get_ticks_usec() - t0])
+
+	# Tag-walk layer only -- kind, derived length, tag count, triples md5.
+	# Never a hash of decoded mesh data (03-04-PLAN.md, Pitfall 8). The
+	# triples md5 is the simple tag,offset,length format Plan 03 specified
+	# (analysis/tools/grn_tagwalk.py's triples_md5 docstring), not
+	# grnwalk.gd's own richer _triples_md5 (which also hashes each object's
+	# H1-declared length) -- that richer hash is grnwalk.gd's own diagnostic
+	# tool and is left untouched; this fact line is new code with its own,
+	# simpler, plan-specified definition. Sacred.Models.walk() never appends
+	# the terminator tag itself as a triple, matching this line's Python
+	# counterpart, which filters the terminator out before hashing.
+	var models := Sacred.Models.new(models_pak)
+	for idx: int in MODELS:
+		if models.magic_ok(idx):
+			var triples := models.walk(idx)
+			var text := ""
+			for t: Dictionary in triples:
+				text += "%d,%d,%d\n" % [t["tag"], t["off"], t["len"]]
+			print("models\t%d\tname=%s\tkind=%d\tlen=%d\ttags=%d\tmd5=%s" % [
+				idx, models.entry_name(idx), models.kind_of(idx), models.true_length(idx),
+				triples.size(), _md5(text.to_utf8_buffer())])
+		else:
+			print("models\t%d\tname=%s\tkind=%d\tlen=%d\ttags=0\tmd5=d41d8cd98f00b204e9800998ecf8427e" % [
+				idx, models.entry_name(idx), models.kind_of(idx), models.true_length(idx)])
 
 	_layer_check()
 	quit(0)
