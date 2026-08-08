@@ -652,7 +652,35 @@ class Models extends RefCounted:
 		0xCA5E0102: 20,     # copyright
 		0xCA5E0103: 20,     # object
 		0xCA5E0101: 36,     # final
+		# Fixed 12-byte leaf families (4-byte tag + 8-byte payload), confirmed
+		# by hex walk (03-RESEARCH.md "Chunk stream structure"): delta to the
+		# next tag is exactly 12 for every one of these, no exceptions seen.
+		0xCA5E0200: 12,
+		0xCA5E1000: 12,
+		0xCA5E1001: 12,
+		0xCA5E1002: 12,
+		0xCA5E1003: 12,
+		0xCA5E0F00: 12,
+		0xCA5E0F01: 12,
+		0xCA5E0F02: 12,
+		0xCA5E0F03: 12,
+		0xCA5E0F04: 12,
+		0xCA5E0F05: 12,
+		0xCA5E0F06: 12,
 	}
+	## Hard cap on triples emitted per entry (all objects combined). Research
+	## counted 537 repetitions of the 0F01/0F02/0F06 family alone in
+	## GLADIATOR.GRN's single object; sized generously above that so a
+	## multi-object file has headroom without the cap ever being the reason
+	## a well-formed entry's walk is cut short.
+	const WALK_BUDGET := 4096
+	## Byte offset, from an object's 0xCA5E0000 root chunk start, of the H1
+	## candidate object-byte-length field. 03-RESEARCH.md's prose calls this
+	## field "+0x14"; a raw census (03-01-SUMMARY.md, this task) found it one
+	## u32 word earlier, at +0x10 -- root_off + 0x14 reads 0 in every sample
+	## checked, while root_off + 0x10 exactly equals true_length(entry) -
+	## magic_offset(entry) for BAT.GRN, GLAD_SA5_SHOULDER.GRN and GLADIATOR.GRN.
+	const H1_LEN_OFF := 0x10
 
 	var _pak: Sacred.Pak
 
@@ -735,28 +763,117 @@ class Models extends RefCounted:
 			return false
 		return r.decode_u32(0) == MAGIC
 
-	## (tag, offset, length) triples from the entry's root tag, entry-relative
-	## offsets, advancing strictly by each tag's declared size from
-	## TAG_SIZES -- never by scanning for the next tag-shaped byte pattern.
-	## Stops (returning what was collected so far) on the terminator, on a
-	## tag with no TAG_SIZES entry, or on a read that would pass the buffer
-	## end. Empty for an entry that fails magic_ok().
+	## Populated by the most recent walk() call: {h1_confirmed: bool,
+	## objects: int, h1_bytes: int, object_lengths: Array[int], consumed: int,
+	## stop_reason: String, stop_tag: int, stop_off: int}. object_lengths
+	## holds each object's own H1-declared byte length, in emission order --
+	## the per-model-varying declared fact grnwalk.gd folds into the triples
+	## md5 so entries with an identical tag-structure prefix still hash
+	## differently (03-01-SUMMARY.md, Task 2, discrimination requirement).
+	## Single-threaded use only -- Models carries no concurrency contract, so
+	## do not call walk() for two entries concurrently and expect both
+	## results to be held at once.
+	var last_walk_meta: Dictionary = {}
+
+	## (tag, offset, length) triples across every top-level object in the
+	## entry, entry-relative offsets, advancing strictly by each tag's
+	## declared size from TAG_SIZES -- never by scanning for the next
+	## tag-shaped byte pattern. Empty for an entry that fails magic_ok().
+	##
+	## Within one object, the inner walk stops on the terminator, on a tag
+	## absent from TAG_SIZES (recorded in last_walk_meta as
+	## stop_reason=unknown-tag with stop_tag/stop_off), on a read that would
+	## pass the buffer end, or on WALK_BUDGET.
+	##
+	## H1 (stated before measuring, 03-01-PLAN.md Task 2): the u32 at +0x14
+	## inside an object's 0xCA5E0000 root chunk is that object's byte length,
+	## measured from the root chunk's own start.
+	## [Corrected during Task 2 execution] 03-RESEARCH.md's "+0x14" is one u32
+	## word off: a raw census of the root chunk's own bytes (see 03-01-SUMMARY.md)
+	## found the size-like field at root_off + 0x10, not root_off + 0x14 (which
+	## reads 0 in every sample). Confirmed against three independent entries by
+	## checking true_length(entry) - magic_offset(entry): BAT.GRN 35220, GLAD_SA5_
+	## SHOULDER.GRN 38188, GLADIATOR.GRN 185584 -- each an exact match to the u32
+	## at root_off + 0x10 and nowhere else in the root chunk. The code below uses
+	## the measured offset (+0x10); the doc comment keeps "+0x14" in its own name
+	## only because that is what H1's hypothesis statement (and the plan text) call
+	## it -- the constant itself is not re-literal'd, see H1_LEN_OFF below.
+	## On a clean terminator this
+	## is tested by jumping root_off + h1_len and checking whether MAGIC
+	## lands there (another object follows, so the walk continues into it)
+	## or the jump lands exactly on true_length(entry) (this was the last
+	## object, and the whole entry is now accounted for). Either outcome
+	## keeps last_walk_meta.h1_confirmed true; any other outcome -- the
+	## predicted position is neither the next object's root nor the entry's
+	## end -- refutes H1 for this entry and stops rather than guessing a
+	## replacement length.
 	func walk(entry: int) -> Array[Dictionary]:
 		var triples: Array[Dictionary] = []
+		var object_lengths: Array[int] = []
+		last_walk_meta = {
+			"h1_confirmed": false, "objects": 0, "h1_bytes": 0,
+			"object_lengths": object_lengths, "consumed": 0,
+			"stop_reason": "", "stop_tag": 0, "stop_off": 0,
+		}
 		if not magic_ok(entry):
 			return triples
 		var length := true_length(entry)
 		var buf := _pak.read_at(_pak.entry_offset(entry), length)
-		var off := magic_offset(entry)
-		while off + 4 <= buf.size():
-			var tag := buf.decode_u32(off)
-			if tag == TERMINATOR:
+		var pos := magic_offset(entry)
+		last_walk_meta["consumed"] = pos
+		var objects := 0
+		var h1_total := 0
+		var confirmed := true
+		while pos + 4 <= buf.size() and buf.decode_u32(pos) == MAGIC:
+			var root_off := pos
+			var h1_len := 0
+			if root_off + H1_LEN_OFF + 4 <= buf.size():
+				h1_len = buf.decode_u32(root_off + H1_LEN_OFF)
+			var terminated := false
+			while pos + 4 <= buf.size():
+				if triples.size() >= WALK_BUDGET:
+					last_walk_meta["stop_reason"] = "budget"
+					confirmed = false
+					break
+				var tag := buf.decode_u32(pos)
+				if tag == TERMINATOR:
+					terminated = true
+					break
+				if not TAG_SIZES.has(tag):
+					last_walk_meta["stop_reason"] = "unknown-tag"
+					last_walk_meta["stop_tag"] = tag
+					last_walk_meta["stop_off"] = pos
+					confirmed = false
+					push_error("Sacred.Models: entry %d unknown tag 0x%08x at offset %d" % [entry, tag, pos])
+					break
+				var size: int = TAG_SIZES[tag]
+				if pos + size > buf.size():
+					last_walk_meta["stop_reason"] = "truncated"
+					confirmed = false
+					break
+				triples.append({"tag": tag, "off": pos, "len": size})
+				pos += size
+			if not terminated:
+				last_walk_meta["consumed"] = pos
 				break
-			if not TAG_SIZES.has(tag):
+			objects += 1
+			h1_total += h1_len
+			object_lengths.append(h1_len)
+			var predicted := root_off + h1_len
+			if predicted == length:
+				last_walk_meta["consumed"] = predicted
+				last_walk_meta["stop_reason"] = "end-of-entry"
 				break
-			var size: int = TAG_SIZES[tag]
-			if off + size > buf.size():
-				break
-			triples.append({"tag": tag, "off": off, "len": size})
-			off += size
+			if predicted + 4 <= buf.size() and buf.decode_u32(predicted) == MAGIC:
+				pos = predicted
+				last_walk_meta["consumed"] = predicted
+				continue
+			confirmed = false
+			last_walk_meta["stop_reason"] = "h1-mismatch"
+			last_walk_meta["stop_off"] = predicted
+			last_walk_meta["consumed"] = pos  # last verified position; the failed guess is not counted as consumed
+			break
+		last_walk_meta["h1_confirmed"] = confirmed and objects > 0
+		last_walk_meta["objects"] = objects
+		last_walk_meta["h1_bytes"] = h1_total
 		return triples
