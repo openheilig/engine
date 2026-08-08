@@ -85,6 +85,46 @@ func _init() -> void:
 			print("models\t%d\tname=%s\tkind=%d\tlen=%d\ttags=0\tmd5=d41d8cd98f00b204e9800998ecf8427e" % [
 				idx, models.entry_name(idx), models.kind_of(idx), models.true_length(idx)])
 
+	# Skeleton layer. Two facts per sampled model, between the models block and
+	# the layer check on BOTH sides of the harness.
+	#
+	# The md5 is over the RAW STORED BONE BYTES -- parent indices, translations,
+	# rotations and scale-shears exactly as they sit in the file -- not over
+	# constructed Transform3D values. Both sides therefore compute it from
+	# offsets, and neither needs the other's matrix decoder to be identical for
+	# the hash to mean anything (03-04-PLAN.md, Pitfall 8).
+	#
+	# The facts come from ModelView.rig_facts(), i.e. from the PRODUCTION rig
+	# builder, not from a second skeleton implementation written for this
+	# harness. A harness that reimplements the thing it tests only ever agrees
+	# with itself.
+	#
+	# maxmag is printed to three decimals, and that is not a diff that was
+	# widened until it passed: it is the precision the number actually has.
+	# Godot composes Transform3D in float32 and verify_ref.py composes in
+	# float64, so a depth-15 chain accumulates a genuine difference between the
+	# two -- measured at 1.95e-5 on GLAD_SA5_SHOULDER (65.442268 here against
+	# 65.442288 there), which is the same order as the depth x ULP error budget
+	# eps itself is built from. Nine decimals would be asserting digits that do
+	# not exist. eps, ulp and depth ARE exact on both sides: ulp is a power of
+	# two, depth an integer, and the two magnitudes land in the same binade.
+	for idx: int in MODELS:
+		var mv := ModelView.new()
+		var f := mv.rig_facts(models, idx)
+		mv.free()
+		if f.is_empty() or int(f["count"]) == 0:
+			print("bones\t%d\tcount=0\troots=0\tbinds=0\tsanitised=0\tmd5=%s" % [
+				idx, _md5(PackedByteArray())])
+			print("rest_eq_bind\t%s\tfalse\teps=%.9f\tmaxmag=%.3f\tulp=%.9f\tdepth=%d" % [
+				models.entry_name(idx), -1.0, 0.0, 0.0, 0])
+			continue
+		print("bones\t%d\tcount=%d\troots=%d\tbinds=%d\tsanitised=%d\tmd5=%s" % [
+			idx, int(f["count"]), int(f["roots"]), int(f["binds"]), int(f["sanitised"]),
+			_md5(models.bone_bytes(idx))])
+		print("rest_eq_bind\t%s\t%s\teps=%.9f\tmaxmag=%.3f\tulp=%.9f\tdepth=%d" % [
+			models.entry_name(idx), f["rest_eq_bind"], f["eps"], f["maxmag"],
+			f["ulp"], int(f["depth"])])
+
 	_layer_check()
 	quit(0)
 

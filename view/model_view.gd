@@ -51,10 +51,37 @@ var bone_count := 0
 var bone_roots := 0
 var bind_count := 0
 var bone_sanitised := 0
+## Did every bone's Skeleton3D global rest come out equal to its composed bind
+## transform, to within the DERIVED tolerance below?
+##
+## WHAT THIS PROVES: the two sides are computed by different code over
+## different orderings. `got` is Godot's own accumulation inside Skeleton3D,
+## walking Skeleton3D parent links in Skeleton3D index order; `want` is
+## Sacred.Models.bind_poses()'s own chain walk in Granny file order. They agree
+## only if the topological sort and the Granny-to-Skeleton3D map are both
+## right, which is exactly the silent-deformation class of bug: an index-space
+## mix-up still renders, it just renders a different creature.
+##
+## WHAT THIS DOES NOT PROVE: that the 68-byte bone record was decoded
+## correctly. Both sides read the same stored numbers, so a wrong-but-
+## consistent decode satisfies both. The format stores no independent bind
+## matrix to check against (see Sacred.Models.bind_poses()), so no stronger
+## comparison is available from the file alone. Stated here rather than left
+## for a reader to assume the check is worth more than it is.
+var rest_eq_bind := false
+## Never a written-in constant: derived by Sacred.Models.bind_poses() from the
+## measured bind-matrix magnitude and the file's own chain depth.
+var rest_bind_eps := -1.0
+var rest_bind_maxmag := 0.0
+var rest_bind_ulp := 0.0
+var rest_bind_depth := 0
+var rest_bind_delta := 0.0
 
 var _settled := false
 var _skeleton: Skeleton3D = null
 var _skin: Skin = null
+var _weights: Array[Dictionary] = []
+var _local_to_bind: Array[PackedInt32Array] = []
 
 
 ## Builds the mesh for `entry` and returns true on success. On failure the
@@ -88,7 +115,15 @@ func setup(models: Sacred.Models, entry: int) -> bool:
 
 	# Must precede add_surface_from_arrays: ARRAY_BONES/ARRAY_WEIGHTS are
 	# surface arrays, not something attachable afterwards.
-	if not _build_skin(models, entry, m, arr):
+	if not _build_rig(models, entry):
+		return false
+	# A rig whose rest does not equal its bind is refused HERE rather than
+	# inside _build_rig, so the harness can still report the false verdict while
+	# the renderer still refuses to draw it. Rendering it anyway would produce a
+	# deformed model that looks like a plausible creature.
+	if _skeleton != null and not rest_eq_bind:
+		return false
+	if not _fill_weights(models, entry, m, arr):
 		return false
 
 	var mesh := ArrayMesh.new()
@@ -123,12 +158,37 @@ func setup(models: Sacred.Models, entry: int) -> bool:
 	return true
 
 
-## Builds the Skeleton3D and Skin for `entry` and fills `arr`'s ARRAY_BONES /
-## ARRAY_WEIGHTS slots. Returns true on success, INCLUDING the case where the
-## entry carries no skeleton at all -- an unskinned model is not a malformed
-## one, and it renders exactly as it did before this existed. Returns false
-## only when a skeleton is present but unusable, which is loud on purpose: a
-## silently-unskinned render of a skinned model looks entirely plausible.
+## Rig facts for `entry` without building a mesh, a camera or a light: the same
+## Skeleton3D and Skin the render uses, checked the same way.
+##
+## Exists so verify.gd's parity fact lines come from the PRODUCTION rig builder
+## rather than a second implementation written for the harness -- a harness
+## that reimplements the thing it tests can only ever agree with itself.
+## Returns an empty Dictionary if the rig could not be built.
+func rig_facts(models: Sacred.Models, entry: int) -> Dictionary:
+	if not _build_rig(models, entry):
+		return {}
+	var out := {
+		"count": bone_count, "roots": bone_roots, "binds": bind_count,
+		"sanitised": bone_sanitised, "rest_eq_bind": rest_eq_bind,
+		"eps": rest_bind_eps, "maxmag": rest_bind_maxmag,
+		"ulp": rest_bind_ulp, "depth": rest_bind_depth, "delta": rest_bind_delta,
+	}
+	# The Skeleton3D was never added to a tree, so nothing else will free it.
+	if _skeleton != null:
+		_skeleton.free()
+		_skeleton = null
+		_skin = null
+	return out
+
+
+## Builds the Skeleton3D and the Skin for `entry`, checks rest against bind, and
+## populates the bone_* / rest_* fields. Returns true on success, INCLUDING the
+## case where the entry carries no skeleton at all -- an unskinned model is not
+## a malformed one, and it renders exactly as it did before this existed.
+## Returns false only when a skeleton is present but unusable, which is loud on
+## purpose: a silently-unskinned render of a skinned model looks entirely
+## plausible.
 ##
 ## THREE INDEX SPACES, and none of them is assumed equal to another:
 ##
@@ -148,7 +208,7 @@ func setup(models: Sacred.Models, entry: int) -> bool:
 ## when every bone happens to be bound in skeleton order -- which is exactly
 ## what does NOT happen here, since binds are added in mesh-local order and
 ## only for bones something is actually weighted to.
-func _build_skin(models: Sacred.Models, entry: int, m: Dictionary, arr: Array) -> bool:
+func _build_rig(models: Sacred.Models, entry: int) -> bool:
 	var bl := models.bones(entry)
 	if bl.is_empty():
 		return true
@@ -231,14 +291,13 @@ func _build_skin(models: Sacred.Models, entry: int, m: Dictionary, arr: Array) -
 	var skel_to_bind := PackedInt32Array()
 	skel_to_bind.resize(n)
 	skel_to_bind.fill(-1)
-	var weights := models.mesh_weights(entry)
-	if weights.size() != int(m["meshes"]):
-		push_error("ModelView: entry %d has %d meshes but %d weight blocks" % [
-			entry, int(m["meshes"]), weights.size()])
+	_weights = models.mesh_weights(entry)
+	if _weights.is_empty():
+		push_error("ModelView: entry %d has bones but no readable weight blocks" % entry)
 		return false
 	# Space 4 -> space 3, one map per Mesh node.
-	var local_to_bind: Array[PackedInt32Array] = []
-	for w: Dictionary in weights:
+	_local_to_bind = []
+	for w: Dictionary in _weights:
 		var bone_map: PackedInt32Array = w["bone_map"]
 		var lt := PackedInt32Array()
 		lt.resize(bone_map.size())
@@ -252,12 +311,50 @@ func _build_skin(models: Sacred.Models, entry: int, m: Dictionary, arr: Array) -
 				# own space, so the bone's pose can then put it back.
 				_skin.add_bind(s, binds[g].affine_inverse())
 			lt[l] = skel_to_bind[s]
-		local_to_bind.append(lt)
+		_local_to_bind.append(lt)
 	bind_count = _skin.get_bind_count()
 	if bind_count == 0:
 		push_error("ModelView: entry %d has bones but nothing is weighted to any of them" % entry)
 		return false
 
+	# The rest-equals-bind assertion. See rest_eq_bind's declaration for what it
+	# does and does not prove.
+	rest_bind_eps = models.REST_BIND_EPS
+	rest_bind_maxmag = models.last_bind_maxmag
+	rest_bind_ulp = models.last_bind_ulp
+	rest_bind_depth = models.last_bind_depth
+	if rest_bind_eps < 0.0:
+		push_error("ModelView: entry %d produced no derived tolerance -- refusing to compare" % entry)
+		return false
+	rest_bind_delta = 0.0
+	for g in n:
+		var got := _skeleton.get_bone_global_rest(granny_to_skel[g])
+		var want: Transform3D = binds[g]
+		for col in 3:
+			var d := got.basis[col] - want.basis[col]
+			rest_bind_delta = maxf(rest_bind_delta, maxf(absf(d.x), maxf(absf(d.y), absf(d.z))))
+		var do_ := got.origin - want.origin
+		rest_bind_delta = maxf(rest_bind_delta, maxf(absf(do_.x), maxf(absf(do_.y), absf(do_.z))))
+	rest_eq_bind = rest_bind_delta < rest_bind_eps
+	if not rest_eq_bind:
+		# Recorded here, refused in setup(). A failed assertion must still be
+		# REPORTABLE -- verify.gd's fact line needs to print `false`, and a
+		# builder that bailed here would print "no skeleton" instead, which is a
+		# different claim about the file.
+		push_error("ModelView: entry %d rest does not equal bind -- max component delta %.9f against eps %.9f (maxmag %.3f)" % [
+			entry, rest_bind_delta, rest_bind_eps, rest_bind_maxmag])
+	return true
+
+
+## Fills `arr`'s ARRAY_BONES / ARRAY_WEIGHTS slots from the maps _build_rig
+## produced. No-op returning true when the entry has no skeleton.
+func _fill_weights(models: Sacred.Models, entry: int, m: Dictionary, arr: Array) -> bool:
+	if _skeleton == null:
+		return true
+	if _weights.size() != int(m["meshes"]):
+		push_error("ModelView: entry %d has %d meshes but %d weight blocks" % [
+			entry, int(m["meshes"]), _weights.size()])
+		return false
 	var vsrc: PackedInt32Array = m["vertex_source"]
 	var vmesh: PackedInt32Array = m["vertex_mesh"]
 	if vsrc.size() != vertex_count or vmesh.size() != vertex_count:
@@ -272,14 +369,14 @@ func _build_skin(models: Sacred.Models, entry: int, m: Dictionary, arr: Array) -
 	for v in vertex_count:
 		var mi := vmesh[v]
 		var src := vsrc[v]
-		var w: Dictionary = weights[mi]
+		var w: Dictionary = _weights[mi]
 		if src < 0 or src >= int(w["count"]):
 			push_error("ModelView: entry %d vertex %d came from source position %d, outside mesh %d's %d weight records" % [
 				entry, v, src, mi, int(w["count"])])
 			return false
 		var wb: PackedInt32Array = w["bones"]
 		var ww: PackedFloat32Array = w["weights"]
-		var lt: PackedInt32Array = local_to_bind[mi]
+		var lt: PackedInt32Array = _local_to_bind[mi]
 		for s in slots:
 			var l := wb[src * slots + s]
 			if l < 0 or l >= lt.size():
