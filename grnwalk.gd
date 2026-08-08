@@ -111,6 +111,15 @@ func _dump(models: Sacred.Models, idx: int) -> void:
 ## be found by elimination across entries of different true_length, per H1's
 ## refutation path (03-RESEARCH.md "Chunk stream structure", Assumption A3).
 ## Silently does nothing for an entry that fails magic_ok().
+##
+## Plan 05 Task 1 extension: also dumps the shape of the untagged BULK region
+## -- everything after the last object's terminator and before the entry's
+## own end -- since that region is where the mesh geometry must live (the
+## header/leaf chunks above are fixed-size and too small to hold it). Prints
+## one `bulk` summary line (region start/end, byte length) and one
+## `bulkfloat`/`bulkrun` line per stated hypothesis's raw measurement, so the
+## hypotheses below can be verified or refuted by a human reading the output,
+## not asserted from code that already assumes the answer.
 func _census(pak: Sacred.Pak, models: Sacred.Models, idx: int) -> void:
 	var triples := models.walk(idx)
 	for t: Dictionary in triples:
@@ -123,6 +132,49 @@ func _census(pak: Sacred.Pak, models: Sacred.Models, idx: int) -> void:
 				break
 			print("census\t%d\t%d\t%d" % [idx, word, buf.decode_u32(0)])
 			word += 4
+
+	if triples.is_empty():
+		return
+	var last: Dictionary = triples[triples.size() - 1]
+	var header_end: int = int(last["off"]) + int(last["len"])   # start of the terminator tag
+	var bulk_start := header_end + 4                             # skip the 4-byte terminator itself
+	var true_len := models.true_length(idx)
+	if bulk_start >= true_len:
+		print("bulk\t%d\tstart=%d\tend=%d\tlen=0" % [idx, bulk_start, true_len])
+		return
+	var bulk_len := true_len - bulk_start
+	print("bulk\t%d\tstart=%d\tend=%d\tlen=%d" % [idx, bulk_start, true_len, bulk_len])
+
+	var buf := pak.read_at(pak.entry_offset(idx) + bulk_start, bulk_len)
+
+	# Hypothesis F1 (stated before measuring): a plausible model-space float32
+	# magnitude sits in [1e-6, 1e4) or is exactly 0.0 -- refuted for a given
+	# alignment if the count of words in-band is small relative to bulk_len/4,
+	# since real per-vertex data (positions/normals/UVs, all small numbers)
+	# should dominate a correctly-aligned float stream.
+	var float_words := bulk_len / 4
+	var in_band := 0
+	for w in float_words:
+		var f := buf.decode_float(w * 4)
+		if f == 0.0 or (absf(f) >= 1e-6 and absf(f) < 1e4):
+			in_band += 1
+	print("bulkfloat\t%d\twords=%d\tin_band=%d" % [idx, float_words, in_band])
+
+	# Hypothesis I1/I2 (stated before measuring): if the tail of the bulk
+	# region is a triangle index list, u16 runs (or u32 runs) with every value
+	# below some candidate vertex count V should exist. Rather than guess V,
+	# report the max u16 and max u32 value across the whole region so a human
+	# can compare it against whatever vertex count the leaf-chunk census (or a
+	# later small-leading-header read) turns up.
+	var u16_words := bulk_len / 2
+	var max_u16 := 0
+	for w in u16_words:
+		max_u16 = maxi(max_u16, buf.decode_u16(w * 2))
+	var max_u32 := 0
+	for w in float_words:
+		max_u32 = maxi(max_u32, buf.decode_u32(w * 4))
+	print("bulkrun\t%d\tu16_words=%d\tmax_u16=%d\tu32_words=%d\tmax_u32=%d" % [
+		idx, u16_words, max_u16, float_words, max_u32])
 
 
 ## Sweeps every entry of models.pak in ascending index order and prints a
