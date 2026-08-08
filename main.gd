@@ -97,6 +97,13 @@ func _ready() -> void:
 			var p := a.trim_prefix("--sortcube=").split(",")
 			if p.size() == 2:
 				sortcube = Vector2i(int(p[0]), int(p[1]))
+	# Single-model mode. NAME is only ever looked up in the pak's own name
+	# table by Models.index_of -- it is never joined into a path, and never
+	# opened as a file.
+	var grn_name := ""
+	for a in argv:
+		if a.begins_with("--grn="):
+			grn_name = a.trim_prefix("--grn=")
 	for a in argv:
 		if a.begins_with("--tickhz="):
 			_tick_hz = clampi(int(a.trim_prefix("--tickhz=")), 1, 240)
@@ -121,6 +128,10 @@ func _ready() -> void:
 	print("  sim\ttick %d Hz\tr_sim %.0f\tr_render %.0f\tr_load %.0f\tordered %s" % [
 		_tick_hz, Sim.R_SIM, Sim.R_RENDER, Sim.R_LOAD,
 		Sim.R_SIM < Sim.R_RENDER and Sim.R_RENDER < Sim.R_LOAD])
+
+	if grn_name != "":
+		await _show_model(install, grn_name)
+		return
 
 	_cam = IsoCamera.new()
 	_cam.cell_limit = Vector2(world.size) * SECT
@@ -375,6 +386,41 @@ func _actor_probe(n: int, route: String) -> void:
 	get_tree().quit()
 
 
+## --grn=NAME renders one Granny model from pak/models.pak instead of the
+## sector streamer, so a single command turns retail bytes into a picture.
+## Builds no SectorView at all, which is what _await_settled's no-view guard
+## below exists to accommodate.
+##
+## NAME is resolved through Models.index_of against the pak's own 64-byte
+## name fields. It never reaches the filesystem: no path_join, no
+## FileAccess.open, no use of the trimmed argument as a path. An unresolvable
+## name is fatal and loud -- rendering nothing while exiting 0 is the failure
+## mode that makes a broken capture look like a working one.
+func _show_model(install: String, name: String) -> void:
+	var pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
+	if not pak.is_open():
+		printerr("grn\tcannot open pak/models.pak under %s" % install)
+		get_tree().quit(1)
+		return
+	var models := Sacred.Models.new(pak)
+	var idx := models.index_of(name)
+	if idx < 0:
+		printerr("grn\tno model named %s in pak/models.pak (%d entries)" % [name, models.count()])
+		get_tree().quit(1)
+		return
+	var view := ModelView.new()
+	view.name = "ModelView"
+	if not view.setup(models, idx):
+		printerr("grn\t%s (index %d) has no decodable mesh" % [models.entry_name(idx), idx])
+		get_tree().quit(1)
+		return
+	add_child(view)
+	print("grn\tindex %d\tname %s\tverts %d\ttris %d\tbasis %s" % [
+		idx, models.entry_name(idx), view.vertex_count, view.triangle_count,
+		"located" if view.basis_located else "unlocated"])
+	await _maybe_screenshot()
+
+
 ## Waits for the streamer to settle, so a measurement/screenshot reflects a
 ## finished view rather than whatever one frame of loading happened to
 ## produce. Shared by every --shot=/--drawcalls consumer below -- a second,
@@ -383,6 +429,16 @@ func _actor_probe(n: int, route: String) -> void:
 ## await (the caller must not touch `self`/`_view` after that), true
 ## otherwise.
 func _await_settled() -> bool:
+	# --grn= builds no SectorView, so there is nothing to poll; two presented
+	# frames are enough for the capture. The streaming path below is reached
+	# unchanged whenever a view exists, so its behaviour and timing are
+	# untouched by this guard.
+	if _view == null:
+		await RenderingServer.frame_post_draw
+		if not is_instance_valid(self):
+			return false
+		await RenderingServer.frame_post_draw
+		return is_instance_valid(self)
 	for _i in 600:
 		await RenderingServer.frame_post_draw
 		# The node can be freed while a coroutine is parked on an await.
