@@ -52,6 +52,8 @@ func _init() -> void:
 	var do_corpus := false
 	var has_falsify := false
 	var falsify_offset := 0
+	var has_meshdump := false
+	var meshdump_index := -1
 	for a in argv:
 		if a.begins_with("--grn-index="):
 			grn_index = int(a.trim_prefix("--grn-index="))
@@ -62,9 +64,12 @@ func _init() -> void:
 		elif a.begins_with("--falsify="):
 			has_falsify = true
 			falsify_offset = int(a.trim_prefix("--falsify="))
+		elif a.begins_with("--meshdump="):
+			has_meshdump = true
+			meshdump_index = int(a.trim_prefix("--meshdump="))
 
-	if grn_index < 0 and census_index < 0 and not do_corpus and not has_falsify:
-		printerr("usage: grnwalk.gd -- --grn-index=N | --census=N | --corpus | --falsify=N")
+	if grn_index < 0 and census_index < 0 and not do_corpus and not has_falsify and not has_meshdump:
+		printerr("usage: grnwalk.gd -- --grn-index=N | --census=N | --meshdump=N | --corpus | --falsify=N")
 		quit(1)
 		return
 
@@ -80,7 +85,30 @@ func _init() -> void:
 		_census(pak, models, census_index)
 	if do_corpus or has_falsify:
 		_corpus(pak, models, falsify_offset, has_falsify)
+	if has_meshdump:
+		_meshdump(models, meshdump_index)
 	quit(0)
+
+
+## Geometry report for one entry (Plan 05). Always exits 0, including for an
+## entry with no decodable mesh -- a malformed entry is a fact to print, not a
+## crash, and index 0 (INVALID_MODEL) and 1572 (INVALID_MOTION) are the
+## standing proof that the reject path is reached by the reader's own checks.
+func _meshdump(models: Sacred.Models, idx: int) -> void:
+	var name := models.entry_name(idx)
+	var basis := models.coordinate_basis(idx)
+	var basis_status := "located" if models.last_basis_located else "unlocated"
+	var arrays := models.mesh_arrays(idx)
+	if arrays.is_empty():
+		print("meshdump\t%d\tname=%s\tok=false\treason=no-decodable-mesh\tverts=0\ttris=0\tbasis=%s" % [
+			idx, name, basis_status])
+		return
+	var indices: PackedInt32Array = arrays["indices"]
+	print("meshdump\t%d\tname=%s\tok=true\tverts=%d\ttris=%d\tindices=%d\tidx_max=%d\tmeshes=%d\tsrc_pos=%d\tsrc_nrm=%d\tuvs=%d\tbasis=%s\tbasis_row0=(%f,%f,%f)" % [
+		idx, name, arrays["vertex_count"], arrays["triangle_count"], indices.size(),
+		arrays["index_max"], arrays["meshes"], arrays["source_positions"],
+		arrays["source_normals"], (arrays["uvs"] as PackedVector2Array).size(),
+		basis_status, basis.x.x, basis.x.y, basis.x.z])
 
 
 func _dump(models: Sacred.Models, idx: int) -> void:

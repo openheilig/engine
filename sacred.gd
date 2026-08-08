@@ -877,3 +877,283 @@ class Models extends RefCounted:
 		last_walk_meta["objects"] = objects
 		last_walk_meta["h1_bytes"] = h1_total
 		return triples
+
+	# ---------------------------------------------------------------------
+	# Geometry decode (Plan 05).
+	#
+	# CORRECTION to every earlier document that calls the post-terminator
+	# region "the untagged bulk region": it is not untagged. It opens with a
+	# flat node directory, and every node carries a 0xCA5E____ tag -- the same
+	# tag space the chunk stream uses. Nothing below scans for a byte pattern;
+	# geometry is found by tag through that directory.
+	#
+	#   SECTION_OFF_MESH + 0                    u32 numNodes
+	#   SECTION_OFF_MESH + DIR_OFF + j*12       {u32 tag, u32 rel, u32 children}
+	#   a node's payload starts at SECTION_OFF_MESH + rel
+	#
+	# SECTION_OFF_MESH was solved against the oracle
+	# (analysis/tools/granny_oracle -> granny2 2.7.0.30, which reports each GR2
+	# mesh's first vertex), not guessed. For GLADIATOR.GRN the oracle's three
+	# first-vertex float triples -- (0.913,-0.150,68.470), (-0.916,2.864,69.745)
+	# and (-4.380,-0.136,38.286) -- each occur exactly ONCE in the entry's
+	# 186842 bytes, at 22066, 99622 and 124734. The three MeshVertices nodes
+	# declare rel 20432, 97988 and 123100. The differences are 1634, 1634 and
+	# 1634: one base, three independent confirmations, on a test that could
+	# have disagreed three ways and did not.
+	#
+	# Two index spaces, one Godot index space. A MeshTriangles record is 24
+	# bytes of six int32 {a,b,c, na,nb,nc}: three POSITION indices then three
+	# NORMAL indices. Godot's add_surface_from_arrays takes a single index
+	# space, so mesh_arrays() de-interleaves -- each distinct (position,normal)
+	# pair becomes one Godot vertex. Face counts are not stored in the node;
+	# they are derived from the gap to the next node with a strictly larger
+	# rel, and that derivation is what the oracle check below validates.
+	const SECTION_OFF_MESH := 1634
+	## Byte offset of the directory from SECTION_OFF_MESH; numNodes is the u32
+	## at SECTION_OFF_MESH + 0.
+	const DIR_OFF := 16
+	const NODE_STRIDE := 12
+	## Ceiling on the declared node count, applied before the count is used to
+	## size anything -- the same posture Mixed.sprite() takes with its declared
+	## tile count. GLADIATOR.GRN, the largest entry sampled, declares 1271.
+	const MAX_NODES := 1 << 20
+	const TAG_MESH := 0xCA5E0601
+	const TAG_MESH_VERTICES := 0xCA5E0801
+	const TAG_MESH_NORMALS := 0xCA5E0802
+	const TAG_MESH_TRIANGLES := 0xCA5E0901
+	## 3x float32 per position and per normal; 6x int32 per face.
+	const VEC3_STRIDE := 12
+	const TRI_STRIDE := 24
+	## Tolerances for the orthonormality test in coordinate_basis().
+	const BASIS_UNIT_EPS := 0.001
+	const BASIS_DOT_EPS := 0.001
+
+	## Set by the most recent coordinate_basis() call: true only when nine
+	## consecutive float32 forming an orthonormal matrix were actually found in
+	## the file. Single-threaded use only, exactly like last_walk_meta.
+	var last_basis_located := false
+
+	## First entry whose name matches, comparing case-insensitively and adding
+	## the .GRN suffix when the caller omitted it; -1 when nothing matches.
+	## This is the ONLY way a caller-supplied model name is resolved: the string
+	## is compared against the pak's own 64-byte name fields and never joined
+	## into a path or handed to FileAccess, so an operator-supplied name cannot
+	## reach the filesystem.
+	func index_of(name: String) -> int:
+		var want := name.strip_edges().to_upper()
+		if want == "":
+			return -1
+		if not want.ends_with(".GRN"):
+			want += ".GRN"
+		for i in _pak.count():
+			if entry_name(i).to_upper() == want:
+				return i
+		return -1
+
+	## Flat node directory of one entry, or [] when the declared count or the
+	## implied directory extent does not fit the entry's real bytes. Every node
+	## must carry a 0xCA5E____ tag; one that does not means this is not a
+	## directory and the whole read is abandoned rather than partially trusted.
+	func _directory(buf: PackedByteArray) -> Array[Dictionary]:
+		var out: Array[Dictionary] = []
+		if buf.size() < SECTION_OFF_MESH + DIR_OFF + NODE_STRIDE:
+			return out
+		var n := buf.decode_u32(SECTION_OFF_MESH)
+		if n <= 0 or n > MAX_NODES:
+			return out
+		var dir_off := SECTION_OFF_MESH + DIR_OFF
+		if dir_off + n * NODE_STRIDE > buf.size():
+			return out
+		for j in n:
+			var o := dir_off + j * NODE_STRIDE
+			var tag := buf.decode_u32(o)
+			if (tag & 0xFFFF0000) != MAGIC:
+				return []
+			out.append({"tag": tag, "rel": buf.decode_u32(o + 4), "children": buf.decode_u32(o + 8)})
+		return out
+
+	## Payload byte length of node j: the gap to the next node with a strictly
+	## larger rel, or to the end of the section for the last one. Nodes that
+	## share a rel (a Mesh and its first child both point at the same bytes)
+	## are skipped rather than yielding a zero-length span.
+	func _span(dir: Array[Dictionary], j: int, buf_size: int) -> int:
+		var r: int = dir[j]["rel"]
+		for k in range(j + 1, dir.size()):
+			var nr: int = dir[k]["rel"]
+			if nr > r:
+				return nr - r
+		return buf_size - SECTION_OFF_MESH - r
+
+	## First child of node j (exclusive of j itself, within its declared
+	## children run) carrying `tag`, or -1.
+	func _child_with_tag(dir: Array[Dictionary], j: int, tag: int) -> int:
+		var last: int = mini(j + 1 + int(dir[j]["children"]), dir.size())
+		for k in range(j + 1, last):
+			if dir[k]["tag"] == tag:
+				return k
+		return -1
+
+	## Typed arrays for every Mesh in the entry, concatenated into one surface:
+	##   positions PackedVector3Array, normals PackedVector3Array,
+	##   uvs PackedVector2Array, indices PackedInt32Array,
+	##   vertex_count, triangle_count, index_max, meshes,
+	##   source_positions, source_normals  (the two GRN index spaces' sizes)
+	## Empty Dictionary plus push_error on any malformed input.
+	##
+	## Every declared count is re-validated against the entry's real remaining
+	## bytes before it sizes an array or indexes into the buffer, and every
+	## triangle index is checked against the array it indexes before use --
+	## an index at or above its array's count aborts the whole decode instead
+	## of being clamped, because a clamped index renders a quietly wrong mesh
+	## and this phase exists to be able to see wrongness.
+	##
+	## uvs is currently always empty: the per-vertex texture coordinates have
+	## not been located in the file yet (see 03-05-SUMMARY.md "Known Stubs").
+	## Returning an empty array is deliberate -- inventing a UV layout that
+	## merely looked plausible would defeat the oracle check.
+	func mesh_arrays(entry: int) -> Dictionary:
+		var length := true_length(entry)
+		if length <= 0:
+			push_error("Sacred.Models.mesh_arrays: entry %d has no derivable length" % entry)
+			return {}
+		if not magic_ok(entry):
+			push_error("Sacred.Models.mesh_arrays: entry %d is not a walkable mesh entry" % entry)
+			return {}
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			push_error("Sacred.Models.mesh_arrays: entry %d short read (%d of %d)" % [entry, buf.size(), length])
+			return {}
+		var dir := _directory(buf)
+		if dir.is_empty():
+			push_error("Sacred.Models.mesh_arrays: entry %d has no readable node directory" % entry)
+			return {}
+
+		var positions := PackedVector3Array()
+		var normals := PackedVector3Array()
+		var uvs := PackedVector2Array()
+		var indices := PackedInt32Array()
+		var meshes := 0
+		var src_pos := 0
+		var src_nrm := 0
+		var index_max := -1
+
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_MESH:
+				continue
+			var vj := _child_with_tag(dir, j, TAG_MESH_VERTICES)
+			var nj := _child_with_tag(dir, j, TAG_MESH_NORMALS)
+			var tj := _child_with_tag(dir, j, TAG_MESH_TRIANGLES)
+			if vj == -1 or nj == -1 or tj == -1:
+				continue
+
+			var v_off := SECTION_OFF_MESH + int(dir[vj]["rel"])
+			var n_off := SECTION_OFF_MESH + int(dir[nj]["rel"])
+			var t_off := SECTION_OFF_MESH + int(dir[tj]["rel"])
+			var v_len := _span(dir, vj, buf.size())
+			var n_len := _span(dir, nj, buf.size())
+			var t_len := _span(dir, tj, buf.size())
+			if v_len <= 0 or n_len <= 0 or t_len <= 0:
+				push_error("Sacred.Models.mesh_arrays: entry %d mesh at node %d has a non-positive span" % [entry, j])
+				return {}
+			var n_pos := v_len / VEC3_STRIDE
+			var n_nrm := n_len / VEC3_STRIDE
+			var n_face := t_len / TRI_STRIDE
+			if n_pos <= 0 or n_nrm <= 0 or n_face <= 0:
+				push_error("Sacred.Models.mesh_arrays: entry %d mesh at node %d resolves to zero geometry" % [entry, j])
+				return {}
+			# Declared extents re-checked against the buffer that actually exists.
+			if v_off < 0 or v_off + n_pos * VEC3_STRIDE > buf.size() \
+					or n_off < 0 or n_off + n_nrm * VEC3_STRIDE > buf.size() \
+					or t_off < 0 or t_off + n_face * TRI_STRIDE > buf.size():
+				push_error("Sacred.Models.mesh_arrays: entry %d mesh at node %d runs past the entry" % [entry, j])
+				return {}
+
+			# De-interleave the two GRN index spaces into Godot's one.
+			var pair_to_vertex := {}
+			for fi in n_face:
+				var ro := t_off + fi * TRI_STRIDE
+				for corner in 3:
+					var p := buf.decode_s32(ro + corner * 4)
+					var q := buf.decode_s32(ro + 12 + corner * 4)
+					if p < 0 or p >= n_pos or q < 0 or q >= n_nrm:
+						push_error("Sacred.Models.mesh_arrays: entry %d face %d references position %d of %d / normal %d of %d" % [entry, fi, p, n_pos, q, n_nrm])
+						return {}
+					var key := p * n_nrm + q
+					var vi: int = pair_to_vertex.get(key, -1)
+					if vi == -1:
+						vi = positions.size()
+						pair_to_vertex[key] = vi
+						var po := v_off + p * VEC3_STRIDE
+						var no := n_off + q * VEC3_STRIDE
+						positions.append(Vector3(buf.decode_float(po), buf.decode_float(po + 4), buf.decode_float(po + 8)))
+						normals.append(Vector3(buf.decode_float(no), buf.decode_float(no + 4), buf.decode_float(no + 8)))
+					indices.append(vi)
+					index_max = maxi(index_max, vi)
+			meshes += 1
+			src_pos += n_pos
+			src_nrm += n_nrm
+
+		if meshes == 0 or positions.is_empty() or indices.is_empty():
+			push_error("Sacred.Models.mesh_arrays: entry %d contains no decodable mesh" % entry)
+			return {}
+		return {
+			"positions": positions, "normals": normals, "uvs": uvs, "indices": indices,
+			"vertex_count": positions.size(), "triangle_count": indices.size() / 3,
+			"index_max": index_max, "meshes": meshes,
+			"source_positions": src_pos, "source_normals": src_nrm,
+		}
+
+	## The one matrix converting Granny's stored coordinate system to Godot's.
+	##
+	## The retail binary makes separate tool-coordinate-system calls, which
+	## implies the value is stored per file rather than fixed in the runtime,
+	## so it should be findable: this scans every byte offset of the entry's
+	## header and node directory for nine consecutive float32 whose three rows
+	## are unit length and mutually perpendicular.
+	##
+	## MEASURED RESULT for GLADIATOR.GRN: zero hits across the whole scanned
+	## region. The field is therefore UNLOCATED, last_basis_located stays
+	## false, and the identity is returned. That is the honest outcome and it
+	## is deliberately not papered over: substituting the Z-up-to-Y-up rotation
+	## that makes the render look upright would be a fudge factor chosen
+	## because the picture improved, and it would make a real future finding
+	## unfalsifiable.
+	func coordinate_basis(entry: int) -> Basis:
+		last_basis_located = false
+		var length := true_length(entry)
+		if length <= 0:
+			return Basis()
+		var buf := _pak.read_at(_pak.entry_offset(entry), mini(length, SECTION_OFF_MESH + DIR_OFF))
+		if buf.size() < SECTION_OFF_MESH + DIR_OFF:
+			return Basis()
+		var scan_len := SECTION_OFF_MESH + DIR_OFF
+		var n := buf.decode_u32(SECTION_OFF_MESH)
+		if n > 0 and n <= MAX_NODES:
+			scan_len = mini(length, SECTION_OFF_MESH + DIR_OFF + n * NODE_STRIDE)
+		buf = _pak.read_at(_pak.entry_offset(entry), scan_len)
+		var limit := buf.size() - 36
+		for o in range(0, limit + 1):
+			var m := PackedFloat32Array()
+			m.resize(9)
+			var sane := true
+			for k in 9:
+				var f := buf.decode_float(o + k * 4)
+				if is_nan(f) or is_inf(f) or absf(f) > 1.0 + BASIS_UNIT_EPS:
+					sane = false
+					break
+				m[k] = f
+			if not sane:
+				continue
+			var r0 := Vector3(m[0], m[1], m[2])
+			var r1 := Vector3(m[3], m[4], m[5])
+			var r2 := Vector3(m[6], m[7], m[8])
+			if absf(r0.length() - 1.0) > BASIS_UNIT_EPS \
+					or absf(r1.length() - 1.0) > BASIS_UNIT_EPS \
+					or absf(r2.length() - 1.0) > BASIS_UNIT_EPS:
+				continue
+			if absf(r0.dot(r1)) > BASIS_DOT_EPS or absf(r0.dot(r2)) > BASIS_DOT_EPS \
+					or absf(r1.dot(r2)) > BASIS_DOT_EPS:
+				continue
+			last_basis_located = true
+			return Basis(r0, r1, r2)
+		return Basis()
