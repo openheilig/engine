@@ -43,8 +43,18 @@ const LIGHT_DIR := Vector3(-0.4, -0.8, -0.45)
 var vertex_count := 0
 var triangle_count := 0
 var basis_located := false
+## Skeleton facts, printed by main.gd. bone_count is the Skeleton3D bone count,
+## bind_count the Skin bind-array length (a bone nothing is weighted to is NOT
+## bound, so these differ legitimately), bone_roots the number of parentless
+## bones, bone_sanitised the number whose stored name could not be used as-is.
+var bone_count := 0
+var bone_roots := 0
+var bind_count := 0
+var bone_sanitised := 0
 
 var _settled := false
+var _skeleton: Skeleton3D = null
+var _skin: Skin = null
 
 
 ## Builds the mesh for `entry` and returns true on success. On failure the
@@ -75,6 +85,12 @@ func setup(models: Sacred.Models, entry: int) -> bool:
 	if not uv.is_empty():
 		arr[Mesh.ARRAY_TEX_UV] = uv
 	arr[Mesh.ARRAY_INDEX] = idx
+
+	# Must precede add_surface_from_arrays: ARRAY_BONES/ARRAY_WEIGHTS are
+	# surface arrays, not something attachable afterwards.
+	if not _build_skin(models, entry, m, arr):
+		return false
+
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 
@@ -87,12 +103,196 @@ func setup(models: Sacred.Models, entry: int) -> bool:
 	mi.name = "Mesh"
 	mi.mesh = mesh
 	mi.material_override = mat
-	add_child(mi)
+	if _skeleton != null:
+		# MeshInstance3D under the Skeleton3D, with `skeleton` as the relative
+		# NodePath ".." -- the conventional layout, and the one that does not
+		# depend on this node's own name. The Skeleton3D itself sits at identity
+		# under ModelView, so the coordinate basis on ModelView.transform still
+		# applies exactly once, to the whole rig, exactly as before.
+		add_child(_skeleton)
+		_skeleton.add_child(mi)
+		mi.skeleton = NodePath("..")
+		mi.skin = _skin
+	else:
+		add_child(mi)
 
 	# The AABB the camera must frame is the one the viewer sees, so it is the
 	# local AABB carried through this node's basis, not the raw one.
 	_frame(transform * mesh.get_aabb())
 	_settled = true
+	return true
+
+
+## Builds the Skeleton3D and Skin for `entry` and fills `arr`'s ARRAY_BONES /
+## ARRAY_WEIGHTS slots. Returns true on success, INCLUDING the case where the
+## entry carries no skeleton at all -- an unskinned model is not a malformed
+## one, and it renders exactly as it did before this existed. Returns false
+## only when a skeleton is present but unusable, which is loud on purpose: a
+## silently-unskinned render of a skinned model looks entirely plausible.
+##
+## THREE INDEX SPACES, and none of them is assumed equal to another:
+##
+##   1. GRANNY FILE ORDER      -- what Sacred.Models.bones() returns
+##   2. SKELETON3D BONE INDEX  -- what add_bone() hands back; produced by the
+##                                topological sort below, because Skeleton3D
+##                                requires every parent index to be strictly
+##                                less than its child's
+##   3. SKIN BIND-ARRAY POSITION -- the order add_bind() was called in
+##
+## plus a fourth, per-Mesh-node bone index space that the weight records use
+## and Sacred.Models.mesh_weights().bone_map resolves into space 1.
+##
+## ARRAY_BONES is filled from space 3. This is the single most common way to
+## get a plausible-looking wrong deformation: Godot indexes ARRAY_BONES into
+## the SKIN's bind array, not into the Skeleton3D, and the two coincide only
+## when every bone happens to be bound in skeleton order -- which is exactly
+## what does NOT happen here, since binds are added in mesh-local order and
+## only for bones something is actually weighted to.
+func _build_skin(models: Sacred.Models, entry: int, m: Dictionary, arr: Array) -> bool:
+	var bl := models.bones(entry)
+	if bl.is_empty():
+		return true
+
+	var n := bl.size()
+	var binds := models.bind_poses(entry)
+	if binds.size() != n:
+		push_error("ModelView: entry %d has %d bones but %d bind poses" % [entry, n, binds.size()])
+		return false
+
+	# Topological sort into Skeleton3D order. The measured corpus is already in
+	# parent-before-child order, so this is a no-op on it -- but "already
+	# sorted" is a property of three sampled files, not of the format, and an
+	# out-of-order file would otherwise hit Skeleton3D's parent<child rule as an
+	# engine error rather than as a decode failure. The sort is stable in file
+	# order, so on the sampled corpus space 1 and space 2 do coincide; the maps
+	# below are still used everywhere rather than that coincidence.
+	var granny_to_skel := PackedInt32Array()
+	granny_to_skel.resize(n)
+	granny_to_skel.fill(-1)
+	var order: Array[int] = []
+	var progress := true
+	while progress and order.size() < n:
+		progress = false
+		for g in n:
+			if granny_to_skel[g] != -1:
+				continue
+			var p: int = bl[g]["parent_effective"]
+			if p != -1 and granny_to_skel[p] == -1:
+				continue
+			granny_to_skel[g] = order.size()
+			order.append(g)
+			progress = true
+	if order.size() != n:
+		push_error("ModelView: entry %d bone graph is not a forest -- %d of %d bones sort" % [
+			entry, order.size(), n])
+		return false
+
+	_skeleton = Skeleton3D.new()
+	_skeleton.name = "Skeleton"
+	var used := {}
+	bone_roots = 0
+	bone_sanitised = 0
+	for g in order:
+		var raw: PackedByteArray = bl[g]["name"]
+		var stored := raw.get_string_from_utf8().strip_edges()
+		# Godot reserves ':' and '/' in bone names, rejects the empty name, and
+		# needs uniqueness for get_bone_by_name to mean anything. Every stored
+		# name in this format is empty (the 68-byte bone record has no name
+		# field), so in practice every name is generated -- see
+		# Sacred.Models.bones()'s `name` documentation for why the real strings
+		# in the file are deliberately not guessed at.
+		var nm := stored.replace(":", "_").replace("/", "_")
+		if nm.is_empty():
+			nm = "Bone_%d" % g
+		while used.has(nm):
+			nm = "%s_%d" % [nm, g]
+		used[nm] = true
+		if nm != stored:
+			bone_sanitised += 1
+		_skeleton.add_bone(nm)
+		var s := granny_to_skel[g]
+		var p: int = bl[g]["parent_effective"]
+		if p == -1:
+			bone_roots += 1
+		else:
+			_skeleton.set_bone_parent(s, granny_to_skel[p])
+		_skeleton.set_bone_rest(s, bl[g]["rest"])
+	# A fresh bone's POSE is not its rest -- it defaults to the identity, which
+	# collapses every bone onto the origin and produces a crumpled model that
+	# still renders. There is no animation in this plan, so the pose is the
+	# rest; letting the engine derive it keeps rest and pose using the same
+	# decomposition rather than a hand-rolled one.
+	_skeleton.reset_bone_poses()
+	bone_count = n
+
+	# One bind per bone something is actually weighted to, added in mesh-local
+	# order, which is how space 3 gets its ordering.
+	_skin = Skin.new()
+	var skel_to_bind := PackedInt32Array()
+	skel_to_bind.resize(n)
+	skel_to_bind.fill(-1)
+	var weights := models.mesh_weights(entry)
+	if weights.size() != int(m["meshes"]):
+		push_error("ModelView: entry %d has %d meshes but %d weight blocks" % [
+			entry, int(m["meshes"]), weights.size()])
+		return false
+	# Space 4 -> space 3, one map per Mesh node.
+	var local_to_bind: Array[PackedInt32Array] = []
+	for w: Dictionary in weights:
+		var bone_map: PackedInt32Array = w["bone_map"]
+		var lt := PackedInt32Array()
+		lt.resize(bone_map.size())
+		for l in bone_map.size():
+			var g := bone_map[l]
+			var s := granny_to_skel[g]
+			if skel_to_bind[s] == -1:
+				skel_to_bind[s] = _skin.get_bind_count()
+				# The bind pose is the INVERSE of the bone's world bind
+				# transform: it takes a vertex from model space into the bone's
+				# own space, so the bone's pose can then put it back.
+				_skin.add_bind(s, binds[g].affine_inverse())
+			lt[l] = skel_to_bind[s]
+		local_to_bind.append(lt)
+	bind_count = _skin.get_bind_count()
+	if bind_count == 0:
+		push_error("ModelView: entry %d has bones but nothing is weighted to any of them" % entry)
+		return false
+
+	var vsrc: PackedInt32Array = m["vertex_source"]
+	var vmesh: PackedInt32Array = m["vertex_mesh"]
+	if vsrc.size() != vertex_count or vmesh.size() != vertex_count:
+		push_error("ModelView: entry %d vertex provenance is %d/%d for %d vertices" % [
+			entry, vsrc.size(), vmesh.size(), vertex_count])
+		return false
+	var slots := Sacred.Models.WEIGHT_SLOTS
+	var ab := PackedInt32Array()
+	var aw := PackedFloat32Array()
+	ab.resize(vertex_count * slots)
+	aw.resize(vertex_count * slots)
+	for v in vertex_count:
+		var mi := vmesh[v]
+		var src := vsrc[v]
+		var w: Dictionary = weights[mi]
+		if src < 0 or src >= int(w["count"]):
+			push_error("ModelView: entry %d vertex %d came from source position %d, outside mesh %d's %d weight records" % [
+				entry, v, src, mi, int(w["count"])])
+			return false
+		var wb: PackedInt32Array = w["bones"]
+		var ww: PackedFloat32Array = w["weights"]
+		var lt: PackedInt32Array = local_to_bind[mi]
+		for s in slots:
+			var l := wb[src * slots + s]
+			if l < 0 or l >= lt.size():
+				push_error("ModelView: entry %d vertex %d slot %d names mesh-local bone %d of %d" % [
+					entry, v, s, l, lt.size()])
+				return false
+			ab[v * slots + s] = lt[l]
+			# Stored verbatim. Renormalising here would hide a decode error by
+			# making any set of weights sum to 1, which is the check that the
+			# reader already applies to the bytes as an actual test.
+			aw[v * slots + s] = ww[src * slots + s]
+	arr[Mesh.ARRAY_BONES] = ab
+	arr[Mesh.ARRAY_WEIGHTS] = aw
 	return true
 
 

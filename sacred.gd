@@ -1032,6 +1032,15 @@ class Models extends RefCounted:
 		var normals := PackedVector3Array()
 		var uvs := PackedVector2Array()
 		var indices := PackedInt32Array()
+		# Per Godot vertex, which source position it came from and which Mesh
+		# node produced it. mesh_weights() keys its per-vertex weight records on
+		# the SOURCE position index, and each Mesh node has its own mesh-local
+		# bone index space, so a skinned build needs both to route a weight to a
+		# Godot vertex. They are emitted here, in the de-interleave loop that
+		# already knows the answer, rather than reconstructed by a second walk
+		# that could disagree with this one.
+		var vertex_source := PackedInt32Array()
+		var vertex_mesh := PackedInt32Array()
 		var meshes := 0
 		var src_pos := 0
 		var src_nrm := 0
@@ -1087,6 +1096,8 @@ class Models extends RefCounted:
 						var no := n_off + q * VEC3_STRIDE
 						positions.append(Vector3(buf.decode_float(po), buf.decode_float(po + 4), buf.decode_float(po + 8)))
 						normals.append(Vector3(buf.decode_float(no), buf.decode_float(no + 4), buf.decode_float(no + 8)))
+						vertex_source.append(p)
+						vertex_mesh.append(meshes)
 					indices.append(vi)
 					index_max = maxi(index_max, vi)
 			meshes += 1
@@ -1101,6 +1112,7 @@ class Models extends RefCounted:
 			"vertex_count": positions.size(), "triangle_count": indices.size() / 3,
 			"index_max": index_max, "meshes": meshes,
 			"source_positions": src_pos, "source_normals": src_nrm,
+			"vertex_source": vertex_source, "vertex_mesh": vertex_mesh,
 		}
 
 	## The one matrix converting Granny's stored coordinate system to Godot's.
@@ -1157,3 +1169,443 @@ class Models extends RefCounted:
 			last_basis_located = true
 			return Basis(r0, r1, r2)
 		return Basis()
+
+	# ---------------------------------------------------------------------
+	# Skeleton decode (Plan 06).
+	#
+	# Found through the SAME flat node directory the geometry uses -- nothing
+	# below scans for a byte pattern:
+	#
+	#   0xCA5E0507 SkeletonSection   numTotalChildren = bones + 2
+	#   0xCA5E0508 BoneSection       numTotalChildren = bone count, EXACTLY
+	#   0xCA5E0506 Bone              one node per bone, 68 bytes, rel step 68
+	#
+	# The BoneSection and its first Bone share a rel, so the bone block starts
+	# at the BoneSection's own rel and runs bone_count * BONE_STRIDE bytes.
+	# Measured on BAT.GRN (38 bones), GLAD_SA5_SHOULDER.GRN (75) and
+	# GLADIATOR.GRN (68): in all three the Bone node count equals the
+	# BoneSection's declared numTotalChildren and every consecutive rel delta is
+	# exactly 68, with no exceptions.
+	#
+	# A Bone record is 68 bytes:
+	#   +0  int32   parent index
+	#   +4  3x f32  local translation
+	#   +16 4x f32  local rotation quaternion, stored x,y,z,w
+	#   +32 9x f32  local scale-shear 3x3
+	#
+	# That layout is not asserted from plausibility, it is the phase where the
+	# quaternion test passes and the only such phase. Across all 181 bones of
+	# the three sampled entries, the quaternion is unit length to within 1e-3 at
+	# offset +16 and at NO other phase tried: shifting the record base by -8,
+	# -4, +4 or +8 bytes fails 33-38 of 38, 68-75 of 75 and 68 of 68
+	# respectively. The test can fail, and it does, everywhere except here.
+	#
+	# ROOT CONVENTION, measured and not assumed: the root bone's parent field
+	# holds its OWN index (0), not -1. Exactly one such bone exists per entry
+	# and it is always index 0, and no bone anywhere in the corpus has a parent
+	# index greater than its own -- so the file order is already topological.
+	# The caller still sorts rather than trusting that, because "already sorted"
+	# is a property of three sampled entries, not a guarantee of the format.
+	#
+	# NOT STORED: an inverse-world (bind) matrix. The bone block ends exactly
+	# where the next directory node begins in all three entries (gap 0), and
+	# nothing of size bone_count * 64 exists nearby. bind_poses() therefore
+	# COMPOSES the world bind transform from the stored local chain. See its
+	# doc comment for what that costs the rest-equals-bind assertion.
+	const TAG_SKELETON_SECTION := 0xCA5E0507
+	const TAG_BONE_SECTION := 0xCA5E0508
+	const TAG_BONE := 0xCA5E0506
+	const TAG_MESH_WEIGHTS := 0xCA5E0702
+	const TAG_FORM_MESH_BONE_SECTION := 0xCA5E0C09
+	const TAG_FORM_MESH_BONE := 0xCA5E0C0A
+	const BONE_STRIDE := 68
+	## Unit-length tolerance for the stored rotation quaternion. Deliberately
+	## loose: it is a layout discriminator, not a precision claim, and the
+	## control above shows a wrong phase misses it by far more than this.
+	const BONE_QUAT_EPS := 0.001
+	## Ceiling applied to the declared bone count BEFORE it sizes anything, the
+	## same posture MAX_NODES takes. The largest entry sampled declares 75.
+	const MAX_BONES := 1 << 16
+	## Godot's ARRAY_BONES/ARRAY_WEIGHTS slot count without
+	## ARRAY_FLAG_USE_8_BONE_WEIGHTS. The format's own maximum influence count,
+	## measured across all five MeshWeights blocks in the sample, is 3.
+	const WEIGHT_SLOTS := 4
+	## float32 has 24 significand bits, 23 of them stored.
+	const F32_MANTISSA := 23
+	## ULPs of slack allowed per transform composition in REST_BIND_EPS. Chosen
+	## as a small integer BEFORE any delta was measured, and multiplied by the
+	## chain depth the file itself declares -- so the tolerance grows with the
+	## number of multiplications that actually happen, rather than being widened
+	## afterwards until the comparison passed.
+	const REST_BIND_ULPS := 4
+
+	## Derived by bind_poses() from the measured bind-matrix magnitude and the
+	## measured chain depth; -1 until then, and a negative value means no
+	## rest-equals-bind comparison is safe yet. NEVER a written-in constant --
+	## an unstated epsilon is the classic test that cannot fail.
+	var REST_BIND_EPS := -1.0
+	## The three inputs to that derivation, kept so every verdict can print its
+	## own sizing instead of asking a reader to trust it. Single-threaded use
+	## only, exactly like last_walk_meta.
+	var last_bind_maxmag := 0.0
+	var last_bind_ulp := 0.0
+	var last_bind_depth := 0
+
+	## Unit in the last place of `m` at float32 precision: the gap between
+	## consecutive representable float32 values at that magnitude. Subnormals
+	## and zero collapse to the smallest positive float32 rather than to zero,
+	## so the returned value is never itself zero.
+	static func f32_ulp(m: float) -> float:
+		var a := absf(m)
+		if a < 1.1754943508222875e-38 or is_nan(a) or is_inf(a):
+			return pow(2.0, -149.0)
+		return pow(2.0, floor(log(a) / log(2.0)) - float(F32_MANTISSA))
+
+	## Directory index of the BoneSection node, or -1. Requires the
+	## SkeletonSection to be present and the BoneSection to fall inside its
+	## declared children run, so a stray tag elsewhere in the file cannot be
+	## mistaken for the skeleton.
+	func _bone_section(dir: Array[Dictionary]) -> int:
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_SKELETON_SECTION:
+				continue
+			var last: int = mini(j + 1 + int(dir[j]["children"]), dir.size())
+			for k in range(j + 1, last):
+				if dir[k]["tag"] == TAG_BONE_SECTION:
+					return k
+		return -1
+
+	## Contiguous raw bone bytes exactly as stored: parent indices, translations,
+	## rotations and scale-shears in file order, bone_count * BONE_STRIDE of
+	## them. Empty on any malformed input.
+	##
+	## This is what the `bones` parity fact line hashes. It is a byte-range read
+	## on both sides of the harness, so the Python side needs no second matrix
+	## decoder to agree with the Godot one (03-04-PLAN.md, Pitfall 8).
+	func bone_bytes(entry: int) -> PackedByteArray:
+		var empty := PackedByteArray()
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			return empty
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			return empty
+		var dir := _directory(buf)
+		if dir.is_empty():
+			return empty
+		var bs := _bone_section(dir)
+		if bs == -1:
+			return empty
+		var n := int(dir[bs]["children"])
+		if n <= 0 or n > MAX_BONES:
+			push_error("Sacred.Models.bone_bytes: entry %d declares %d bones" % [entry, n])
+			return empty
+		var off := SECTION_OFF_MESH + int(dir[bs]["rel"])
+		# The declared count is re-validated against the bytes that actually
+		# remain before it sizes anything -- an over-large count returns empty
+		# rather than allocating for it (threat T-03-14).
+		if off < 0 or off + n * BONE_STRIDE > buf.size():
+			push_error("Sacred.Models.bone_bytes: entry %d bone block (%d bones at %d) runs past the entry (%d bytes)" % [
+				entry, n, off, buf.size()])
+			return empty
+		return buf.slice(off, off + n * BONE_STRIDE)
+
+	## One Dictionary per bone in Granny's own file order:
+	##   name        PackedByteArray -- the raw name bytes AS STORED IN THE BONE
+	##               RECORD, which is always empty: the 68-byte record has no
+	##               name field and no room for one. Bone name strings DO exist
+	##               in the entry (GLADIATOR.GRN carries "__Root",
+	##               "Bip01 R Finger31" and 200-odd more from offset 16911), but
+	##               binding a string to a bone runs through a four-level
+	##               DataExtension chain this plan did not decode, and the one
+	##               published parser resolves it with an explicit heuristic
+	##               ("take the strings after __Root in order"). Guessing that
+	##               here would put an unfalsifiable name on every bone, so the
+	##               field is returned honestly empty and the caller generates a
+	##               name -- see 03-06-SUMMARY.md "Known Stubs".
+	##   parent      the parent index EXACTLY AS STORED, self-referential for
+	##               the root (measured: root's parent field is its own index,
+	##               not -1)
+	##   parent_effective  -1 for the root, the stored value otherwise -- the
+	##               normalised form a topological sort wants, derived here once
+	##               so no caller re-derives it differently
+	##   position    Vector3, rotation Quaternion, scale_shear PackedFloat32Array
+	##   rest        Transform3D, the local rest transform T * R * SS
+	##
+	## Empty Array plus push_error on any malformed input: a declared count that
+	## does not fit, a parent index outside the bone range, or a rotation that is
+	## not a unit quaternion. A bad parent is REJECTED, never clamped -- a
+	## clamped parent silently reparents a limb and still renders.
+	##
+	## SCALE-SHEAR CONVENTION, recorded as unfalsifiable on this corpus: the
+	## nine floats are read as a row-major 3x3. Every scale-shear in all 181
+	## sampled bones is the identity to within 1e-6 (max component magnitude
+	## 1.0000009), so row-major and column-major produce the same matrix here
+	## and this corpus cannot distinguish them. Stated rather than hidden.
+	func bones(entry: int) -> Array[Dictionary]:
+		var out: Array[Dictionary] = []
+		var raw := bone_bytes(entry)
+		if raw.is_empty():
+			return out
+		var n := raw.size() / BONE_STRIDE
+		for i in n:
+			var o := i * BONE_STRIDE
+			var parent := raw.decode_s32(o)
+			if parent < 0 or parent >= n:
+				push_error("Sacred.Models.bones: entry %d bone %d has out-of-range parent %d (of %d)" % [
+					entry, i, parent, n])
+				return []
+			var pos := Vector3(raw.decode_float(o + 4), raw.decode_float(o + 8), raw.decode_float(o + 12))
+			var q := Quaternion(raw.decode_float(o + 16), raw.decode_float(o + 20),
+				raw.decode_float(o + 24), raw.decode_float(o + 28))
+			var qlen := sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+			if is_nan(qlen) or absf(qlen - 1.0) > BONE_QUAT_EPS:
+				push_error("Sacred.Models.bones: entry %d bone %d rotation is not a unit quaternion (|q|=%f)" % [
+					entry, i, qlen])
+				return []
+			var ss := PackedFloat32Array()
+			ss.resize(9)
+			for k in 9:
+				ss[k] = raw.decode_float(o + 32 + k * 4)
+			# Row-major storage into Godot's column-taking Basis constructor.
+			var b := Basis(Vector3(ss[0], ss[3], ss[6]), Vector3(ss[1], ss[4], ss[7]), Vector3(ss[2], ss[5], ss[8]))
+			out.append({
+				"name": PackedByteArray(),
+				"parent": parent,
+				"parent_effective": -1 if parent == i else parent,
+				"position": pos,
+				"rotation": q,
+				"scale_shear": ss,
+				"rest": Transform3D(Basis(q) * b, pos),
+			})
+		return out
+
+	## World-space bind transform per bone, in the same file order bones()
+	## returns, composed parent-first from the stored local chain. Also derives
+	## REST_BIND_EPS and populates last_bind_maxmag / last_bind_ulp /
+	## last_bind_depth. Empty plus push_error on a cycle or a bad parent.
+	##
+	## WHY THIS IS COMPOSED AND NOT READ: the format stores no inverse-world
+	## matrix (see the section comment above -- the bone block ends flush
+	## against the next directory node in every sampled entry, and no
+	## bone_count * 64 region exists). So "rest equals bind" cannot be a
+	## comparison of two independently STORED quantities here; no such pair
+	## exists in the file to compare.
+	##
+	## What it IS, stated plainly so nobody credits it with more than it does:
+	## the Godot side composes the global rest inside Skeleton3D, walking the
+	## parent links and bone indices of the SORTED skeleton; this function
+	## composes in unsorted file order through the file's own parent indices.
+	## The two agree only if the topological sort, the Granny-to-Skeleton3D
+	## index map, and the bind-array map are all correct -- which is exactly the
+	## silent-deformation failure R1.3 names. It does NOT prove the 68-byte
+	## record was decoded correctly; a wrong-but-consistent decode would satisfy
+	## both sides. That limitation is real and is not papered over.
+	func bind_poses(entry: int) -> Array[Transform3D]:
+		var out: Array[Transform3D] = []
+		REST_BIND_EPS = -1.0
+		last_bind_maxmag = 0.0
+		last_bind_ulp = 0.0
+		last_bind_depth = 0
+		var bl := bones(entry)
+		if bl.is_empty():
+			return out
+		var n := bl.size()
+		var world: Array[Transform3D] = []
+		var done := PackedByteArray()
+		var depth := PackedInt32Array()
+		world.resize(n)
+		done.resize(n)
+		depth.resize(n)
+		for i in n:
+			if done[i] != 0:
+				continue
+			# Iterative parent walk with a step budget of n: a chain longer than
+			# the bone count can only mean a cycle, so the traversal cannot loop
+			# forever on a hostile file (threat T-03-15).
+			var chain: Array[int] = []
+			var c := i
+			var steps := 0
+			while done[c] == 0:
+				if steps > n:
+					push_error("Sacred.Models.bind_poses: entry %d bone %d sits on a parent cycle" % [entry, i])
+					return []
+				chain.append(c)
+				var p: int = bl[c]["parent_effective"]
+				if p == -1:
+					break
+				if chain.has(p):
+					push_error("Sacred.Models.bind_poses: entry %d bone %d sits on a parent cycle" % [entry, i])
+					return []
+				c = p
+				steps += 1
+			chain.reverse()
+			for b in chain:
+				var p2: int = bl[b]["parent_effective"]
+				if p2 == -1:
+					world[b] = bl[b]["rest"]
+					depth[b] = 0
+				else:
+					world[b] = world[p2] * bl[b]["rest"]
+					depth[b] = depth[p2] + 1
+				done[b] = 1
+		var maxmag := 0.0
+		var maxdepth := 0
+		for i in n:
+			var t := world[i]
+			for col in 3:
+				var v := t.basis[col]
+				maxmag = maxf(maxmag, maxf(absf(v.x), maxf(absf(v.y), absf(v.z))))
+			maxmag = maxf(maxmag, maxf(absf(t.origin.x), maxf(absf(t.origin.y), absf(t.origin.z))))
+			maxdepth = maxi(maxdepth, depth[i])
+			out.append(t)
+		last_bind_maxmag = maxmag
+		last_bind_ulp = f32_ulp(maxmag)
+		last_bind_depth = maxdepth
+		# The chain is composed once here and once again inside Skeleton3D, and
+		# the comparison then passes back through affine_inverse, so the error
+		# budget is proportional to the depth -- hence depth + 2, not a bare
+		# number that happened to work.
+		REST_BIND_EPS = last_bind_ulp * float(REST_BIND_ULPS) * float(maxdepth + 2)
+		return out
+
+	## One Dictionary per Mesh node, in the SAME order mesh_arrays() walks them:
+	##   count      per-vertex weight records, which equals that mesh's source
+	##              position count
+	##   highest    the block's own declared highest mesh-local bone index
+	##   bones      PackedInt32Array, WEIGHT_SLOTS per source vertex, MESH-LOCAL
+	##              bone indices, zero-padded
+	##   weights    PackedFloat32Array, WEIGHT_SLOTS per source vertex, stored
+	##              values NOT renormalised
+	##   bone_map   PackedInt32Array, mesh-local bone index -> Granny file bone
+	##              index
+	##
+	## Layout, measured: a MeshWeights payload is {int32 count, int32
+	## highestBoneIndex, int32 unknown} then, per vertex, {int32 influences,
+	## influences * (int32 mesh-local bone, float32 weight)}. The confirmation is
+	## that the bytes consumed equal the node's derived span EXACTLY -- zero
+	## slack on all five blocks across the three sampled entries -- and that
+	## every vertex's weights sum to 1.0 within 1e-4. A wrong stride leaves
+	## slack or overruns.
+	##
+	## bone_map comes from the FormMeshBone (0xCA5E0C0A) children of a
+	## FormMeshBoneSection (0xCA5E0C09), each an int32 Granny bone index. Which
+	## section belongs to which mesh is NOT positional: it is the section whose
+	## child count equals highestBoneIndex + 1. On the sample that pairing is
+	## unique in every entry (GLADIATOR's three meshes declare highest 44/3/9
+	## against sections of 45/4/10) and it is checked for uniqueness at run time
+	## -- an ambiguous pairing returns empty rather than picking one.
+	func mesh_weights(entry: int) -> Array[Dictionary]:
+		var out: Array[Dictionary] = []
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			return out
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			return out
+		var dir := _directory(buf)
+		if dir.is_empty():
+			return out
+		var bl_count := bone_bytes(entry).size() / BONE_STRIDE
+		if bl_count <= 0:
+			return out
+
+		# Every FormMeshBone list in the entry, by its own length.
+		var lists: Array[PackedInt32Array] = []
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_FORM_MESH_BONE_SECTION:
+				continue
+			var lst := PackedInt32Array()
+			var last: int = mini(j + 1 + int(dir[j]["children"]), dir.size())
+			for k in range(j + 1, last):
+				if dir[k]["tag"] != TAG_FORM_MESH_BONE:
+					continue
+				var o := SECTION_OFF_MESH + int(dir[k]["rel"])
+				if o < 0 or o + 4 > buf.size():
+					push_error("Sacred.Models.mesh_weights: entry %d FormMeshBone at %d runs past the entry" % [entry, o])
+					return []
+				var g := buf.decode_s32(o)
+				if g < 0 or g >= bl_count:
+					push_error("Sacred.Models.mesh_weights: entry %d FormMeshBone references bone %d of %d" % [
+						entry, g, bl_count])
+					return []
+				lst.append(g)
+			lists.append(lst)
+
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_MESH:
+				continue
+			# Skipped for exactly the reason mesh_arrays() skips it, so the two
+			# lists stay index-for-index parallel. mesh_arrays()' vertex_mesh
+			# field indexes INTO this array, so a Mesh node counted by one and
+			# not the other would silently attach every vertex of every later
+			# mesh to the wrong bone list.
+			if _child_with_tag(dir, j, TAG_MESH_VERTICES) == -1 \
+					or _child_with_tag(dir, j, TAG_MESH_NORMALS) == -1 \
+					or _child_with_tag(dir, j, TAG_MESH_TRIANGLES) == -1:
+				continue
+			var wj := _child_with_tag(dir, j, TAG_MESH_WEIGHTS)
+			if wj == -1:
+				push_error("Sacred.Models.mesh_weights: entry %d mesh at node %d has no MeshWeights child" % [entry, j])
+				return []
+			var off := SECTION_OFF_MESH + int(dir[wj]["rel"])
+			var span := _span(dir, wj, buf.size())
+			if off < 0 or span <= 12 or off + span > buf.size():
+				push_error("Sacred.Models.mesh_weights: entry %d MeshWeights at node %d has an unusable span %d" % [
+					entry, wj, span])
+				return []
+			var count := buf.decode_s32(off)
+			var highest := buf.decode_s32(off + 4)
+			if count <= 0 or highest < 0 or count * 8 > span:
+				push_error("Sacred.Models.mesh_weights: entry %d MeshWeights at node %d declares count=%d highest=%d against span %d" % [
+					entry, wj, count, highest, span])
+				return []
+			var bones_out := PackedInt32Array()
+			var weights_out := PackedFloat32Array()
+			bones_out.resize(count * WEIGHT_SLOTS)
+			weights_out.resize(count * WEIGHT_SLOTS)
+			var p := off + 12
+			var end := off + span
+			for v in count:
+				if p + 4 > end:
+					push_error("Sacred.Models.mesh_weights: entry %d MeshWeights at node %d truncated at vertex %d" % [entry, wj, v])
+					return []
+				var infl := buf.decode_s32(p)
+				p += 4
+				if infl <= 0 or infl > WEIGHT_SLOTS or p + infl * 8 > end:
+					push_error("Sacred.Models.mesh_weights: entry %d vertex %d declares %d influences (max %d)" % [
+						entry, v, infl, WEIGHT_SLOTS])
+					return []
+				for s in infl:
+					var lb := buf.decode_s32(p)
+					var w := buf.decode_float(p + 4)
+					p += 8
+					if lb < 0 or lb > highest:
+						push_error("Sacred.Models.mesh_weights: entry %d vertex %d references local bone %d, above the declared highest %d" % [
+							entry, v, lb, highest])
+						return []
+					bones_out[v * WEIGHT_SLOTS + s] = lb
+					weights_out[v * WEIGHT_SLOTS + s] = w
+			if p != end:
+				push_error("Sacred.Models.mesh_weights: entry %d MeshWeights at node %d consumed %d of %d bytes" % [
+					entry, wj, p - off, span])
+				return []
+			# The pairing rule, and its own uniqueness check.
+			var want := highest + 1
+			var pick := -1
+			var hits := 0
+			for li in lists.size():
+				if lists[li].size() == want:
+					hits += 1
+					pick = li
+			if hits != 1:
+				push_error("Sacred.Models.mesh_weights: entry %d mesh at node %d needs a %d-bone FormMeshBone list; %d sections match" % [
+					entry, j, want, hits])
+				return []
+			out.append({
+				"count": count, "highest": highest,
+				"bones": bones_out, "weights": weights_out,
+				"bone_map": lists[pick],
+			})
+			lists.remove_at(pick)
+		return out

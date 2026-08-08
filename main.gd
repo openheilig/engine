@@ -418,6 +418,12 @@ func _show_model(install: String, name: String) -> void:
 	print("grn\tindex %d\tname %s\tverts %d\ttris %d\tbasis %s" % [
 		idx, models.entry_name(idx), view.vertex_count, view.triangle_count,
 		"located" if view.basis_located else "unlocated"])
+	# binds < count is normal, not a defect: a bone nothing is weighted to gets
+	# no bind-array slot. sanitised counts bones whose stored name could not be
+	# used verbatim -- currently all of them, because this format's bone record
+	# stores no name.
+	print("bones\tcount=%d\troots=%d\tbinds=%d\tsanitised=%d" % [
+		view.bone_count, view.bone_roots, view.bind_count, view.bone_sanitised])
 	await _maybe_screenshot()
 
 
