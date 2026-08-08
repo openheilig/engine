@@ -51,31 +51,21 @@ var bone_count := 0
 var bone_roots := 0
 var bind_count := 0
 var bone_sanitised := 0
-## Did every bone's Skeleton3D global rest come out equal to its composed bind
-## transform, to within the DERIVED tolerance below?
 ##
-## WHAT THIS PROVES: the two sides are computed by different code over
-## different orderings. `got` is Godot's own accumulation inside Skeleton3D,
-## walking Skeleton3D parent links in Skeleton3D index order; `want` is
-## Sacred.Models.bind_poses()'s own chain walk in Granny file order. They agree
-## only if the topological sort and the Granny-to-Skeleton3D map are both
-## right, which is exactly the silent-deformation class of bug: an index-space
-## mix-up still renders, it just renders a different creature.
+## REMOVED HERE: the `rest_eq_bind` assertion, which was CIRCULAR and is not
+## replaced by a weaker one. It compared a bone's Skeleton3D global rest against
+## its composed bind transform, but both operands were chain-compositions of the
+## SAME stored local rests, and the Skin bind was itself defined as the inverse
+## of one of them -- so the product was the identity by construction, for any
+## bone data whatsoever, correct or not. It reported true, including on a render
+## a human rejected as visibly wrong, and it would have reported true on
+## arbitrary garbage. A check that cannot fail proves nothing, and leaving it in
+## was worse than having nothing: it advertised a guarantee it never carried.
 ##
-## WHAT THIS DOES NOT PROVE: that the 68-byte bone record was decoded
-## correctly. Both sides read the same stored numbers, so a wrong-but-
-## consistent decode satisfies both. The format stores no independent bind
-## matrix to check against (see Sacred.Models.bind_poses()), so no stronger
-## comparison is available from the file alone. Stated here rather than left
-## for a reader to assume the check is worth more than it is.
-var rest_eq_bind := false
-## Never a written-in constant: derived by Sacred.Models.bind_poses() from the
-## measured bind-matrix magnitude and the file's own chain depth.
-var rest_bind_eps := -1.0
-var rest_bind_maxmag := 0.0
-var rest_bind_ulp := 0.0
-var rest_bind_depth := 0
-var rest_bind_delta := 0.0
+## The skeleton and skin layer is therefore CURRENTLY UNVALIDATED. Validating it
+## needs an oracle independent of our own decode -- an external renderer's bone
+## positions, or a posed frame compared against retail -- not another
+## rearrangement of the same stored numbers.
 
 var _settled := false
 var _skeleton: Skeleton3D = null
@@ -116,12 +106,6 @@ func setup(models: Sacred.Models, entry: int) -> bool:
 	# Must precede add_surface_from_arrays: ARRAY_BONES/ARRAY_WEIGHTS are
 	# surface arrays, not something attachable afterwards.
 	if not _build_rig(models, entry):
-		return false
-	# A rig whose rest does not equal its bind is refused HERE rather than
-	# inside _build_rig, so the harness can still report the false verdict while
-	# the renderer still refuses to draw it. Rendering it anyway would produce a
-	# deformed model that looks like a plausible creature.
-	if _skeleton != null and not rest_eq_bind:
 		return false
 	if not _fill_weights(models, entry, m, arr):
 		return false
@@ -170,9 +154,7 @@ func rig_facts(models: Sacred.Models, entry: int) -> Dictionary:
 		return {}
 	var out := {
 		"count": bone_count, "roots": bone_roots, "binds": bind_count,
-		"sanitised": bone_sanitised, "rest_eq_bind": rest_eq_bind,
-		"eps": rest_bind_eps, "maxmag": rest_bind_maxmag,
-		"ulp": rest_bind_ulp, "depth": rest_bind_depth, "delta": rest_bind_delta,
+		"sanitised": bone_sanitised,
 	}
 	# The Skeleton3D was never added to a tree, so nothing else will free it.
 	if _skeleton != null:
@@ -317,32 +299,11 @@ func _build_rig(models: Sacred.Models, entry: int) -> bool:
 		push_error("ModelView: entry %d has bones but nothing is weighted to any of them" % entry)
 		return false
 
-	# The rest-equals-bind assertion. See rest_eq_bind's declaration for what it
-	# does and does not prove.
-	rest_bind_eps = models.REST_BIND_EPS
-	rest_bind_maxmag = models.last_bind_maxmag
-	rest_bind_ulp = models.last_bind_ulp
-	rest_bind_depth = models.last_bind_depth
-	if rest_bind_eps < 0.0:
-		push_error("ModelView: entry %d produced no derived tolerance -- refusing to compare" % entry)
-		return false
-	rest_bind_delta = 0.0
-	for g in n:
-		var got := _skeleton.get_bone_global_rest(granny_to_skel[g])
-		var want: Transform3D = binds[g]
-		for col in 3:
-			var d := got.basis[col] - want.basis[col]
-			rest_bind_delta = maxf(rest_bind_delta, maxf(absf(d.x), maxf(absf(d.y), absf(d.z))))
-		var do_ := got.origin - want.origin
-		rest_bind_delta = maxf(rest_bind_delta, maxf(absf(do_.x), maxf(absf(do_.y), absf(do_.z))))
-	rest_eq_bind = rest_bind_delta < rest_bind_eps
-	if not rest_eq_bind:
-		# Recorded here, refused in setup(). A failed assertion must still be
-		# REPORTABLE -- verify.gd's fact line needs to print `false`, and a
-		# builder that bailed here would print "no skeleton" instead, which is a
-		# different claim about the file.
-		push_error("ModelView: entry %d rest does not equal bind -- max component delta %.9f against eps %.9f (maxmag %.3f)" % [
-			entry, rest_bind_delta, rest_bind_eps, rest_bind_maxmag])
+	# The rest-equals-bind assertion stood here and has been REMOVED, not
+	# weakened: it was circular and could not fail. See the note at the top of
+	# this file. Nothing replaces it, because nothing available from the file
+	# alone would be any less circular -- the skeleton and skin layer is
+	# knowingly unvalidated until an external oracle exists.
 	return true
 
 

@@ -424,12 +424,11 @@ func _show_model(install: String, name: String) -> void:
 	# stores no name.
 	print("bones\tcount=%d\troots=%d\tbinds=%d\tsanitised=%d" % [
 		view.bone_count, view.bone_roots, view.bind_count, view.bone_sanitised])
-	# The verdict never travels without its own sizing: a bare true/false with
-	# an unstated tolerance is a test nobody can check, and one whose tolerance
-	# could have been widened until it passed.
-	print("rest_eq_bind\t%s\tdelta=%.9f\teps=%.9f\tmaxmag=%.3f\tulp=%.9f\tdepth=%d" % [
-		view.rest_eq_bind, view.rest_bind_delta, view.rest_bind_eps,
-		view.rest_bind_maxmag, view.rest_bind_ulp, view.rest_bind_depth])
+	# No rest-equals-bind verdict is printed any more. The assertion behind it
+	# was circular -- both operands composed the same stored local rests -- so
+	# it reported true unconditionally, including on a render a human rejected.
+	# It is removed rather than replaced: the skeleton and skin layer is
+	# unvalidated until an oracle independent of our own decode exists.
 	await _maybe_screenshot()
 
 

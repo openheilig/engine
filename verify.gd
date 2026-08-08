@@ -99,15 +99,12 @@ func _init() -> void:
 	# harness. A harness that reimplements the thing it tests only ever agrees
 	# with itself.
 	#
-	# maxmag is printed to three decimals, and that is not a diff that was
-	# widened until it passed: it is the precision the number actually has.
-	# Godot composes Transform3D in float32 and verify_ref.py composes in
-	# float64, so a depth-15 chain accumulates a genuine difference between the
-	# two -- measured at 1.95e-5 on GLAD_SA5_SHOULDER (65.442268 here against
-	# 65.442288 there), which is the same order as the depth x ULP error budget
-	# eps itself is built from. Nine decimals would be asserting digits that do
-	# not exist. eps, ulp and depth ARE exact on both sides: ulp is a power of
-	# two, depth an integer, and the two magnitudes land in the same binade.
+	# The `rest_eq_bind` fact line that stood beside `bones` has been removed
+	# from BOTH sides of the harness, because the assertion behind it was
+	# circular and could not fail. Removing it from one side only would have
+	# broken parity, and keeping it would have kept a green light that meant
+	# nothing. `bones` stays: its md5 is over the raw stored bone bytes, which
+	# is a real cross-implementation comparison.
 	for idx: int in MODELS:
 		var mv := ModelView.new()
 		var f := mv.rig_facts(models, idx)
@@ -115,15 +112,10 @@ func _init() -> void:
 		if f.is_empty() or int(f["count"]) == 0:
 			print("bones\t%d\tcount=0\troots=0\tbinds=0\tsanitised=0\tmd5=%s" % [
 				idx, _md5(PackedByteArray())])
-			print("rest_eq_bind\t%s\tfalse\teps=%.9f\tmaxmag=%.3f\tulp=%.9f\tdepth=%d" % [
-				models.entry_name(idx), -1.0, 0.0, 0.0, 0])
 			continue
 		print("bones\t%d\tcount=%d\troots=%d\tbinds=%d\tsanitised=%d\tmd5=%s" % [
 			idx, int(f["count"]), int(f["roots"]), int(f["binds"]), int(f["sanitised"]),
 			_md5(models.bone_bytes(idx))])
-		print("rest_eq_bind\t%s\t%s\teps=%.9f\tmaxmag=%.3f\tulp=%.9f\tdepth=%d" % [
-			models.entry_name(idx), f["rest_eq_bind"], f["eps"], f["maxmag"],
-			f["ulp"], int(f["depth"])])
 
 	_layer_check()
 	quit(0)
