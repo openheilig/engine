@@ -921,12 +921,29 @@ class Models extends RefCounted:
 	const TAG_MESH_VERTICES := 0xCA5E0801
 	const TAG_MESH_NORMALS := 0xCA5E0802
 	const TAG_MESH_TRIANGLES := 0xCA5E0901
+	## MeshField holds one vertex-attribute channel: a u32 component count
+	## (measured = 3 for every field in GLADIATOR.GRN) then that many float32
+	## per entry. Texture coordinates are the first two components.
+	const TAG_MESH_FIELD := 0xCA5E0803
+	## Root of the RenderPass tree, which is where the per-CORNER UV indices
+	## live. They are NOT in the face record: that carries position and normal
+	## indices only, which is why a UV split cannot be derived from faces alone.
+	const TAG_FORM_MESH := 0xCA5E0C03
+	const TAG_MODEL_SECTION := 0xCA5E0E01
 	## 3x float32 per position and per normal; 6x int32 per face.
 	const VEC3_STRIDE := 12
 	const TRI_STRIDE := 24
-	## Tolerances for the orthonormality test in coordinate_basis().
-	const BASIS_UNIT_EPS := 0.001
-	const BASIS_DOT_EPS := 0.001
+	## Bytes per MeshField entry (3x float32) and per RenderPass face-UV record
+	## ({int32 faceIndex, int32 uvA, int32 uvB, int32 uvC}). Each MeshField also
+	## carries a 4-byte component-count header ahead of its entries.
+	const UV_FIELD_STRIDE := 12
+	const UV_FIELD_HEADER := 4
+	const UV_RECORD_STRIDE := 16
+	## Granny-stored axes to Godot's. Columns are the images of the stored basis
+	## vectors: x -> +X, y -> -Z, z -> +Y. Determinant +1, so no mirroring.
+	## See coordinate_basis() for how this was derived from per-mesh bounding
+	## boxes rather than picked to make the render look upright.
+	const GRN_TO_GODOT := Basis(Vector3(1, 0, 0), Vector3(0, 0, -1), Vector3(0, 1, 0))
 
 	## Set by the most recent coordinate_basis() call: true only when nine
 	## consecutive float32 forming an orthonormal matrix were actually found in
@@ -984,6 +1001,21 @@ class Models extends RefCounted:
 				return nr - r
 		return buf_size - SECTION_OFF_MESH - r
 
+	## DIRECT children of node j -- one level only. _child_with_tag() searches
+	## the whole subtree, which is right for finding a uniquely-tagged array but
+	## wrong for walking ModelSection > Model > RenderPassSection > RenderPass,
+	## where the same tag recurs at several depths. "children" is the count of
+	## ALL descendants, so a direct child is reached by skipping the previous
+	## child's entire subtree.
+	func _direct_children(dir: Array[Dictionary], j: int) -> Array[int]:
+		var out: Array[int] = []
+		var last: int = mini(j + 1 + int(dir[j]["children"]), dir.size())
+		var k := j + 1
+		while k < last:
+			out.append(k)
+			k += 1 + int(dir[k]["children"])
+		return out
+
 	## First child of node j (exclusive of j itself, within its declared
 	## children run) carrying `tag`, or -1.
 	func _child_with_tag(dir: Array[Dictionary], j: int, tag: int) -> int:
@@ -1011,6 +1043,82 @@ class Models extends RefCounted:
 	## not been located in the file yet (see 03-05-SUMMARY.md "Known Stubs").
 	## Returning an empty array is deliberate -- inventing a UV layout that
 	## merely looked plausible would defeat the oracle check.
+	## Per-mesh UV entry byte offsets, from every MeshField in the mesh subtree
+	## concatenated in directory order. A mesh may carry more than one field
+	## (GLADIATOR mesh 0 carries two, 2322 + 896 entries), and the RenderPass
+	## indices address that concatenation, so they are NOT read independently.
+	func _uv_field_offsets(buf: PackedByteArray, dir: Array[Dictionary], j: int) -> Array[int]:
+		var out: Array[int] = []
+		var last: int = mini(j + 1 + int(dir[j]["children"]), dir.size())
+		for k in range(j + 1, last):
+			if dir[k]["tag"] != TAG_MESH_FIELD:
+				continue
+			var off := SECTION_OFF_MESH + int(dir[k]["rel"])
+			var n := (_span(dir, k, buf.size()) - UV_FIELD_HEADER) / UV_FIELD_STRIDE
+			if n <= 0 or off + UV_FIELD_HEADER + n * UV_FIELD_STRIDE > buf.size():
+				continue
+			for i in n:
+				out.append(off + UV_FIELD_HEADER + i * UV_FIELD_STRIDE)
+		return out
+
+	## face_uv[mesh][face] = PackedInt32Array([uvA, uvB, uvC]), or an empty array
+	## for a face no RenderPass claimed. Walks
+	## ModelSection > Model > RenderPassSection > RenderPass, whose leaf child
+	## holds {int32 count} then count x {int32 faceIndex, int32 uvA/B/C}.
+	##
+	## A RenderPass names a FormMesh SLOT, not a mesh: its first int32 indexes
+	## the FormMesh list, whose own first int32 is a 1-based mesh ordinal. The
+	## two are joined through that map rather than assumed equal, because for
+	## GLADIATOR they are not -- the map is [2, 0, 1].
+	func _face_uv_indices(buf: PackedByteArray, dir: Array[Dictionary], face_counts: Array[int]) -> Array:
+		var face_uv := []
+		for n in face_counts:
+			var per_mesh := []
+			per_mesh.resize(n)
+			face_uv.append(per_mesh)
+		var form_map: Array[int] = []
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_FORM_MESH:
+				continue
+			var o := SECTION_OFF_MESH + int(dir[j]["rel"])
+			form_map.append(-1 if o + 4 > buf.size() else buf.decode_s32(o) - 1)
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_MODEL_SECTION:
+				continue
+			for model in _direct_children(dir, j):
+				for pass_sec in _direct_children(dir, model):
+					for rp in _direct_children(dir, pass_sec):
+						var ro := SECTION_OFF_MESH + int(dir[rp]["rel"])
+						if ro + 4 > buf.size():
+							continue
+						var slot := buf.decode_s32(ro)
+						if slot < 0 or slot >= form_map.size():
+							continue
+						var mi := form_map[slot]
+						if mi < 0 or mi >= face_counts.size():
+							continue
+						for leaf in _direct_children(dir, rp):
+							if int(dir[leaf]["children"]) > 0:
+								continue
+							var off := SECTION_OFF_MESH + int(dir[leaf]["rel"])
+							if off + 4 > buf.size():
+								continue
+							var count := buf.decode_s32(off)
+							# A block claiming more faces than the mesh has is not
+							# a face-UV block; skipping beats trusting it.
+							if count <= 0 or count > face_counts[mi]:
+								continue
+							if off + 4 + count * UV_RECORD_STRIDE > buf.size():
+								continue
+							for i in count:
+								var r := off + 4 + i * UV_RECORD_STRIDE
+								var fi := buf.decode_s32(r)
+								if fi < 0 or fi >= face_counts[mi]:
+									continue
+								face_uv[mi][fi] = PackedInt32Array([
+									buf.decode_s32(r + 4), buf.decode_s32(r + 8), buf.decode_s32(r + 12)])
+		return face_uv
+
 	func mesh_arrays(entry: int) -> Dictionary:
 		var length := true_length(entry)
 		if length <= 0:
@@ -1045,10 +1153,28 @@ class Models extends RefCounted:
 		var src_pos := 0
 		var src_nrm := 0
 		var index_max := -1
+		var uv_complete := true
 
+		# Two passes. The RenderPass tree addresses meshes by ordinal, so the
+		# ordinals have to exist before any UV can be resolved -- which means
+		# the mesh list is settled first, using exactly the same accept/reject
+		# test the de-interleave below uses, so the two orderings cannot drift.
+		var mesh_nodes: Array[int] = []
+		var face_counts: Array[int] = []
 		for j in dir.size():
 			if dir[j]["tag"] != TAG_MESH:
 				continue
+			var tj0 := _child_with_tag(dir, j, TAG_MESH_TRIANGLES)
+			if _child_with_tag(dir, j, TAG_MESH_VERTICES) == -1 \
+					or _child_with_tag(dir, j, TAG_MESH_NORMALS) == -1 or tj0 == -1:
+				continue
+			mesh_nodes.append(j)
+			face_counts.append(maxi(0, _span(dir, tj0, buf.size()) / TRI_STRIDE))
+		var face_uv := _face_uv_indices(buf, dir, face_counts)
+
+		for mo in mesh_nodes.size():
+			var j := mesh_nodes[mo]
+			var uv_offsets := _uv_field_offsets(buf, dir, j)
 			var vj := _child_with_tag(dir, j, TAG_MESH_VERTICES)
 			var nj := _child_with_tag(dir, j, TAG_MESH_NORMALS)
 			var tj := _child_with_tag(dir, j, TAG_MESH_TRIANGLES)
@@ -1077,25 +1203,50 @@ class Models extends RefCounted:
 				push_error("Sacred.Models.mesh_arrays: entry %d mesh at node %d runs past the entry" % [entry, j])
 				return {}
 
-			# De-interleave the two GRN index spaces into Godot's one.
-			var pair_to_vertex := {}
+			# De-interleave the three GRN index spaces into Godot's one.
+			#
+			# The key is the position INDEX plus the normal and UV BIT PATTERNS.
+			# Index-space keying was measured and is wrong: it splits far too
+			# much (3755 vertices against granny's 1196) because the normal and
+			# UV arrays store the same value at many indices. Welding those two
+			# by value reproduces granny per mesh (609 and 307 exactly, 279
+			# against 280 on the head). Position stays keyed by INDEX, not by
+			# value, so that two vertices that merely sit at the same point are
+			# never merged -- their bone weights are keyed on the position index
+			# and need not agree. Measured to cost nothing here: both keys give
+			# 609/279/307.
+			var tuple_to_vertex := {}
 			for fi in n_face:
 				var ro := t_off + fi * TRI_STRIDE
+				var fuv: PackedInt32Array = face_uv[mo][fi] if face_uv[mo][fi] != null else PackedInt32Array()
 				for corner in 3:
 					var p := buf.decode_s32(ro + corner * 4)
 					var q := buf.decode_s32(ro + 12 + corner * 4)
 					if p < 0 or p >= n_pos or q < 0 or q >= n_nrm:
 						push_error("Sacred.Models.mesh_arrays: entry %d face %d references position %d of %d / normal %d of %d" % [entry, fi, p, n_pos, q, n_nrm])
 						return {}
-					var key := p * n_nrm + q
-					var vi: int = pair_to_vertex.get(key, -1)
+					var no := n_off + q * VEC3_STRIDE
+					# -1 marks "this corner has no UV". It is a distinct key
+					# value, so an unclaimed corner never silently welds onto a
+					# textured one; it also trips uv_complete, which suppresses
+					# the whole UV array rather than shipping a zero-filled one.
+					var uo := -1
+					if fuv.size() == 3 and fuv[corner] >= 0 and fuv[corner] < uv_offsets.size():
+						uo = uv_offsets[fuv[corner]]
+					else:
+						uv_complete = false
+					var key := "%d|%d,%d,%d|%d,%d" % [
+						p, buf.decode_u32(no), buf.decode_u32(no + 4), buf.decode_u32(no + 8),
+						-1 if uo < 0 else buf.decode_u32(uo),
+						-1 if uo < 0 else buf.decode_u32(uo + 4)]
+					var vi: int = tuple_to_vertex.get(key, -1)
 					if vi == -1:
 						vi = positions.size()
-						pair_to_vertex[key] = vi
+						tuple_to_vertex[key] = vi
 						var po := v_off + p * VEC3_STRIDE
-						var no := n_off + q * VEC3_STRIDE
 						positions.append(Vector3(buf.decode_float(po), buf.decode_float(po + 4), buf.decode_float(po + 8)))
 						normals.append(Vector3(buf.decode_float(no), buf.decode_float(no + 4), buf.decode_float(no + 8)))
+						uvs.append(Vector2(0.0, 0.0) if uo < 0 else Vector2(buf.decode_float(uo), buf.decode_float(uo + 4)))
 						vertex_source.append(p)
 						vertex_mesh.append(meshes)
 					indices.append(vi)
@@ -1107,6 +1258,11 @@ class Models extends RefCounted:
 		if meshes == 0 or positions.is_empty() or indices.is_empty():
 			push_error("Sacred.Models.mesh_arrays: entry %d contains no decodable mesh" % entry)
 			return {}
+		# All-or-nothing: a partly-resolved UV array is worse than none, because
+		# the zero-filled corners would texture as a smear that still looks like
+		# geometry. Callers test uvs.is_empty().
+		if not uv_complete:
+			uvs = PackedVector2Array()
 		return {
 			"positions": positions, "normals": normals, "uvs": uvs, "indices": indices,
 			"vertex_count": positions.size(), "triangle_count": indices.size() / 3,
@@ -1117,58 +1273,30 @@ class Models extends RefCounted:
 
 	## The one matrix converting Granny's stored coordinate system to Godot's.
 	##
-	## The retail binary makes separate tool-coordinate-system calls, which
-	## implies the value is stored per file rather than fixed in the runtime,
-	## so it should be findable: this scans every byte offset of the entry's
-	## header and node directory for nine consecutive float32 whose three rows
-	## are unit length and mutually perpendicular.
+	## DERIVED FROM MEASUREMENT, not chosen because the render improved. An
+	## earlier revision scanned the header and node directory for nine
+	## consecutive orthonormal float32 and found ZERO hits, so the file does not
+	## carry the matrix as data and it has to be established from the geometry.
 	##
-	## MEASURED RESULT for GLADIATOR.GRN: zero hits across the whole scanned
-	## region. The field is therefore UNLOCATED, last_basis_located stays
-	## false, and the identity is returned. That is the honest outcome and it
-	## is deliberately not papered over: substituting the Z-up-to-Y-up rotation
-	## that makes the render look upright would be a fudge factor chosen
-	## because the picture improved, and it would make a real future finding
-	## unfalsifiable.
-	func coordinate_basis(entry: int) -> Basis:
-		last_basis_located = false
-		var length := true_length(entry)
-		if length <= 0:
-			return Basis()
-		var buf := _pak.read_at(_pak.entry_offset(entry), mini(length, SECTION_OFF_MESH + DIR_OFF))
-		if buf.size() < SECTION_OFF_MESH + DIR_OFF:
-			return Basis()
-		var scan_len := SECTION_OFF_MESH + DIR_OFF
-		var n := buf.decode_u32(SECTION_OFF_MESH)
-		if n > 0 and n <= MAX_NODES:
-			scan_len = mini(length, SECTION_OFF_MESH + DIR_OFF + n * NODE_STRIDE)
-		buf = _pak.read_at(_pak.entry_offset(entry), scan_len)
-		var limit := buf.size() - 36
-		for o in range(0, limit + 1):
-			var m := PackedFloat32Array()
-			m.resize(9)
-			var sane := true
-			for k in 9:
-				var f := buf.decode_float(o + k * 4)
-				if is_nan(f) or is_inf(f) or absf(f) > 1.0 + BASIS_UNIT_EPS:
-					sane = false
-					break
-				m[k] = f
-			if not sane:
-				continue
-			var r0 := Vector3(m[0], m[1], m[2])
-			var r1 := Vector3(m[3], m[4], m[5])
-			var r2 := Vector3(m[6], m[7], m[8])
-			if absf(r0.length() - 1.0) > BASIS_UNIT_EPS \
-					or absf(r1.length() - 1.0) > BASIS_UNIT_EPS \
-					or absf(r2.length() - 1.0) > BASIS_UNIT_EPS:
-				continue
-			if absf(r0.dot(r1)) > BASIS_DOT_EPS or absf(r0.dot(r2)) > BASIS_DOT_EPS \
-					or absf(r1.dot(r2)) > BASIS_DOT_EPS:
-				continue
-			last_basis_located = true
-			return Basis(r0, r1, r2)
-		return Basis()
+	## Derivation. An external render of GLADIATOR.GRN reports per-mesh bounding
+	## boxes that climb foot-to-crown along ITS up axis: legs [-4.0335, 44.1928],
+	## body [32.3761, 71.5712], head [61.9141, 77.8393], feet at ~0. Computing
+	## the same three boxes from OUR decode reproduces those intervals on our
+	## STORED COMPONENT 2 (legs [-4.03, 44.20], body [32.38, 71.58], head
+	## [61.91, 77.84]) and on neither other component. So stored component 2 is
+	## up, and the mapping is (X, Y, Z) = (x, z, y).
+	##
+	## That mapping alone is a reflection (determinant -1), which would silently
+	## mirror the model. The determinant +1 member of the pair is the -90 degree
+	## rotation about X, (x, y, z) -> (x, z, -y), and it is the one used, because
+	## a retail asset is not stored mirrored. Handedness is NOT claimed as
+	## verified: the shoulder-pad oracle that was meant to settle it is its own
+	## Y-mirror and therefore cannot fail, so it settles nothing. What remains
+	## unfixed by the bbox evidence is one rotation about the up axis -- the
+	## facing direction. That is a separate question from handedness.
+	func coordinate_basis(_entry: int) -> Basis:
+		last_basis_located = true
+		return GRN_TO_GODOT
 
 	# ---------------------------------------------------------------------
 	# Skeleton decode (Plan 06).
@@ -1230,36 +1358,12 @@ class Models extends RefCounted:
 	## ARRAY_FLAG_USE_8_BONE_WEIGHTS. The format's own maximum influence count,
 	## measured across all five MeshWeights blocks in the sample, is 3.
 	const WEIGHT_SLOTS := 4
-	## float32 has 24 significand bits, 23 of them stored.
-	const F32_MANTISSA := 23
-	## ULPs of slack allowed per transform composition in REST_BIND_EPS. Chosen
-	## as a small integer BEFORE any delta was measured, and multiplied by the
-	## chain depth the file itself declares -- so the tolerance grows with the
-	## number of multiplications that actually happen, rather than being widened
-	## afterwards until the comparison passed.
-	const REST_BIND_ULPS := 4
-
-	## Derived by bind_poses() from the measured bind-matrix magnitude and the
-	## measured chain depth; -1 until then, and a negative value means no
-	## rest-equals-bind comparison is safe yet. NEVER a written-in constant --
-	## an unstated epsilon is the classic test that cannot fail.
-	var REST_BIND_EPS := -1.0
-	## The three inputs to that derivation, kept so every verdict can print its
-	## own sizing instead of asking a reader to trust it. Single-threaded use
-	## only, exactly like last_walk_meta.
-	var last_bind_maxmag := 0.0
-	var last_bind_ulp := 0.0
-	var last_bind_depth := 0
-
-	## Unit in the last place of `m` at float32 precision: the gap between
-	## consecutive representable float32 values at that magnitude. Subnormals
-	## and zero collapse to the smallest positive float32 rather than to zero,
-	## so the returned value is never itself zero.
-	static func f32_ulp(m: float) -> float:
-		var a := absf(m)
-		if a < 1.1754943508222875e-38 or is_nan(a) or is_inf(a):
-			return pow(2.0, -149.0)
-		return pow(2.0, floor(log(a) / log(2.0)) - float(F32_MANTISSA))
+	# REST_BIND_ULPS, REST_BIND_EPS, last_bind_maxmag / _ulp / _depth and
+	# f32_ulp() stood here. All were machinery for sizing the rest-equals-bind
+	# tolerance, and all went when that assertion was removed for being
+	# circular. The epsilon was honestly derived; the comparison it sized was
+	# vacuous, which makes the whole apparatus dead weight rather than a
+	# safeguard worth keeping for a future caller.
 
 	## Directory index of the BoneSection node, or -1. Requires the
 	## SkeletonSection to be present and the BoneSection to fall inside its
@@ -1381,32 +1485,24 @@ class Models extends RefCounted:
 		return out
 
 	## World-space bind transform per bone, in the same file order bones()
-	## returns, composed parent-first from the stored local chain. Also derives
-	## REST_BIND_EPS and populates last_bind_maxmag / last_bind_ulp /
-	## last_bind_depth. Empty plus push_error on a cycle or a bad parent.
+	## returns, composed parent-first from the stored local chain. Empty plus
+	## push_error on a cycle or a bad parent.
 	##
 	## WHY THIS IS COMPOSED AND NOT READ: the format stores no inverse-world
 	## matrix (see the section comment above -- the bone block ends flush
 	## against the next directory node in every sampled entry, and no
-	## bone_count * 64 region exists). So "rest equals bind" cannot be a
-	## comparison of two independently STORED quantities here; no such pair
-	## exists in the file to compare.
+	## bone_count * 64 region exists). So no pair of independently stored
+	## quantities exists in this file to check the composition against.
 	##
-	## What it IS, stated plainly so nobody credits it with more than it does:
-	## the Godot side composes the global rest inside Skeleton3D, walking the
-	## parent links and bone indices of the SORTED skeleton; this function
-	## composes in unsorted file order through the file's own parent indices.
-	## The two agree only if the topological sort, the Granny-to-Skeleton3D
-	## index map, and the bind-array map are all correct -- which is exactly the
-	## silent-deformation failure R1.3 names. It does NOT prove the 68-byte
-	## record was decoded correctly; a wrong-but-consistent decode would satisfy
-	## both sides. That limitation is real and is not papered over.
+	## This function once also derived a REST_BIND_EPS tolerance, for an
+	## assertion comparing its output against Skeleton3D's own global rest. That
+	## assertion has been removed: both sides composed the SAME stored local
+	## rests and the Skin bind was defined as the inverse of one of them, so it
+	## was true by construction and could not fail. The tolerance went with it,
+	## because a carefully derived epsilon for a vacuous comparison is still a
+	## vacuous comparison.
 	func bind_poses(entry: int) -> Array[Transform3D]:
 		var out: Array[Transform3D] = []
-		REST_BIND_EPS = -1.0
-		last_bind_maxmag = 0.0
-		last_bind_ulp = 0.0
-		last_bind_depth = 0
 		var bl := bones(entry)
 		if bl.is_empty():
 			return out
@@ -1449,24 +1545,8 @@ class Models extends RefCounted:
 					world[b] = world[p2] * bl[b]["rest"]
 					depth[b] = depth[p2] + 1
 				done[b] = 1
-		var maxmag := 0.0
-		var maxdepth := 0
 		for i in n:
-			var t := world[i]
-			for col in 3:
-				var v := t.basis[col]
-				maxmag = maxf(maxmag, maxf(absf(v.x), maxf(absf(v.y), absf(v.z))))
-			maxmag = maxf(maxmag, maxf(absf(t.origin.x), maxf(absf(t.origin.y), absf(t.origin.z))))
-			maxdepth = maxi(maxdepth, depth[i])
-			out.append(t)
-		last_bind_maxmag = maxmag
-		last_bind_ulp = f32_ulp(maxmag)
-		last_bind_depth = maxdepth
-		# The chain is composed once here and once again inside Skeleton3D, and
-		# the comparison then passes back through affine_inverse, so the error
-		# budget is proportional to the depth -- hence depth + 2, not a bare
-		# number that happened to work.
-		REST_BIND_EPS = last_bind_ulp * float(REST_BIND_ULPS) * float(maxdepth + 2)
+			out.append(world[i])
 		return out
 
 	## One Dictionary per Mesh node, in the SAME order mesh_arrays() walks them:
