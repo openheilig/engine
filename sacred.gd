@@ -120,6 +120,11 @@ static func inflate(z: PackedByteArray, out_size: int) -> PackedByteArray:
 class Pak extends RefCounted:
 	var offsets := PackedInt64Array()
 	var sizes := PackedInt64Array()
+	## Index record's first u32 (kind/flags). Added for models.pak, whose 4993
+	## entries split 1572/3421 between two structurally different payload
+	## kinds (64 mesh, 65 motion) sharing one index -- every other pak has one
+	## shape, so nothing before Sacred.Models needed this field kept.
+	var kinds := PackedInt32Array()
 	var _f: FileAccess
 
 	func _init(path: String) -> void:
@@ -133,7 +138,9 @@ class Pak extends RefCounted:
 		var idx := _f.get_buffer(n * Sacred.PAK_IDX)
 		offsets.resize(n)
 		sizes.resize(n)
+		kinds.resize(n)
 		for i in n:
+			kinds[i] = idx.decode_u32(i * Sacred.PAK_IDX + 0)
 			offsets[i] = idx.decode_u32(i * Sacred.PAK_IDX + 4)
 			sizes[i] = idx.decode_u32(i * Sacred.PAK_IDX + 8)
 
@@ -155,6 +162,12 @@ class Pak extends RefCounted:
 
 	func entry_offset(i: int) -> int:
 		return offsets[i]
+
+	## Byte length of the opened archive, or 0 if no file is open. Needed by
+	## Sacred.Models.true_length() for the last entry, which has no successor
+	## offset to subtract against.
+	func file_size() -> int:
+		return _f.get_length() if _f != null else 0
 
 
 ## tiles.pak: 64-byte records, one per tile id, giving the texture.pak id.
@@ -598,3 +611,152 @@ static func _argb4444_to_rgba8(px: PackedByteArray, n: int) -> PackedByteArray:
 		out[o + 2] = _lo[px[i * 2] * 2 + 1]
 		out[o + 3] = _hi[hi + 1]
 	return out
+
+
+## pak/models.pak -- Granny 1.x tagged-chunk container. R1.1: two payload
+## kinds share one index (64 mesh, 3421 65 motion), each with its own root-tag
+## offset and its own truth about whether the index's third field is a byte
+## length. Measured directly against install/pak/models.pak, not read from
+## Iris1 (GPL) or the statically-linked Granny runtime -- every offset and
+## chunk size below is byte evidence recorded in
+## .planning/phases/03-granny-grn-tag-walk-then-posed-mesh/03-RESEARCH.md.
+##
+## This class emits (tag, offset, length) triples only -- no field
+## interpretation. Mesh/skeleton decode is a later plan's job.
+class Models extends RefCounted:
+	## High 16 bits of every documented tag; also the root chunk's own value.
+	const MAGIC := 0xCA5E0000
+	const TERMINATOR := 0xCA5EFFFF
+	const KIND_MESH := 64
+	const KIND_MOTION := 65
+	## kind==64 (mesh) ONLY. Do not generalise -- kind==65 (motion, R1.5) puts
+	## the root tag at MAGIC_OFF_MOTION instead, confirmed on the full corpus
+	## for kind==64 and a 25-entry sample for kind==65 (03-RESEARCH.md
+	## "Magic offset is kind-dependent").
+	const MAGIC_OFF_MESH := 0x4EA
+	const MAGIC_OFF_MOTION := 0x140   ## not used this phase; recorded so R1.5 doesn't re-derive it.
+	const NAME_LEN := 64
+	## Fixed sizes (tag included) for the tags this phase can walk. The header
+	## chain only, for now -- Plan 01 Task 2 and Plan 02 extend this with the
+	## fixed 12-byte leaf families research documented.
+	##
+	## object and final are 20/36, NOT the 16/32 03-RESEARCH.md prose states --
+	## corrected against a direct hex census of GLADIATOR.GRN (pak index 589):
+	## root@1258 (32) -> copyright@1290 (20) -> object@1310 (20, ends 1330,
+	## not 1326) -> final@1330 (36, ends 1366 where the first leaf tag
+	## 0xCA5E0200 begins). Sized 16/32 stopped `walk()` after 3 tags: it read
+	## the final tag's own offset (1326) as reserved/zero padding one field
+	## short of where 0xCA5E0101 actually starts.
+	const TAG_SIZES := {
+		MAGIC: 32,          # 0xCA5E0000 root
+		0xCA5E0102: 20,     # copyright
+		0xCA5E0103: 20,     # object
+		0xCA5E0101: 36,     # final
+	}
+
+	var _pak: Sacred.Pak
+
+	func _init(pak: Sacred.Pak) -> void:
+		_pak = pak
+
+	func count() -> int:
+		return _pak.count()
+
+	## Bounds-checked read of the entry's stored kind (64 mesh, 65 motion).
+	## -1 for an out-of-range index.
+	func kind_of(entry: int) -> int:
+		if entry < 0 or entry >= _pak.count():
+			return -1
+		return _pak.kinds[entry]
+
+	## MAGIC_OFF_MESH for kind==64, MAGIC_OFF_MOTION for kind==65, -1
+	## otherwise. Never a single unqualified constant -- see MAGIC_OFF_MESH.
+	func magic_offset(entry: int) -> int:
+		var kind := kind_of(entry)
+		if kind == KIND_MESH:
+			return MAGIC_OFF_MESH
+		if kind == KIND_MOTION:
+			return MAGIC_OFF_MOTION
+		return -1
+
+	## True on-disk length, derived from the gap to the next entry's offset
+	## (or to end of file, for the last entry). NEVER _pak.sizes[entry]: index
+	## field 3 averages 1.95x the true gap for kind==64 (03-RESEARCH.md
+	## "Index field 3 is not a byte length for kind=64, and IS one for
+	## kind=65") -- this method does not even branch on kind, because the
+	## rule ("derive from offsets, not from the index") is uniform; only the
+	## RATIO to field3 differs by kind, and this method never reads field3.
+	## Returns 0 for an out-of-range index or a non-positive derived length.
+	func true_length(entry: int) -> int:
+		if entry < 0 or entry >= _pak.count():
+			return 0
+		var length: int
+		if entry + 1 < _pak.count():
+			length = _pak.entry_offset(entry + 1) - _pak.entry_offset(entry)
+		else:
+			length = _pak.file_size() - _pak.entry_offset(entry)
+		if length <= 0:
+			push_error("Sacred.Models: entry %d has non-positive derived length %d" % [entry, length])
+			return 0
+		return length
+
+	## First NAME_LEN bytes of the entry, truncated at the first NUL and
+	## decoded as ASCII. A byte at or above 0x80, or NAME_LEN bytes with no
+	## NUL, is returned as-is -- get_string_from_ascii() maps each byte to its
+	## own code point, it does not substitute U+FFFD, so no silent
+	## normalisation happens here.
+	func entry_name(entry: int) -> String:
+		if entry < 0 or entry >= _pak.count():
+			return ""
+		var length := true_length(entry)
+		if length <= 0:
+			return ""
+		var r := _pak.read_at(_pak.entry_offset(entry), mini(NAME_LEN, length))
+		var nul := r.find(0)
+		if nul == -1:
+			return r.get_string_from_ascii()
+		return r.slice(0, nul).get_string_from_ascii()
+
+	## The single exclusion predicate for the whole phase: false when this
+	## entry has no kind-scoped magic offset, is too short to reach it, or
+	## the u32 there is not MAGIC. INVALID_MODEL (index 0) and INVALID_MOTION
+	## (index 1572) are rejected by this same check, not by an index list or
+	## a size cutoff (03-RESEARCH.md Pitfall 9 -- the exclusion set must fall
+	## out of the walker's own logic, never be hardcoded).
+	func magic_ok(entry: int) -> bool:
+		var off := magic_offset(entry)
+		if off == -1:
+			return false
+		var length := true_length(entry)
+		if length < off + 4:
+			return false
+		var r := _pak.read_at(_pak.entry_offset(entry) + off, 4)
+		if r.size() < 4:
+			return false
+		return r.decode_u32(0) == MAGIC
+
+	## (tag, offset, length) triples from the entry's root tag, entry-relative
+	## offsets, advancing strictly by each tag's declared size from
+	## TAG_SIZES -- never by scanning for the next tag-shaped byte pattern.
+	## Stops (returning what was collected so far) on the terminator, on a
+	## tag with no TAG_SIZES entry, or on a read that would pass the buffer
+	## end. Empty for an entry that fails magic_ok().
+	func walk(entry: int) -> Array[Dictionary]:
+		var triples: Array[Dictionary] = []
+		if not magic_ok(entry):
+			return triples
+		var length := true_length(entry)
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		var off := magic_offset(entry)
+		while off + 4 <= buf.size():
+			var tag := buf.decode_u32(off)
+			if tag == TERMINATOR:
+				break
+			if not TAG_SIZES.has(tag):
+				break
+			var size: int = TAG_SIZES[tag]
+			if off + size > buf.size():
+				break
+			triples.append({"tag": tag, "off": off, "len": size})
+			off += size
+		return triples
