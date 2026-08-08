@@ -1,8 +1,11 @@
 extends SceneTree
-## Tag-walk dumper for one Granny .GRN entry in pak/models.pak.
+## Tag-walk dumper for one Granny .GRN entry, or a corpus-wide sweep, in
+## pak/models.pak.
 ##
 ##   godot --headless --path godot-port --script res://grnwalk.gd -- --grn-index=589
 ##   godot --headless --path godot-port --script res://grnwalk.gd -- --census=589
+##   godot --headless --path godot-port --script res://grnwalk.gd -- --corpus
+##   godot --headless --path godot-port --script res://grnwalk.gd -- --falsify=1
 ##
 ## Prints, tab-separated:
 ##   grn    <index>  name=...  kind=...  true_len=...  magic_off=...  magic_ok=...
@@ -13,6 +16,24 @@ extends SceneTree
 ##          -- one line per u32 word inside every header/leaf chunk walk() recognises,
 ##          only emitted with --census=N, for finding the untagged bulk-region length
 ##          field by elimination if H1 is refuted (03-01-PLAN.md Task 2).
+##   corpus entries=<n>  walkable=<n>  skipped=<n>  walked_mesh=<n>  walked_motion=<n>
+##          [falsify=<N>, only when --falsify=N was passed, including N=0]
+##   skip   <index>  name=...  kind=...  reason=...
+##          -- one line per entry Models.magic_ok() rejects; the reason is derived
+##          from the same two checks magic_ok() itself performs, never from an
+##          index literal or a size cutoff (03-02-PLAN.md Task 1).
+##   legend -- explains that the root tag's files= count is definitional (equal
+##          to walkable= by construction) and carries no independent signal.
+##   tagcount 0x<tag,%08x>  files=<distinct entries containing it>  total=<occurrences>
+##          definitional=true|false -- the four documented tags first in ascending
+##          tag order, then every other tag discovered, also ascending.
+##   invariant walkable_eq_4991=<bool>  files_eq_4991_tags=<n>  total_eq_4991_tags=<n>
+##          verdict=PASS|FAIL -- verdict driven solely by walkable==4991 and skipped==2.
+## --corpus sweeps every entry once; --falsify=N repeats the identical sweep with
+## every per-chunk advance offset by N extra bytes, desynchronising the walk
+## exactly as a real off-by-N bug would, to prove the corpus invariant can fail
+## (03-02-PLAN.md "the central trap this plan exists to defeat"). --falsify=0
+## must reproduce --corpus's numbers exactly, marker aside.
 ##
 ## Never reads Iris1 (GPL) or the statically-linked Granny runtime -- every
 ## offset comes from .planning/phases/03-granny-grn-tag-walk-then-posed-mesh/03-RESEARCH.md.
@@ -28,14 +49,22 @@ func _init() -> void:
 	var argv := OS.get_cmdline_user_args() + OS.get_cmdline_args()
 	var grn_index := -1
 	var census_index := -1
+	var do_corpus := false
+	var has_falsify := false
+	var falsify_offset := 0
 	for a in argv:
 		if a.begins_with("--grn-index="):
 			grn_index = int(a.trim_prefix("--grn-index="))
 		elif a.begins_with("--census="):
 			census_index = int(a.trim_prefix("--census="))
+		elif a == "--corpus":
+			do_corpus = true
+		elif a.begins_with("--falsify="):
+			has_falsify = true
+			falsify_offset = int(a.trim_prefix("--falsify="))
 
-	if grn_index < 0 and census_index < 0:
-		printerr("usage: grnwalk.gd -- --grn-index=N | --census=N")
+	if grn_index < 0 and census_index < 0 and not do_corpus and not has_falsify:
+		printerr("usage: grnwalk.gd -- --grn-index=N | --census=N | --corpus | --falsify=N")
 		quit(1)
 		return
 
@@ -49,6 +78,8 @@ func _init() -> void:
 		_dump(models, grn_index)
 	if census_index >= 0:
 		_census(pak, models, census_index)
+	if do_corpus or has_falsify:
+		_corpus(pak, models, falsify_offset, has_falsify)
 	quit(0)
 
 
@@ -92,6 +123,195 @@ func _census(pak: Sacred.Pak, models: Sacred.Models, idx: int) -> void:
 				break
 			print("census\t%d\t%d\t%d" % [idx, word, buf.decode_u32(0)])
 			word += 4
+
+
+## Sweeps every entry of models.pak in ascending index order and prints a
+## tab-separated corpus report. Classification uses Models.magic_ok() alone --
+## the single exclusion predicate for the whole phase, per sacred.gd's own
+## header comment on that method; this loop adds no second skip rule of its
+## own. When an entry is skipped, the printed reason is derived from the same
+## two checks magic_ok() performs internally (offset reachability, then the
+## magic value itself), not from a separate condition.
+##
+## offset is the falsify desync in bytes, applied to every per-chunk advance
+## inside the walk (0 for a clean sweep). explicit_falsify controls only
+## whether the trailing `falsify=<offset>` marker is printed on the `corpus`
+## line -- plain --corpus (no --falsify flag at all) always sweeps at offset 0
+## and never prints the marker, so its output is byte-identical to
+## `--falsify=0`'s once the marker is stripped.
+func _corpus(pak: Sacred.Pak, models: Sacred.Models, offset: int, explicit_falsify: bool) -> void:
+	var n := models.count()
+	var walkable := 0
+	var skipped := 0
+	var walked_mesh := 0
+	var walked_motion := 0
+	var skip_lines: Array[String] = []
+	var files := {}   # tag (int) -> distinct entries containing it
+	var total := {}   # tag (int) -> total occurrences across the corpus
+
+	for i in n:
+		if models.magic_ok(i):
+			walkable += 1
+			var result := _walk_report(pak, models, i, offset)
+			var triples: Array[Dictionary] = result["triples"]
+			var meta: Dictionary = result["meta"]
+			var seen := {}   # tags already counted toward files= for this entry
+			for t: Dictionary in triples:
+				var tag: int = t["tag"]
+				total[tag] = int(total.get(tag, 0)) + 1
+				if not seen.has(tag):
+					seen[tag] = true
+					files[tag] = int(files.get(tag, 0)) + 1
+			var stop_reason: String = meta.get("stop_reason", "")
+			if stop_reason != "unknown-tag" and stop_reason != "budget":
+				var kind := models.kind_of(i)
+				if kind == Sacred.Models.KIND_MESH:
+					walked_mesh += 1
+				elif kind == Sacred.Models.KIND_MOTION:
+					walked_motion += 1
+		else:
+			skipped += 1
+			var off := models.magic_offset(i)
+			var length := models.true_length(i)
+			var reason: String
+			if length < off + 4:
+				reason = "the derived length is too small to reach the kind's magic offset"
+			else:
+				reason = "the bytes at the magic offset are not the magic value"
+			skip_lines.append("skip\t%d\tname=%s\tkind=%d\treason=%s" % [
+				i, models.entry_name(i), models.kind_of(i), reason])
+
+	var corpus_line := "corpus\tentries=%d\twalkable=%d\tskipped=%d\twalked_mesh=%d\twalked_motion=%d" % [
+		n, walkable, skipped, walked_mesh, walked_motion]
+	if explicit_falsify:
+		corpus_line += "\tfalsify=%d" % offset
+	print(corpus_line)
+
+	for line in skip_lines:
+		print(line)
+
+	print("legend\tdefinitional=true means this tag's files= count equals walkable= by construction (magic_ok IS \"root tag present at the kind-appropriate offset\") and carries no independent signal; only definitional=false tags are reached by advancing through declared chunk lengths and are the falsifiable part of the invariant")
+
+	var documented: Array[int] = [Sacred.Models.MAGIC, 0xCA5E0101, 0xCA5E0102, 0xCA5E0103]
+	var discovered: Array[int] = []
+	for k in files.keys():
+		discovered.append(int(k))
+	discovered.sort()
+	var ordered: Array[int] = []
+	for tag in documented:
+		if files.has(tag) or total.has(tag):
+			ordered.append(tag)
+	for tag in discovered:
+		if not documented.has(tag):
+			ordered.append(tag)
+
+	var files_eq_4991 := 0
+	var total_eq_4991 := 0
+	for tag in ordered:
+		var f: int = int(files.get(tag, 0))
+		var t: int = int(total.get(tag, 0))
+		if f == 4991:
+			files_eq_4991 += 1
+		if t == 4991:
+			total_eq_4991 += 1
+		print("tagcount\t0x%08x\tfiles=%d\ttotal=%d\tdefinitional=%s" % [
+			tag, f, t, "true" if tag == Sacred.Models.MAGIC else "false"])
+
+	var walkable_eq_4991 := walkable == 4991
+	var verdict := "PASS" if (walkable_eq_4991 and skipped == 2) else "FAIL"
+	print("invariant\twalkable_eq_4991=%s\tfiles_eq_4991_tags=%d\ttotal_eq_4991_tags=%d\tverdict=%s" % [
+		"true" if walkable_eq_4991 else "false", files_eq_4991, total_eq_4991, verdict])
+
+
+## {triples, meta} for entry idx at the given falsify offset. offset==0
+## delegates to Models.walk() itself (the trusted single implementation), so
+## a clean --corpus sweep and a --falsify=0 sweep read from the exact same
+## code path and cannot diverge. A non-zero offset reimplements the same
+## per-tag dispatch here, in this file only (Models.walk() in sacred.gd is
+## untouched by this plan), injecting the desync into the per-chunk advance.
+func _walk_report(pak: Sacred.Pak, models: Sacred.Models, idx: int, offset: int) -> Dictionary:
+	if offset == 0:
+		var triples := models.walk(idx)
+		return {"triples": triples, "meta": models.last_walk_meta}
+	return _walk_offset(pak, models, idx, offset)
+
+
+## Reimplementation of Sacred.Models.walk()'s per-tag dispatch with every
+## per-chunk advance (`pos += size`) offset by `offset` extra bytes, so the
+## second tag read lands `offset` bytes into the first chunk's payload
+## instead of at the true next tag -- exactly the desync an off-by-N bug in
+## the real walker would produce. Only used for offset != 0; see
+## _walk_report(). Bounds-checked identically to Models.walk(): every
+## decode_u32 is guarded by a buffer-size check first.
+func _walk_offset(pak: Sacred.Pak, models: Sacred.Models, entry: int, offset: int) -> Dictionary:
+	var triples: Array[Dictionary] = []
+	var object_lengths: Array[int] = []
+	var meta := {
+		"h1_confirmed": false, "objects": 0, "h1_bytes": 0,
+		"object_lengths": object_lengths, "consumed": 0,
+		"stop_reason": "", "stop_tag": 0, "stop_off": 0,
+	}
+	if not models.magic_ok(entry):
+		return {"triples": triples, "meta": meta}
+	var length := models.true_length(entry)
+	var buf := pak.read_at(pak.entry_offset(entry), length)
+	var pos := models.magic_offset(entry)
+	meta["consumed"] = pos
+	var objects := 0
+	var h1_total := 0
+	var confirmed := true
+	while pos + 4 <= buf.size() and buf.decode_u32(pos) == Sacred.Models.MAGIC:
+		var root_off := pos
+		var h1_len := 0
+		if root_off + Sacred.Models.H1_LEN_OFF + 4 <= buf.size():
+			h1_len = buf.decode_u32(root_off + Sacred.Models.H1_LEN_OFF)
+		var terminated := false
+		while pos + 4 <= buf.size():
+			if triples.size() >= Sacred.Models.WALK_BUDGET:
+				meta["stop_reason"] = "budget"
+				confirmed = false
+				break
+			var tag := buf.decode_u32(pos)
+			if tag == Sacred.Models.TERMINATOR:
+				terminated = true
+				break
+			if not Sacred.Models.TAG_SIZES.has(tag):
+				meta["stop_reason"] = "unknown-tag"
+				meta["stop_tag"] = tag
+				meta["stop_off"] = pos
+				confirmed = false
+				break
+			var size: int = Sacred.Models.TAG_SIZES[tag]
+			if pos + size > buf.size():
+				meta["stop_reason"] = "truncated"
+				confirmed = false
+				break
+			triples.append({"tag": tag, "off": pos, "len": size})
+			pos += size + offset   # the injected desync -- every chunk advance offset by N bytes
+		if not terminated:
+			meta["consumed"] = pos
+			break
+		objects += 1
+		h1_total += h1_len
+		object_lengths.append(h1_len)
+		var predicted := root_off + h1_len
+		if predicted == length:
+			meta["consumed"] = predicted
+			meta["stop_reason"] = "end-of-entry"
+			break
+		if predicted + 4 <= buf.size() and buf.decode_u32(predicted) == Sacred.Models.MAGIC:
+			pos = predicted
+			meta["consumed"] = predicted
+			continue
+		confirmed = false
+		meta["stop_reason"] = "h1-mismatch"
+		meta["stop_off"] = predicted
+		meta["consumed"] = pos
+		break
+	meta["h1_confirmed"] = confirmed and objects > 0
+	meta["objects"] = objects
+	meta["h1_bytes"] = h1_total
+	return {"triples": triples, "meta": meta}
 
 
 ## MD5 of the UTF-8 text formed by joining, in emission order:
