@@ -158,12 +158,23 @@ static func replay(path: String, sim: Sim, reg: ActorRegistry, player_id: int,
 		if tag == "gap":
 			sim.dropped += int(fields.get("dropped", "0"))
 		elif tag == "input":
+			var dx := float(fields.get("dx", "0"))
+			var dy := float(fields.get("dy", "0"))
+			# Both perturbations act BEFORE this line's tick_once() call, not
+			# after, so the tick they name is the one whose OWN dumped
+			# resolved cell diverges -- not the following tick. tick_once()
+			# still runs every recorded line either way, so the tick
+			# numbering in both dumps' headers stays aligned line-for-line;
+			# only the actor line under the perturbed tick (and everything
+			# after it, D-03) differs, which is what lets replay_diff.sh's
+			# --control mode locate the divergence by tick number at all.
 			if perturb_mode == "skip" and line_tick == perturb_tick:
-				continue   # the actor receives no intent this tick -- on purpose (Task 2)
-			player.heading = Vector2(float(fields.get("dx", "0")), float(fields.get("dy", "0")))
+				dx = 0.0
+				dy = 0.0   # the actor receives no intent this tick -- on purpose (Task 2)
+			elif perturb_mode == "nudge" and line_tick == perturb_tick:
+				player.cell.x += 0.5   # well above the dump's "%.6f" resolution (Task 2)
+			player.heading = Vector2(dx, dy)
 			sim.tick_once(reg, player.cell)
-			if perturb_mode == "nudge" and line_tick == perturb_tick:
-				player.cell.x += 0.5
 		else:
 			push_error("Replay.replay: %s line for tick %d has an unrecognised tag %s" % [
 				path, line_tick, tag])
