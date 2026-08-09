@@ -73,11 +73,14 @@ var _accum: float = 0.0
 var walk: Walkable = null
 
 ## Per-tick output hook, invoked at the very end of tick_once(), after the
-## actor loop. OUTPUT-ONLY by contract (T-04-08): it must never mutate reg,
-## any ActorState, or this Sim -- doing so would make the tick no longer a
-## pure function of its inputs, and the whole point of Phase 4 is that two
-## runs driven by the same recorded input produce the same state. Invalid
-## (Callable()) by default, so tick_once() costs nothing extra when unset.
+## actor loop, as `call(tick, dropped, astar_event)`. `astar_event` is the
+## Dictionary path_window.track() returned this tick ({} on a tick where the
+## window neither recentred nor recomputed a path). OUTPUT-ONLY by contract
+## (T-04-08): it must never mutate reg, any ActorState, or this Sim -- doing
+## so would make the tick no longer a pure function of its inputs, and the
+## whole point of Phase 4 is that two runs driven by the same recorded input
+## produce the same state. Invalid (Callable()) by default, so tick_once()
+## costs nothing extra when unset.
 var output_hook: Callable = Callable()
 
 ## When set (!= ActorRegistry.INVALID_ID), tick_once() derives its focus
@@ -90,6 +93,37 @@ var output_hook: Callable = Callable()
 ## in_radius() selects, in the one phase whose purpose is detecting
 ## divergence.
 var focus_actor_id: int = ActorRegistry.INVALID_ID
+
+## Plan 04-02 additive members -- the optional path window and its three
+## single-shot "pending" fields. Like `walk`/`output_hook`/`focus_actor_id`
+## above, none of these is read inside advance()'s accumulator drain loop or
+## the dropped-tick report; all are consumed only from tick_once() and
+## _step_actor(), below.
+
+## Optional sliding AStarGrid2D window for the focus actor (world/path_window.gd).
+## Unset (null) by default -- main.gd's --actor-probe route never assigns
+## one, matching `walk`'s own "no navmesh available" posture: an unset
+## path_window means no path-following happens, not a fallback.
+var path_window: PathWindow = null
+
+## Single-shot goal request: consumed (and reset to INVALID_ID/NO_GOAL) on
+## the very next tick_once() call after being set, mirroring how `nudge`/
+## `skip` mutate state immediately before one specific tick's tick_once()
+## call in Replay.replay(). Only ever applies to the actor named by
+## focus_actor_id -- "one request, one goal, one path", no queue.
+var pending_goal_actor_id: int = ActorRegistry.INVALID_ID
+var pending_goal: Vector2i = PathWindow.NO_GOAL
+
+## Single-shot window-origin offset, consumed the same way as the goal
+## fields above. Zero in normal operation; Task 3's origin perturbation is
+## the only writer, and it always sources the offset from the composition
+## root (main.gd), never from anything inside world/.
+var pending_origin_offset: Vector2i = Vector2i.ZERO
+
+## Index into path_window.current_path() the focus actor is currently
+## walking toward. Reset to 1 (never 0 -- path[0] is the actor's own
+## from-cell, already reached) whenever track() reports a fresh recompute.
+var _path_step: int = 1
 
 
 func _init(hz: int = TICK_HZ) -> void:
@@ -145,14 +179,37 @@ func advance(delta: float, reg: ActorRegistry, focus: Vector2) -> int:
 func tick_once(reg: ActorRegistry, focus: Vector2) -> void:
 	tick += 1
 	var effective_focus := focus
+	var tracked: ActorState = null
 	if focus_actor_id != ActorRegistry.INVALID_ID:
-		var focus_actor := reg.get_actor(focus_actor_id)
-		if focus_actor != null:
-			effective_focus = focus_actor.cell
+		tracked = reg.get_actor(focus_actor_id)
+		if tracked != null:
+			effective_focus = tracked.cell
+
+	# Single-shot goal/origin-offset consumption -- reset before track() runs
+	# so a re-entrant call (none exists today, but the contract is "consumed
+	# on the very next tick_once()") can never see stale state.
+	var astar_event: Dictionary = {}
+	if path_window != null and tracked != null:
+		var goal_this_tick := PathWindow.NO_GOAL
+		if pending_goal_actor_id == tracked.id and pending_goal != PathWindow.NO_GOAL:
+			goal_this_tick = pending_goal
+		var offset := pending_origin_offset
+		pending_goal_actor_id = ActorRegistry.INVALID_ID
+		pending_goal = PathWindow.NO_GOAL
+		pending_origin_offset = Vector2i.ZERO
+
+		var from_cell := Vector2i(floori(tracked.cell.x), floori(tracked.cell.y))
+		var t0 := Time.get_ticks_usec()
+		astar_event = path_window.track(from_cell, goal_this_tick, offset)
+		if not astar_event.is_empty():
+			_path_step = 1   # path[0] is the from-cell itself, already reached
+			if bool(astar_event.get("filled", false)):
+				print("path_window\tfill_us=%d\ttick=%d" % [Time.get_ticks_usec() - t0, tick])
+
 	for id: int in reg.in_radius(effective_focus, R_SIM):
 		_step_actor(reg.get_actor(id))
 	if output_hook.is_valid():
-		output_hook.call(tick, dropped)
+		output_hook.call(tick, dropped, astar_event)
 
 
 ## Must NOT touch hp -- leaving hp untouched by the tick is what makes
@@ -160,10 +217,48 @@ func tick_once(reg: ActorRegistry, focus: Vector2) -> void:
 ## --actor-probe. Phase 4 collision movement: when `walk` is unset, nothing
 ## moves -- this is the "no navmesh available" case, not a fallback to the
 ## old placeholder kinematics, which no longer exists.
+##
+## Plan 04-02: when this IS the focus actor and path_window has an active
+## goal, `a.heading` is overridden for this tick alone from the next path
+## cell (never stored back into a.heading -- the next tick recomputes it the
+## same way) -- driven through the same Movement.sweep collision sweep every
+## other actor uses, so path-following gets identical collision behaviour to
+## keyboard/scripted movement rather than a second movement code path.
 func _step_actor(a: ActorState) -> void:
 	a.ticks_simulated += 1
-	if walk != null:
-		a.cell = Movement.sweep(a.cell, a.heading * Movement.CELLS_PER_TICK, walk)
+	if walk == null:
+		return
+	var delta := a.heading * Movement.CELLS_PER_TICK
+	if path_window != null and a.id == focus_actor_id and path_window.has_goal():
+		delta = _path_delta(a)
+	a.cell = Movement.sweep(a.cell, delta, walk)
+
+
+## One tick's travel toward the next unreached point in path_window's
+## current path. Advances _path_step (and clears the goal on the final
+## point) when `a` is already within one tick's travel of the current
+## target -- "within one tick's travel" measured the same way Movement.sweep
+## measures a step, i.e. against Movement.CELLS_PER_TICK. Returns
+## Vector2.ZERO (no movement this tick) once the path is exhausted or empty
+## (an empty path means the goal was outside the window or closed, D-17).
+func _path_delta(a: ActorState) -> Vector2:
+	var path := path_window.current_path()
+	if path.is_empty():
+		return Vector2.ZERO
+	if _path_step >= path.size():
+		path_window.clear_goal()
+		return Vector2.ZERO
+	var target := Vector2(path[_path_step]) + Vector2(0.5, 0.5)
+	if a.cell.distance_to(target) <= Movement.CELLS_PER_TICK:
+		_path_step += 1
+		if _path_step >= path.size():
+			path_window.clear_goal()
+			return Vector2.ZERO
+		target = Vector2(path[_path_step]) + Vector2(0.5, 0.5)
+	var dir := target - a.cell
+	if dir.length() <= 0.0001:
+		return Vector2.ZERO
+	return dir.normalized() * Movement.CELLS_PER_TICK
 
 
 ## Simulation order over the full registry, nearest-to-`centre` first (R10.3).

@@ -55,6 +55,18 @@ var _dumper: Replay.Dumper
 var _replay_active := false               ## true while replay drives ticks by count -- suppresses _process()'s normal advance call, exactly like _probe_active
 const RECORD_FRAME_BUDGET := 20000        ## generous upper bound; --autoplay=600 finishes in a small fraction of this
 
+# Plan 04-02: sliding path window. Nothing below is read unless a record or
+# replay run is in progress -- every other mode is untouched.
+var _path_window: PathWindow = null
+var _goal_cell := PathWindow.NO_GOAL      ## BFS-derived once per record/replay run; NO_GOAL if none could be derived
+const GOAL_REQUEST_TICK := 250            ## the one scripted tick that requests a path (well after spawn, well before autoplay ends)
+
+## Task 3's origin perturbation: a plain number, sourced here at the
+## composition root, never inside godot-port/world/ -- large enough
+## (one whole window edge) to guarantee the shifted window never coincides
+## with the true one, regardless of the actor's exact position.
+const ORIGIN_PERTURB_OFFSET := Vector2i(PathWindow.WINDOW_EDGE, PathWindow.WINDOW_EDGE)
+
 
 func _ready() -> void:
 	var install := Sacred.find_install()
@@ -250,10 +262,21 @@ func _advance_sim(dt: float, focus: Vector2) -> int:
 		var p := _registry.get_actor(_player_id)
 		if p != null:
 			p.heading = intent
+	# Plan 04-02: the one scripted goal request, threaded into the LIVE sim
+	# exactly like a real caller would, at the moment it will actually be
+	# consumed (the tick about to run). Gated on the common case of one real
+	# tick per advance() call -- a catch-up burst spanning GOAL_REQUEST_TICK
+	# would request it one tick later than named, which is a harmless,
+	# documented Sim-local edge case, not a correctness bug (the request is
+	# still consumed exactly once, on the next tick that runs).
+	if recording and pre_tick + 1 == GOAL_REQUEST_TICK and _goal_cell != PathWindow.NO_GOAL:
+		_sim.pending_goal_actor_id = _player_id
+		_sim.pending_goal = _goal_cell
 	var ran := _sim.advance(dt, _registry, focus)
 	if recording:
 		for t in range(pre_tick + 1, pre_tick + ran + 1):
-			_recorder.write_input(t, intent)
+			var goal := _goal_cell if t == GOAL_REQUEST_TICK else PathWindow.NO_GOAL
+			_recorder.write_input(t, intent, goal)
 		if _sim.dropped > pre_dropped:
 			_recorder.write_gap(_sim.tick, _sim.dropped - pre_dropped)
 	return ran
@@ -305,7 +328,7 @@ func _region_arg() -> Vector3i:
 func _resolve_spawn(walk: Walkable) -> Dictionary:
 	if _has_spawn_override:
 		var cls := walk.class_at(floori(_spawn_override.x), floori(_spawn_override.y))
-		return {"cell": _spawn_override, "class": cls, "component": 0, "sectors": 0}
+		return {"cell": _spawn_override, "class": cls, "component": 0, "sectors": 0, "bbox": Rect2i()}
 	var centre := Vector2i(int(start_cell.x) / SECT, int(start_cell.y) / SECT)
 	var best := walk.derive_spawn(centre)
 	if best.is_empty():
@@ -313,7 +336,49 @@ func _resolve_spawn(walk: Walkable) -> Dictionary:
 	var seed: Vector2i = best["seed"]
 	var cell := Vector2(seed) + Vector2(0.5, 0.5)   # the cell's centre, not its lower corner
 	var cls := walk.class_at(seed.x, seed.y)
-	return {"cell": cell, "class": cls, "component": int(best["count"]), "sectors": int(best["sectors_scanned"])}
+	return {"cell": cell, "class": cls, "component": int(best["count"]), "sectors": int(best["sectors_scanned"]),
+		"bbox": best.get("bbox", Rect2i())}
+
+
+## BFS over open cells reachable from `spawn_cell`, bounded to `bbox` when
+## non-empty, returning the farthest-by-cell-distance reachable cell found --
+## i.e. a cell get_id_path() is GUARANTEED able to reach, since it is
+## discovered by literally walking the same connectivity a path search
+## would. Deliberately NOT a bbox-corner scan: a bbox corner can be open
+## while belonging to a different, disconnected pocket of the same
+## rectangular bbox (Walkable's own storey-ambiguity ponytail note,
+## world/walkable.gd:70-74, is exactly this kind of surprise), which
+## get_id_path() could never actually reach. Capped at MAX_VISITED so an
+## unbounded bbox (the --spawn= override path, whose bbox is always empty)
+## cannot turn one BFS into an unbounded scan.
+func _goal_from_component(walk: Walkable, spawn_cell: Vector2, bbox: Rect2i) -> Vector2i:
+	const MAX_VISITED := 20000
+	const NEIGHBOURS := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	var start := Vector2i(floori(spawn_cell.x), floori(spawn_cell.y))
+	if not walk.is_open(start.x, start.y):
+		return PathWindow.NO_GOAL
+	var bounded := bbox.size != Vector2i.ZERO
+	var visited := {start: true}
+	var queue: Array[Vector2i] = [start]
+	var farthest := start
+	var farthest_d2 := 0
+	var qi := 0
+	while qi < queue.size() and visited.size() < MAX_VISITED:
+		var cur: Vector2i = queue[qi]
+		qi += 1
+		var d2 := (cur - start).length_squared()
+		if d2 > farthest_d2:
+			farthest_d2 = d2
+			farthest = cur
+		for d: Vector2i in NEIGHBOURS:
+			var n := cur + d
+			if bounded and not bbox.has_point(n):
+				continue
+			if visited.has(n) or not walk.is_open(n.x, n.y):
+				continue
+			visited[n] = true
+			queue.append(n)
+	return farthest
 
 
 ## Builds the Walkable navmesh, derives (or takes the override for) the
@@ -337,20 +402,33 @@ func _run_record_or_replay(world: Sacred.World) -> void:
 	_sim.walk = walk
 	_sim.focus_actor_id = _player_id
 
+	# Plan 04-02: the sliding path window and its one scripted goal request,
+	# derived from the ACTUAL spawn component -- never a hardcoded cell, so
+	# it stays a real goal against whatever install is loaded.
+	_path_window = PathWindow.new(walk)
+	_sim.path_window = _path_window
+	var bbox: Rect2i = spawn.get("bbox", Rect2i())
+	_goal_cell = _goal_from_component(walk, cell, bbox)
+	print("goal\tcell=%d,%d" % [_goal_cell.x, _goal_cell.y])
+
 	if _dump_path != "":
 		_dumper = Replay.Dumper.new(_dump_path)
 		if _dumper.is_open():
 			# ponytail-adjacent bugfix, not a placeholder: the closure takes
-			# tick/dropped as call() arguments rather than capturing `sim`
-			# (which IS _sim, the object this closure is stored ON as
-			# output_hook) -- capturing it would make Sim hold a Callable
-			# that holds a strong ref back to Sim itself, a self-cycle
-			# RefCounted's plain refcounting can never collect, which is
-			# exactly what leaked ~120 objects (Sim + its reg + walk +
-			# walk's whole _region_cache) at process exit until this fix.
+			# tick/dropped/astar_event as call() arguments rather than
+			# capturing `sim` (which IS _sim, the object this closure is
+			# stored ON as output_hook) -- capturing it would make Sim hold
+			# a Callable that holds a strong ref back to Sim itself, a
+			# self-cycle RefCounted's plain refcounting can never collect,
+			# which is exactly what leaked ~120 objects (Sim + its reg +
+			# walk + walk's whole _region_cache) at process exit until this
+			# fix. `path_window` is safe to capture -- it holds no reference
+			# back to Sim.
 			var dumper := _dumper
 			var reg := _registry
-			_sim.output_hook = func(tick: int, dropped: int) -> void: dumper.write_tick(tick, dropped, reg)
+			_sim.output_hook = func(tick: int, dropped: int, astar_event: Dictionary) -> void:
+				dumper.write_tick(tick, dropped, reg)
+				dumper.write_astar(tick, astar_event)
 
 	if _record_path != "":
 		await _run_record()
@@ -385,7 +463,13 @@ func _run_record() -> void:
 ## point and never touches the accumulator (D-04).
 func _run_replay() -> void:
 	_replay_active = true
-	var err := Replay.replay(_replay_path, _sim, _registry, _player_id, _falsify_tick, _falsify_mode)
+	# Task 3: the third perturbation mode. Off unless --falsify-mode=origin
+	# is passed alongside --falsify=TICK -- the offset itself is a plain
+	# number sourced here at the composition root (ORIGIN_PERTURB_OFFSET),
+	# never anything camera-derived and never anything inside world/.
+	var origin_perturb := ORIGIN_PERTURB_OFFSET if _falsify_mode == "origin" else Vector2i.ZERO
+	var err := Replay.replay(_replay_path, _sim, _registry, _player_id,
+		_falsify_tick, _falsify_mode, origin_perturb)
 	if _dumper != null:
 		_dumper.close()
 	get_tree().quit(0 if err == OK else 1)

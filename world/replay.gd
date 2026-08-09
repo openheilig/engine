@@ -41,11 +41,17 @@ class Recorder extends RefCounted:
 
 	## One line per tick that ran this frame, carrying that frame's movement
 	## intent (D-01, D-06) -- never a resolved position, a path, or anything
-	## else the simulation produced.
-	func write_input(tick: int, intent: Vector2) -> void:
+	## else the simulation produced. `goal` is the tick's requested path
+	## goal, or PathWindow.NO_GOAL (the sentinel; written as-is, plain
+	## integers, so replay can tell "no request" from a real cell without a
+	## second flag) when nothing was requested this tick. Still input, not
+	## output: the goal is what the composition root asked for, not anything
+	## the simulation computed from it.
+	func write_input(tick: int, intent: Vector2, goal: Vector2i = PathWindow.NO_GOAL) -> void:
 		if _f == null:
 			return
-		_f.store_line("input\ttick=%d\tdx=%.6f\tdy=%.6f\t" % [tick, intent.x, intent.y])
+		_f.store_line("input\ttick=%d\tdx=%.6f\tdy=%.6f\tgoal=%d,%d\t" % [
+			tick, intent.x, intent.y, goal.x, goal.y])
 
 	## Written AFTER that frame's input lines (D-07): the dropped count only
 	## reaches the header of the FOLLOWING tick, and both the record run and
@@ -91,6 +97,21 @@ class Dumper extends RefCounted:
 		for line: String in lines:
 			_f.store_line(line)
 
+	## Plan 04-02, D-16: one line whenever path_window recentres or (re)computes
+	## a path this tick -- `event` is exactly the Dictionary
+	## PathWindow.track() returned (never re-derived here). Called from the
+	## same output_hook as write_tick(), so both land at the same point in
+	## the tick on both the record run and the replay run (D-12, D-13).
+	## Skipped entirely on a tick where `event` is empty (nothing to report).
+	func write_astar(tick: int, event: Dictionary) -> void:
+		if _f == null or event.is_empty():
+			return
+		var origin: Vector2i = event["origin"]
+		var goal: Vector2i = event["goal"]
+		var path_len: int = event["path_len"]
+		_f.store_line("astar\ttick=%d\torigin=%d,%d\tgoal=%d,%d\tlen=%d\t" % [
+			tick, origin.x, origin.y, goal.x, goal.y, path_len])
+
 	func close() -> void:
 		if _f != null:
 			_f.close()
@@ -110,11 +131,17 @@ class Dumper extends RefCounted:
 ## own "%.6f" resolution, so it survives formatting -- to the resolved
 ## cell's x component immediately after the named tick's tick_once() call.
 ## "skip" drops the named tick's input line entirely, so the actor receives
-## no intent that tick. Both are selected by flag only, through this
-## parameter, never by editing this file or its caller -- the revert is
+## no intent that tick. "origin" (Task 3) adds `origin_perturb` to
+## sim.pending_origin_offset immediately before the named tick's
+## tick_once() call, forcing that one tick's window origin away from the
+## value origin_for() would otherwise produce -- a value that legitimately
+## differs between a recording run and a replay run only when the two runs
+## are given different composition-root inputs, exactly what `origin_perturb`
+## simulates. All three are selected by flag only, through these
+## parameters, never by editing this file or its caller -- the revert is
 ## exact, not a hand-undone source edit.
 static func replay(path: String, sim: Sim, reg: ActorRegistry, player_id: int,
-		perturb_tick: int = -1, perturb_mode: String = "") -> Error:
+		perturb_tick: int = -1, perturb_mode: String = "", origin_perturb: Vector2i = Vector2i.ZERO) -> Error:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		push_error("Replay.replay: cannot open %s for reading (%s)" % [
@@ -160,20 +187,30 @@ static func replay(path: String, sim: Sim, reg: ActorRegistry, player_id: int,
 		elif tag == "input":
 			var dx := float(fields.get("dx", "0"))
 			var dy := float(fields.get("dy", "0"))
-			# Both perturbations act BEFORE this line's tick_once() call, not
-			# after, so the tick they name is the one whose OWN dumped
-			# resolved cell diverges -- not the following tick. tick_once()
+			# All three perturbations act BEFORE this line's tick_once()
+			# call, not after, so the tick they name is the one whose OWN
+			# dumped state diverges -- not the following tick. tick_once()
 			# still runs every recorded line either way, so the tick
 			# numbering in both dumps' headers stays aligned line-for-line;
-			# only the actor line under the perturbed tick (and everything
-			# after it, D-03) differs, which is what lets replay_diff.sh's
+			# only the state under the perturbed tick (and everything after
+			# it, D-03) differs, which is what lets replay_diff.sh's
 			# --control mode locate the divergence by tick number at all.
 			if perturb_mode == "skip" and line_tick == perturb_tick:
 				dx = 0.0
 				dy = 0.0   # the actor receives no intent this tick -- on purpose (Task 2)
 			elif perturb_mode == "nudge" and line_tick == perturb_tick:
 				player.cell.x += 0.5   # well above the dump's "%.6f" resolution (Task 2)
+			elif perturb_mode == "origin" and line_tick == perturb_tick:
+				sim.pending_origin_offset = origin_perturb   # forces one tick's window origin off course (Task 3)
 			player.heading = Vector2(dx, dy)
+			var goal_field: String = fields.get("goal", "")
+			if goal_field != "":
+				var gp := goal_field.split(",")
+				if gp.size() == 2:
+					var gv := Vector2i(int(gp[0]), int(gp[1]))
+					if gv != PathWindow.NO_GOAL:
+						sim.pending_goal_actor_id = player_id
+						sim.pending_goal = gv
 			sim.tick_once(reg, player.cell)
 		else:
 			push_error("Replay.replay: %s line for tick %d has an unrecognised tag %s" % [
