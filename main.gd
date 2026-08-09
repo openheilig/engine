@@ -67,6 +67,13 @@ const GOAL_REQUEST_TICK := 250            ## the one scripted tick that requests
 ## with the true one, regardless of the actor's exact position.
 const ORIGIN_PERTURB_OFFSET := Vector2i(PathWindow.WINDOW_EDGE, PathWindow.WINDOW_EDGE)
 
+# Plan 04-03: the player view (the real posed mesh, drawn and depth-sorted in
+# the streamed world) and camera follow. Nothing below is read unless the
+# default streaming branch runs -- fixed-region, single-model, window-probe
+# and record/replay modes are all unaffected.
+var _player_view: PlayerView = null
+var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
+
 
 func _ready() -> void:
 	var install := Sacred.find_install()
@@ -104,6 +111,7 @@ func _ready() -> void:
 	var stats := "--stats" in argv
 	var markers := "--markers" in argv
 	var objects := not ("--noobjects" in argv)
+	_show_player = not ("--noplayer" in argv)
 	var interiors := "--interiors" in argv
 	var show_regions := "--regions" in argv
 	var exterior := "--exterior" in argv
@@ -200,6 +208,33 @@ func _ready() -> void:
 	})
 	add_child(_view)
 
+	# Plan 04-03: the player, spawned on real walkable ground exactly like
+	# _run_record_or_replay's own Walkable/_resolve_spawn/_registry.spawn/
+	# _sim.walk= sequence -- never a second implementation of spawn
+	# derivation. Non-fatal on failure, matching RetailCursor.apply's degrade:
+	# streaming mode drew nothing extra before this plan and keeps doing so
+	# rather than aborting a run that has no walkable ground to stand on.
+	var walk := Walkable.new(world)
+	var spawn := _resolve_spawn(walk)
+	if spawn.is_empty():
+		push_warning("player: no walkable spawn cell found -- drawing nothing")
+	else:
+		var player_cell: Vector2 = spawn["cell"]
+		_player_id = _registry.spawn(_first_real_record_id(), player_cell, 100, 100)
+		_sim.walk = walk
+		_sim.focus_actor_id = _player_id
+		print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
+			player_cell.x, player_cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
+		if _show_player:
+			var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
+			if models_pak.is_open():
+				_player_view = PlayerView.new(Sacred.Models.new(models_pak))
+				if _player_view.node != null:
+					add_child(_player_view.node)
+					print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
+						PlayerView.MODEL_NAME, _player_view.model_index,
+						_player_view.vertex_count, _player_view.triangle_count])
+
 	var region := _region_arg()
 	if region != Vector3i.ZERO:
 		_view.load_region(region.x, region.y, region.z)
@@ -240,6 +275,10 @@ func _process(delta: float) -> void:
 		_view.stream(delta)
 	if not _probe_active and not _replay_active:
 		_advance_sim(delta, _focus_cell())
+	if _player_view != null and _player_id != ActorRegistry.INVALID_ID:
+		var p := _registry.get_actor(_player_id)
+		if p != null:
+			_player_view.update(p.cell)
 
 
 ## The ONLY Sim per-frame advance call site outside godot-port/world/ -- a

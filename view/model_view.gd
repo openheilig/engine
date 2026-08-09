@@ -77,7 +77,13 @@ var _local_to_bind: Array[PackedInt32Array] = []
 ## Builds the mesh for `entry` and returns true on success. On failure the
 ## node is left empty and false is returned -- the caller decides whether an
 ## undecodable entry is fatal, since this class has no business calling quit().
-func setup(models: Sacred.Models, entry: int) -> bool:
+##
+## `frame_camera` (default true, so --grn= is byte-for-byte unchanged):
+## suppresses only the final _frame() call below when false -- a caller that
+## places this rig in the streamed world (Phase 4's player_view.gd) has its
+## own IsoCamera already framing the scene and does not want a second,
+## competing Camera3D/DirectionalLight3D built.
+func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool:
 	var b := models.coordinate_basis(entry)
 	basis_located = models.last_basis_located
 	transform = Transform3D(b, Vector3.ZERO)
@@ -141,7 +147,8 @@ func setup(models: Sacred.Models, entry: int) -> bool:
 
 	# The AABB the camera must frame is the one the viewer sees, so it is the
 	# local AABB carried through this node's basis, not the raw one.
-	_frame(transform * mesh.get_aabb())
+	if frame_camera:
+		_frame(transform * mesh.get_aabb())
 	_settled = true
 	return true
 

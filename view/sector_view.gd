@@ -31,7 +31,7 @@ const DEPTH_STEP := 0.05
 ## _band_of before main.gd's own clamp turns 0 into 1 (T-02-01).
 const BAND_MAX := 4096
 
-## _band_depth is only NON-decreasing across bands (proven empirically at
+## ground_depth is only NON-decreasing across bands (proven empirically at
 ## --bands=100000: two adjacent bands whose first object shares an exact
 ## pos.y tie -- common in a grid-aligned world -- get an identical
 ## sorting_offset, and unlike triangles inside one mesh, whose submission
@@ -452,7 +452,7 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions) -> Node3D:
 		# emit geometry.
 		var band := _band_of(i, n, _band_count)
 		if not band_has_repr[band]:
-			band_repr[band] = _band_depth(p)
+			band_repr[band] = ground_depth(p)
 			band_has_repr[band] = true
 		var spr := _mixed.sprite(obj["type"]) if not _markers else {}
 		if spr.is_empty():
@@ -627,7 +627,11 @@ func _band_of(i: int, n: int, bands: int) -> int:
 ## sprite-less path (`mz`) -- deliberately NOT the taller sprite `pz` formula,
 ## so a band's representative depth depends only on the object's own ground
 ## position, not on which object happened to be first in the band.
-func _band_depth(p: Vector2) -> float:
+##
+## Public and static (Plan 04-03 Task 1): the shared depth formula anything
+## sorted against the painted object quads must reuse verbatim -- a rename,
+## not a reformulation, the arithmetic is unchanged from `_band_depth`.
+static func ground_depth(p: Vector2) -> float:
 	return (-p.y / HH) * DEPTH_STEP + 2.0
 
 
@@ -648,10 +652,10 @@ func _band_depth(p: Vector2) -> float:
 func _build_sortcube() -> MeshInstance3D:
 	var px := (float(_sortcube.x) - float(_sortcube.y)) * HW
 	var py := -(float(_sortcube.x) + float(_sortcube.y)) * HH
-	# Same absolute iso-depth scale and sign the object bands use (_band_depth
+	# Same absolute iso-depth scale and sign the object bands use (ground_depth
 	# is the identical formula _build_objects' sprite-less marker path and
 	# every band's representative depth already share).
-	var pz := _band_depth(Vector2(px, py))
+	var pz := ground_depth(Vector2(px, py))
 	var half := SORTCUBE_PX * 0.5
 	# A small Z extent (not a zero-thickness plane) so this is a real six-face
 	# box, ground point at (px, py), top edge SORTCUBE_PX above it (screen Y is
