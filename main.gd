@@ -179,6 +179,10 @@ func _ready() -> void:
 		await _show_model(install, grn_name)
 		return
 
+	if "--window-probe" in argv:
+		_window_probe(world)
+		return
+
 	if _record_path != "" or _replay_path != "":
 		await _run_record_or_replay(world)
 		return
@@ -379,6 +383,72 @@ func _goal_from_component(walk: Walkable, spawn_cell: Vector2, bbox: Rect2i) -> 
 			visited[n] = true
 			queue.append(n)
 	return farthest
+
+
+## --window-probe: a no-session self-check of PathWindow's pure geometry --
+## no camera, no view, no registry, no Sim tick loop, only the static origin
+## function and the two static geometry helpers. Task 2's acceptance gate
+## parses this function's own stdout, so every printed line follows the
+## house fact-line convention and every assertion prints a PASS/MISMATCH
+## verdict token rather than merely trusting silence -- `grep -q MISMATCH`
+## on the whole output is the gate's one failure check.
+func _window_probe(world: Sacred.World) -> void:
+	var stride := PathWindow.STRIDE
+	# Cells spanning several stride buckets on both sides of zero -- negative
+	# cells included, since origin_for() must floor-divide correctly there
+	# too, matching Movement.sweep's own negative-coordinate precedent.
+	var cells: Array[Vector2i] = [
+		Vector2i(0, 0), Vector2i(stride - 1, 0), Vector2i(stride, 0),
+		Vector2i(2 * stride, 0), Vector2i(2 * stride + 3, 3),
+		Vector2i(-1, -1), Vector2i(-stride, -stride), Vector2i(-stride - 1, -stride - 1),
+		Vector2i(-2 * stride, 5),
+	]
+	var mismatch := false
+	var prev_origin := Vector2i.ZERO
+	var prev_bucket := Vector2i.ZERO
+	var has_prev := false
+	for cell: Vector2i in cells:
+		var origin := PathWindow.origin_for(cell)
+		print("window\tcell=%d,%d\torigin=%d,%d" % [cell.x, cell.y, origin.x, origin.y])
+		var bucket := Vector2i(floori(float(cell.x) / float(stride)), floori(float(cell.y) / float(stride)))
+		if has_prev:
+			if bucket == prev_bucket:
+				var verdict := "PASS" if origin == prev_origin else "MISMATCH"
+				if verdict == "MISMATCH":
+					mismatch = true
+				print("window\tcheck=same_bucket_same_origin\t%s" % verdict)
+			else:
+				var expect := prev_origin + (bucket - prev_bucket) * stride
+				var verdict := "PASS" if origin == expect else "MISMATCH"
+				if verdict == "MISMATCH":
+					mismatch = true
+				print("window\tcheck=adjacent_bucket_one_stride\t%s" % verdict)
+		prev_origin = origin
+		prev_bucket = bucket
+		has_prev = true
+
+	# Same cell twice, unrelated work between -- origin_for() is `static` and
+	# reads nothing but its argument, so repeating it must reproduce exactly.
+	var repeat_cell := Vector2i(37, -91)
+	var first := PathWindow.origin_for(repeat_cell)
+	var _unrelated := PathWindow.point_count() + int(PathWindow.max_corner_distance())
+	var second := PathWindow.origin_for(repeat_cell)
+	var det_verdict := "PASS" if first == second else "MISMATCH"
+	if det_verdict == "MISMATCH":
+		mismatch = true
+	print("window\tcheck=repeat_call_determinism\t%s" % det_verdict)
+
+	var point_count := PathWindow.point_count()
+	var world_cells := int(world.size.x) * int(world.size.y) * SECT * SECT
+	var ratio := float(point_count) / float(world_cells)
+	print("window\tpoint_count=%d\tworld_cells=%d\tratio=%.6f" % [point_count, world_cells, ratio])
+
+	var max_dist := PathWindow.max_corner_distance()
+	print("window\tmax_corner_dist=%.6f\tr_load=%.6f\tbelow_r_load=%s" % [
+		max_dist, Sim.R_LOAD, max_dist < Sim.R_LOAD])
+
+	print("window\tresult=%s" % ("MISMATCH" if mismatch else "PASS"))
+	get_tree().quit(1 if mismatch else 0)
 
 
 ## Builds the Walkable navmesh, derives (or takes the override for) the
