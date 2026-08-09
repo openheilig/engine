@@ -38,6 +38,23 @@ var _probe_active := false                ## true while _actor_probe() drives ti
 const PROBE_FOCUS := Vector2(3232.0, 3232.0)  ## middle of sector 50,50
 const PROBE_FRAME_BUDGET := 600           ## matches _maybe_screenshot's settle budget
 
+# Phase 4: record / replay. Nothing below is read unless --record= or
+# --replay= is present -- every other mode's behaviour is byte-for-byte
+# unchanged from before this phase.
+var _record_path := ""                    ## --record=PATH: write intent+tick to this recording file
+var _replay_path := ""                    ## --replay=PATH: replay a recording from this file instead of live input
+var _dump_path := ""                      ## --dump=PATH: per-tick state-dump destination, record or replay mode
+var _autoplay_ticks := 0                  ## --autoplay=N: ticks to record before quitting; <= 0 disables
+var _has_spawn_override := false          ## true once --spawn=cx,cy has been parsed
+var _spawn_override := Vector2.ZERO       ## --spawn=cx,cy: skip derivation, use this cell exactly
+var _falsify_tick := -1                   ## --falsify=TICK: perturb this tick during replay (Task 2); < 0 disables
+var _falsify_mode := ""                   ## --falsify-mode=nudge|skip, paired with --falsify=
+var _player_id: int = ActorRegistry.INVALID_ID
+var _recorder: Replay.Recorder
+var _dumper: Replay.Dumper
+var _replay_active := false               ## true while replay drives ticks by count -- suppresses _process()'s normal advance call, exactly like _probe_active
+const RECORD_FRAME_BUDGET := 20000        ## generous upper bound; --autoplay=600 finishes in a small fraction of this
+
 
 func _ready() -> void:
 	var install := Sacred.find_install()
@@ -111,6 +128,23 @@ func _ready() -> void:
 			_probe_ticks = int(a.trim_prefix("--actor-probe="))
 		elif a.begins_with("--probe-route="):
 			_probe_route = a.trim_prefix("--probe-route=")
+		elif a.begins_with("--record="):
+			_record_path = a.trim_prefix("--record=")
+		elif a.begins_with("--replay="):
+			_replay_path = a.trim_prefix("--replay=")
+		elif a.begins_with("--dump="):
+			_dump_path = a.trim_prefix("--dump=")
+		elif a.begins_with("--autoplay="):
+			_autoplay_ticks = int(a.trim_prefix("--autoplay="))
+		elif a.begins_with("--spawn="):
+			var p := a.trim_prefix("--spawn=").split(",")
+			if p.size() == 2:
+				_spawn_override = Vector2(float(p[0]), float(p[1]))
+				_has_spawn_override = true
+		elif a.begins_with("--falsify-mode="):
+			_falsify_mode = a.trim_prefix("--falsify-mode=")
+		elif a.begins_with("--falsify="):
+			_falsify_tick = int(a.trim_prefix("--falsify="))
 
 	_registry = ActorRegistry.new()
 	_sim = Sim.new(_tick_hz)
@@ -131,6 +165,10 @@ func _ready() -> void:
 
 	if grn_name != "":
 		await _show_model(install, grn_name)
+		return
+
+	if _record_path != "" or _replay_path != "":
+		await _run_record_or_replay(world)
 		return
 
 	_cam = IsoCamera.new()
@@ -184,24 +222,69 @@ func _exit_tree() -> void:
 func _process(delta: float) -> void:
 	if _view != null:
 		_view.stream(delta)
-	if not _probe_active:
+	if not _probe_active and not _replay_active:
 		_advance_sim(delta, _focus_cell())
 
 
-## The ONLY Sim.advance call site outside godot-port/world/ -- a hard
-## constraint, not a style preference: it is what makes "one tick loop" a
-## greppable fact rather than a claim. Every caller of the sim goes through
-## this one function.
+## The ONLY Sim per-frame advance call site outside godot-port/world/ -- a
+## hard constraint, not a style preference: it is what makes "one tick loop"
+## a greppable fact rather than a claim. Every caller of the sim goes
+## through this one function -- including the record run below, which never
+## drives ticks any other way, so recording stays on the real input path
+## rather than a parallel one.
+##
+## When recording, the player's intent for the WHOLE frame is set once,
+## before the one real call below, from _scripted_intent(pre_tick) -- a
+## pure function of the tick count at the start of this frame -- and every
+## tick that call runs is written to the recorder afterwards carrying that
+## same intent (D-01, D-06).
 func _advance_sim(dt: float, focus: Vector2) -> int:
 	if _sim == null:
 		return 0
-	return _sim.advance(dt, _registry, focus)
+	var pre_tick := _sim.tick
+	var pre_dropped := _sim.dropped
+	var intent := Vector2.ZERO
+	var recording := _recorder != null and _recorder.is_open()
+	if recording and _player_id != ActorRegistry.INVALID_ID:
+		intent = _scripted_intent(pre_tick)
+		var p := _registry.get_actor(_player_id)
+		if p != null:
+			p.heading = intent
+	var ran := _sim.advance(dt, _registry, focus)
+	if recording:
+		for t in range(pre_tick + 1, pre_tick + ran + 1):
+			_recorder.write_input(t, intent)
+		if _sim.dropped > pre_dropped:
+			_recorder.write_gap(_sim.tick, _sim.dropped - pre_dropped)
+	return ran
 
 
 func _focus_cell() -> Vector2:
+	if _player_id != ActorRegistry.INVALID_ID:
+		var p := _registry.get_actor(_player_id)
+		if p != null:
+			return p.cell
 	if _cam == null:
 		return start_cell
 	return _cam.world_to_cell(Vector2(_cam.position.x, _cam.position.y))
+
+
+## A fixed, deterministic schedule of movement directions, a pure function
+## of the tick count alone -- positive x, then positive y, then a diagonal,
+## then back -- chosen so all four axis-separated collision outcomes (x
+## blocked / y free, y blocked / x free, both free, both blocked) are
+## exercised against real walls over one recording run. Routed through the
+## same `heading` field a keyboard would eventually set (world/actor_state.gd),
+## so --record= records the real input path rather than a parallel one.
+func _scripted_intent(tick: int) -> Vector2:
+	var phase := (tick / 150) % 4
+	if phase == 0:
+		return Vector2(1.0, 0.0)
+	elif phase == 1:
+		return Vector2(0.0, 1.0)
+	elif phase == 2:
+		return Vector2(1.0, 1.0).normalized()
+	return Vector2(-1.0, -1.0).normalized()
 
 
 func _region_arg() -> Vector3i:
@@ -212,6 +295,100 @@ func _region_arg() -> Vector3i:
 		if p.size() == 3:
 			return Vector3i(int(p[0]), int(p[1]), int(p[2]))
 	return Vector3i.ZERO
+
+
+## The chosen spawn cell as a fact line, its class, the component size and
+## how many sectors were scanned -- MEASURED, never hardcoded from a guess.
+## `--spawn=cx,cy` (a debugging override, not part of the falsifiable path)
+## skips derivation entirely; component/sectors read 0 in that case, since
+## no scan ran.
+func _resolve_spawn(walk: Walkable) -> Dictionary:
+	if _has_spawn_override:
+		var cls := walk.class_at(floori(_spawn_override.x), floori(_spawn_override.y))
+		return {"cell": _spawn_override, "class": cls, "component": 0, "sectors": 0}
+	var centre := Vector2i(int(start_cell.x) / SECT, int(start_cell.y) / SECT)
+	var best := walk.derive_spawn(centre)
+	if best.is_empty():
+		return {}
+	var seed: Vector2i = best["seed"]
+	var cell := Vector2(seed) + Vector2(0.5, 0.5)   # the cell's centre, not its lower corner
+	var cls := walk.class_at(seed.x, seed.y)
+	return {"cell": cell, "class": cls, "component": int(best["count"]), "sectors": int(best["sectors_scanned"])}
+
+
+## Builds the Walkable navmesh, derives (or takes the override for) the
+## spawn cell, spawns the player, and dispatches into a record run or a
+## replay run. Never builds a camera or a SectorView -- _focus_cell()
+## resolves through the player once one exists (above), so neither mode
+## depends on anything drawn, matching _show_model's no-view shape.
+func _run_record_or_replay(world: Sacred.World) -> void:
+	var walk := Walkable.new(world)
+	var spawn := _resolve_spawn(walk)
+	if spawn.is_empty():
+		printerr("record/replay\tno walkable spawn cell found")
+		get_tree().quit(1)
+		return
+	var cell: Vector2 = spawn["cell"]
+	print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
+		cell.x, cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
+
+	var rec_id := _first_real_record_id()
+	_player_id = _registry.spawn(rec_id, cell, 100, 100)
+	_sim.walk = walk
+	_sim.focus_actor_id = _player_id
+
+	if _dump_path != "":
+		_dumper = Replay.Dumper.new(_dump_path)
+		if _dumper.is_open():
+			# ponytail-adjacent bugfix, not a placeholder: the closure takes
+			# tick/dropped as call() arguments rather than capturing `sim`
+			# (which IS _sim, the object this closure is stored ON as
+			# output_hook) -- capturing it would make Sim hold a Callable
+			# that holds a strong ref back to Sim itself, a self-cycle
+			# RefCounted's plain refcounting can never collect, which is
+			# exactly what leaked ~120 objects (Sim + its reg + walk +
+			# walk's whole _region_cache) at process exit until this fix.
+			var dumper := _dumper
+			var reg := _registry
+			_sim.output_hook = func(tick: int, dropped: int) -> void: dumper.write_tick(tick, dropped, reg)
+
+	if _record_path != "":
+		await _run_record()
+	else:
+		await _run_replay()
+
+
+## Drives the normal per-frame loop (via _process -> _advance_sim, the one
+## real advance call site) until _autoplay_ticks ticks have run, writing
+## input/gap lines the whole way, then closes the recording and the dump
+## and quits.
+func _run_record() -> void:
+	_recorder = Replay.Recorder.new(_record_path, _sim.tick_hz, _registry.get_actor(_player_id).cell, _player_id)
+	if not _recorder.is_open():
+		get_tree().quit(1)
+		return
+	for _i in RECORD_FRAME_BUDGET:
+		await get_tree().process_frame
+		if not is_instance_valid(self):
+			return
+		if _sim.tick >= _autoplay_ticks:
+			break
+	_recorder.close()
+	if _dumper != null:
+		_dumper.close()
+	get_tree().quit(0)
+
+
+## Suppresses _process()'s normal advance call (_replay_active, mirroring
+## _probe_active) and hands the whole drive loop to Replay.replay(), which
+## drives one tick per recorded line straight through Sim's per-tick entry
+## point and never touches the accumulator (D-04).
+func _run_replay() -> void:
+	_replay_active = true
+	var err := Replay.replay(_replay_path, _sim, _registry, _player_id, _falsify_tick, _falsify_mode)
+	if _dumper != null:
+		_dumper.close()
+	get_tree().quit(0 if err == OK else 1)
 
 
 ## Pumps frames until the view reports settled, or `budget` frames pass.

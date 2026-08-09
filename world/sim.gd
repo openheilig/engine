@@ -52,8 +52,6 @@ const R_LOAD := 160.0    ## the documented outer bound: terrain inside this is
                           ## expected resident, so an actor inside R_SIM can
                           ## assume its ground already exists.
 
-const STEP_CELLS_PER_TICK := 0.01
-
 var tick: int = 0
 var dropped: int = 0
 ## Per-instance tick rate, defaulting to TICK_HZ. main.gd's --tickhz=N
@@ -62,6 +60,36 @@ var dropped: int = 0
 ## threat T-01-02.
 var tick_hz: int = TICK_HZ
 var _accum: float = 0.0
+
+## Phase 4 additive members -- neither is read anywhere inside advance(),
+## its accumulator drain loop, or the dropped-tick report; both are
+## consumed only from tick_once(), below.
+
+## Navmesh lookup for _step_actor's collision sweep. Unset (null) by
+## default: main.gd's --actor-probe route never assigns one, so an actor
+## there simply does not move, which is the "do not reinstate the old
+## placeholder kinematics as a fallback" instruction -- not moving is not a
+## fallback, it is what "no navmesh available" means.
+var walk: Walkable = null
+
+## Per-tick output hook, invoked at the very end of tick_once(), after the
+## actor loop. OUTPUT-ONLY by contract (T-04-08): it must never mutate reg,
+## any ActorState, or this Sim -- doing so would make the tick no longer a
+## pure function of its inputs, and the whole point of Phase 4 is that two
+## runs driven by the same recorded input produce the same state. Invalid
+## (Callable()) by default, so tick_once() costs nothing extra when unset.
+var output_hook: Callable = Callable()
+
+## When set (!= ActorRegistry.INVALID_ID), tick_once() derives its focus
+## from that actor's own cell instead of the caller-supplied focus.
+## Unset by default, so --actor-probe's caller-supplied-focus behaviour is
+## byte-for-byte unchanged. This is not decoration: --record='s one
+## advance() call can run several ticks, which would otherwise hold one
+## frame's camera focus across all of them, while --replay= recomputes
+## focus per tick_once() call -- a silent divergence in which actors
+## in_radius() selects, in the one phase whose purpose is detecting
+## divergence.
+var focus_actor_id: int = ActorRegistry.INVALID_ID
 
 
 func _init(hz: int = TICK_HZ) -> void:
@@ -107,20 +135,35 @@ func advance(delta: float, reg: ActorRegistry, focus: Vector2) -> int:
 ## (actor_registry.gd), so an actor at EXACTLY R_SIM cells from focus IS
 ## ticked -- a decision, not an accident; `<` is equally defensible and is
 ## recorded here so it is not silently inferred from the code later.
+##
+## When focus_actor_id is set, `focus` is ignored and this tick's focus is
+## that actor's own cell instead -- read AFTER `tick` is incremented but
+## BEFORE any actor steps, so every actor in this same tick (including the
+## focus actor itself) is selected against its pre-step position, matching
+## in_radius's existing precedent of reading position once per call rather
+## than per actor visited.
 func tick_once(reg: ActorRegistry, focus: Vector2) -> void:
 	tick += 1
-	for id: int in reg.in_radius(focus, R_SIM):
+	var effective_focus := focus
+	if focus_actor_id != ActorRegistry.INVALID_ID:
+		var focus_actor := reg.get_actor(focus_actor_id)
+		if focus_actor != null:
+			effective_focus = focus_actor.cell
+	for id: int in reg.in_radius(effective_focus, R_SIM):
 		_step_actor(reg.get_actor(id))
+	if output_hook.is_valid():
+		output_hook.call(tick, dropped)
 
 
-## ponytail: deterministic placeholder kinematics, purely so a tick has an
-## observable effect to verify against. Phase 4 replaces this with
-## cell-space kinematics on the decoded navmesh. Must NOT touch hp --
-## leaving hp untouched by the tick is what makes "state survived the
-## unload" an unconfounded assertion in the --actor-probe.
+## Must NOT touch hp -- leaving hp untouched by the tick is what makes
+## "state survived the unload" an unconfounded assertion in the
+## --actor-probe. Phase 4 collision movement: when `walk` is unset, nothing
+## moves -- this is the "no navmesh available" case, not a fallback to the
+## old placeholder kinematics, which no longer exists.
 func _step_actor(a: ActorState) -> void:
 	a.ticks_simulated += 1
-	a.cell += a.heading * STEP_CELLS_PER_TICK
+	if walk != null:
+		a.cell = Movement.sweep(a.cell, a.heading * Movement.CELLS_PER_TICK, walk)
 
 
 ## Simulation order over the full registry, nearest-to-`centre` first (R10.3).
