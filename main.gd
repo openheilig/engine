@@ -73,6 +73,14 @@ const ORIGIN_PERTURB_OFFSET := Vector2i(PathWindow.WINDOW_EDGE, PathWindow.WINDO
 # and record/replay modes are all unaffected.
 var _player_view: PlayerView = null
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
+## --hideplayer: build the player view and keep the camera following it
+## exactly like the ordinary case, but never make its mesh visible. A
+## genuinely different mechanism from --noplayer (Task 2's own fix means
+## --noplayer now also stops the camera following, per the commit on
+## iso_camera.gd/main.gd) -- Gate 1's A/B/C captures need the camera actively
+## chasing the player while nothing player-shaped reaches the frame, which
+## only PlayerView.set_shown(false) on an otherwise-normal player gives.
+var _hide_player_mesh := false
 
 
 func _ready() -> void:
@@ -112,6 +120,7 @@ func _ready() -> void:
 	var markers := "--markers" in argv
 	var objects := not ("--noobjects" in argv)
 	_show_player = not ("--noplayer" in argv)
+	_hide_player_mesh = "--hideplayer" in argv
 	var interiors := "--interiors" in argv
 	var show_regions := "--regions" in argv
 	var exterior := "--exterior" in argv
@@ -196,7 +205,7 @@ func _ready() -> void:
 		return
 
 	if _record_path != "" or _replay_path != "":
-		await _run_record_or_replay(world)
+		await _run_record_or_replay(world, install, tex_pak, tiles, statics, mixed, items)
 		return
 
 	_cam = IsoCamera.new()
@@ -250,6 +259,8 @@ func _ready() -> void:
 					_player_view = PlayerView.new(Sacred.Models.new(models_pak))
 					if _player_view.node != null:
 						add_child(_player_view.node)
+						if _hide_player_mesh:
+							_player_view.set_shown(false)
 						print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
 							PlayerView.MODEL_NAME, _player_view.model_index,
 							_player_view.vertex_count, _player_view.triangle_count])
@@ -558,10 +569,23 @@ func _follow_probe() -> void:
 
 ## Builds the Walkable navmesh, derives (or takes the override for) the
 ## spawn cell, spawns the player, and dispatches into a record run or a
-## replay run. Never builds a camera or a SectorView -- _focus_cell()
-## resolves through the player once one exists (above), so neither mode
-## depends on anything drawn, matching _show_model's no-view shape.
-func _run_record_or_replay(world: Sacred.World) -> void:
+## replay run. Normally builds no camera or SectorView at all --
+## _focus_cell() resolves through the player once one exists (above), so
+## neither mode depends on anything drawn, matching _show_model's no-view
+## shape.
+##
+## --liveview (Task 3 Gate 2 only) is the one exception: paired with
+## --record=, it builds the camera, the streamer and the player mesh exactly
+## like the default streaming branch does, so the recording run has the
+## whole view layer switched on -- camera following, sectors streaming,
+## player drawn -- while --replay= (no --liveview passed) stays exactly the
+## no-view path it always was. D-14 says camera/streaming state must never
+## reach the dump; the only way to prove that is to make the two runs differ
+## in nearly everything BUT the simulation, which is what this gives Gate 2.
+func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred.Pak,
+		tiles: Sacred.Tiles, statics: Sacred.Statics, mixed: Sacred.Mixed, items: Sacred.Items) -> void:
+	var argv := OS.get_cmdline_user_args() + OS.get_cmdline_args()
+	var live_view := "--liveview" in argv
 	var walk := Walkable.new(world)
 	var spawn := _resolve_spawn(walk)
 	if spawn.is_empty():
@@ -576,6 +600,25 @@ func _run_record_or_replay(world: Sacred.World) -> void:
 	_player_id = _registry.spawn(rec_id, cell, 100, 100)
 	_sim.walk = walk
 	_sim.focus_actor_id = _player_id
+
+	if live_view and _record_path != "":
+		_cam = IsoCamera.new()
+		_cam.cell_limit = Vector2(world.size) * SECT
+		add_child(_cam)
+		_view = SectorView.new()
+		_view.name = "SectorView"
+		_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {})
+		add_child(_view)
+		_cam.set_zoom_index(1)
+		_cam.look_at_cell(cell)
+		var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
+		if models_pak.is_open():
+			_player_view = PlayerView.new(Sacred.Models.new(models_pak))
+			if _player_view.node != null:
+				add_child(_player_view.node)
+				print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
+					PlayerView.MODEL_NAME, _player_view.model_index,
+					_player_view.vertex_count, _player_view.triangle_count])
 
 	# Plan 04-02: the sliding path window and its one scripted goal request,
 	# derived from the ACTUAL spawn component -- never a hardcoded cell, so
