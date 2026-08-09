@@ -8,6 +8,22 @@ extends SceneTree
 ## rather than a framework -- see AGENTS.md "Build, test, and deployment".
 
 const SECTORS := [[49, 49], [50, 50], [51, 51], [0, 15], [14, 19], [31, 24], [99, 99]]
+## Deviation from 04-01-PLAN.md Task 3's literal text (documented in
+## 04-01-SUMMARY.md): the task says to sample SECTORS directly, but every
+## one of its 7 entries carries zero regions (measured, not assumed), which
+## would leave the acceptance criteria "at least one sampled sector reports
+## a non-zero region count" and "the md5 column discriminates" impossible
+## to satisfy simultaneously with reusing SECTORS unmodified. Follows this
+## file's own existing convention instead -- SECTORS/TEXTURES/MODELS are
+## already three independent per-layer sample lists, mirrored verbatim on
+## analysis/tools/verify_ref.py -- rather than mutating the pre-existing
+## SECTORS list and touching the `sector` fact line Phase 1-3 already rely
+## on. 64,39 is the four-co-located-region landmark sacred.gd:389 and
+## walkable.gd:35-36 already document; 4,37 and 52,51 (near the Task 1
+## derived spawn) were found by scanning real sector data, not guessed;
+## 0,15 / 14,19 / 31,24 / 99,99 are carried over from SECTORS to keep the
+## zero-region/zero-signal path genuinely exercised too.
+const WALKABLE_SECTORS := [[64, 39], [4, 37], [52, 51], [0, 15], [14, 19], [31, 24], [99, 99]]
 const TEXTURES := [0, 1, 2, 1000, 5000, 20000]
 ## BAT.GRN, GLADIATOR.GRN, GLAD_SA5_SHOULDER.GRN -- mirrored verbatim in
 ## analysis/tools/verify_ref.py's MODELS constant, 03-PATTERNS.md's sample.
@@ -46,6 +62,38 @@ func _init() -> void:
 	for s: Array in SECTORS:
 		var d := world.sector(s[0], s[1])
 		print("sector\t%d,%d\tlen=%d\tmd5=%s" % [s[0], s[1], d.size(), _md5(d)])
+
+	# Walkability layer -- one fact line per sampled sector, between the sector
+	# block and the tiles block on BOTH sides of the harness (04-01-PLAN.md
+	# Task 3). Reads through Sacred.Regions and Walkable.class_is_open(), the
+	# same allowlist Task 1 introduced -- never a second copy of it written
+	# for this harness (the same "reimplementing the thing it tests only ever
+	# agrees with itself" posture the bones block above already documents).
+	# An absent/undersized sector's stream still runs through Sacred.Regions,
+	# whose own _init() degrades it to an empty list -- so this loop needs no
+	# special case for "sector missing" versus "sector present, no regions":
+	# both produce regions=0 cells=0 open=0 and the md5 of the empty string.
+	for s: Array in WALKABLE_SECTORS:
+		var stream := world.sector(s[0], s[1])
+		var regions := Sacred.Regions.new(stream, s[0], s[1])
+		var cells := 0
+		var open_cells := 0
+		var text := ""
+		for r: Dictionary in regions.list:
+			var anchor: Vector2i = r["cell"]
+			var size: Vector2i = r["size"]
+			text += "%d,%d,%d,%d" % [anchor.x, anchor.y, size.x, size.y]
+			for cy in size.y:
+				for cx in size.x:
+					cells += 1
+					if Walkable.class_is_open(Sacred.Regions.cell_class(r, cx, cy)):
+						open_cells += 1
+						text += "1"
+					else:
+						text += "0"
+			text += "\n"
+		print("walkable\t%d,%d\tregions=%d\tcells=%d\topen=%d\tmd5=%s" % [
+			s[0], s[1], regions.list.size(), cells, open_cells, _md5(text.to_utf8_buffer())])
 
 	var tiles := Sacred.Tiles.new(tiles_pak)
 	print("tiles\tcount=%d\ttex0=%d\ttexlast=%d" % [
