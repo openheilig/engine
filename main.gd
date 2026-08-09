@@ -208,34 +208,48 @@ func _ready() -> void:
 	})
 	add_child(_view)
 
+	var region := _region_arg()
+
 	# Plan 04-03: the player, spawned on real walkable ground exactly like
 	# _run_record_or_replay's own Walkable/_resolve_spawn/_registry.spawn/
 	# _sim.walk= sequence -- never a second implementation of spawn
 	# derivation. Non-fatal on failure, matching RetailCursor.apply's degrade:
 	# streaming mode drew nothing extra before this plan and keeps doing so
 	# rather than aborting a run that has no walkable ground to stand on.
-	var walk := Walkable.new(world)
-	var spawn := _resolve_spawn(walk)
-	if spawn.is_empty():
-		push_warning("player: no walkable spawn cell found -- drawing nothing")
-	else:
-		var player_cell: Vector2 = spawn["cell"]
-		_player_id = _registry.spawn(_first_real_record_id(), player_cell, 100, 100)
-		_sim.walk = walk
-		_sim.focus_actor_id = _player_id
-		print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
-			player_cell.x, player_cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
-		if _show_player:
-			var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
-			if models_pak.is_open():
-				_player_view = PlayerView.new(Sacred.Models.new(models_pak))
-				if _player_view.node != null:
-					add_child(_player_view.node)
-					print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
-						PlayerView.MODEL_NAME, _player_view.model_index,
-						_player_view.vertex_count, _player_view.triangle_count])
+	#
+	# Gated to the true default-streaming case only (no fixed region, no
+	# --actor-probe=) -- both of those modes are pre-existing, self-contained
+	# regression harnesses (28672-quad/63-texture region count; --actor-probe='s
+	# id1..id19 fixed set and its PROBE_FOCUS-relative order/bands lines) that
+	# assume nothing else occupies the registry or the frame. Spawning the
+	# player there would not just shift ids, it would put an extra actor at
+	# PROBE_FOCUS's own sector and change _actor_probe's band COUNTS, which
+	# are geometric (in_radius().size()), not id-keyed. "The fixed region
+	# mode, the single-model mode, the probe -- the camera keeps behaving
+	# exactly as it does today" (04-03-PLAN.md Task 2) states this as the
+	# intended shape for those modes.
+	if region == Vector3i.ZERO and _probe_ticks <= 0:
+		var walk := Walkable.new(world)
+		var spawn := _resolve_spawn(walk)
+		if spawn.is_empty():
+			push_warning("player: no walkable spawn cell found -- drawing nothing")
+		else:
+			var player_cell: Vector2 = spawn["cell"]
+			_player_id = _registry.spawn(_first_real_record_id(), player_cell, 100, 100)
+			_sim.walk = walk
+			_sim.focus_actor_id = _player_id
+			print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
+				player_cell.x, player_cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
+			if _show_player:
+				var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
+				if models_pak.is_open():
+					_player_view = PlayerView.new(Sacred.Models.new(models_pak))
+					if _player_view.node != null:
+						add_child(_player_view.node)
+						print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
+							PlayerView.MODEL_NAME, _player_view.model_index,
+							_player_view.vertex_count, _player_view.triangle_count])
 
-	var region := _region_arg()
 	if region != Vector3i.ZERO:
 		_view.load_region(region.x, region.y, region.z)
 	else:
