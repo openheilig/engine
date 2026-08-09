@@ -191,6 +191,10 @@ func _ready() -> void:
 		_window_probe(world)
 		return
 
+	if "--follow-probe" in argv:
+		_follow_probe()
+		return
+
 	if _record_path != "" or _replay_path != "":
 		await _run_record_or_replay(world)
 		return
@@ -289,10 +293,21 @@ func _process(delta: float) -> void:
 		_view.stream(delta)
 	if not _probe_active and not _replay_active:
 		_advance_sim(delta, _focus_cell())
-	if _player_view != null and _player_id != ActorRegistry.INVALID_ID:
+	# Plan 04-03 Task 2: --noplayer means no player at all, not just an
+	# invisible one -- the camera must keep behaving exactly as it does today
+	# (Task 2's own reference-capture regression: --sector=50,50 with the
+	# player suppressed, unchanged md5) when --noplayer is passed, which it
+	# only would if follow is gated on _show_player too, not on _player_id
+	# alone. Fixed-region mode, the probe and --grn= never reach here with a
+	# valid _player_id at all (Task 1's fix gates player-spawn to the true
+	# default-streaming case only), so those modes are unaffected either way.
+	if _show_player and _player_id != ActorRegistry.INVALID_ID:
 		var p := _registry.get_actor(_player_id)
 		if p != null:
-			_player_view.update(p.cell)
+			if _player_view != null:
+				_player_view.update(p.cell)
+			if _cam != null:
+				_cam.follow_cell(p.cell)
 
 
 ## The ONLY Sim per-frame advance call site outside godot-port/world/ -- a
@@ -501,6 +516,43 @@ func _window_probe(world: Sacred.World) -> void:
 		max_dist, Sim.R_LOAD, max_dist < Sim.R_LOAD])
 
 	print("window\tresult=%s" % ("MISMATCH" if mismatch else "PASS"))
+	get_tree().quit(1 if mismatch else 0)
+
+
+## --follow-probe: IsoCamera.follow_cell() fed a fixed cell carrying a
+## deliberate sub-cell fraction, at each of the three measured ZOOM_SCALES
+## steps in turn. No session, no player, no streaming -- pure geometry,
+## mirroring --window-probe's shape (R3.4: the three measured steps, proven
+## by a printed check rather than asserted). A real IsoCamera is built and
+## added to the tree (never a hand-rolled stand-in) because follow_cell's
+## own odd-viewport-height guard reads get_viewport(), which needs a node
+## actually in the scene tree to answer.
+func _follow_probe() -> void:
+	# 3232.37,3232.61: fractional in both cell axes, so cell_to_world's
+	# (x-y)/(x+y) combination keeps a non-trivial fraction on both projected
+	# world axes too -- verified by hand to differ from its snapped target
+	# at all three zoom steps, not just a coincidental one.
+	var probe_cell := Vector2(3232.37, 3232.61)
+	var cam := IsoCamera.new()
+	add_child(cam)
+	var mismatch := false
+	for i in IsoCamera.ZOOM_SCALES.size():
+		cam.set_zoom_index(i)
+		var scale: float = IsoCamera.ZOOM_SCALES[i]
+		var unsnapped := IsoCamera.cell_to_world(probe_cell)
+		cam.follow_cell(probe_cell)
+		var snapped := Vector2(cam.position.x, cam.position.y)
+		# Independent of follow_cell's own arithmetic: "on the pixel grid at
+		# scale s" means snapped*s is a whole number, checked here rather
+		# than trusted from how the value was produced.
+		var on_grid := is_equal_approx(snapped.x * scale, roundf(snapped.x * scale)) \
+			and is_equal_approx(snapped.y * scale, roundf(snapped.y * scale))
+		if not on_grid:
+			mismatch = true
+		print("follow\tstep=%d\tscale=%.6f\tunsnapped=%.6f,%.6f\tsnapped=%.6f,%.6f\tverdict=%s" % [
+			i, scale, unsnapped.x, unsnapped.y, snapped.x, snapped.y,
+			"MISMATCH" if not on_grid else "PASS"])
+	cam.queue_free()
 	get_tree().quit(1 if mismatch else 0)
 
 

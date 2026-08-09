@@ -86,6 +86,35 @@ func look_at_cell(cell: Vector2) -> void:
 	position = Vector3(p.x, p.y, 1000.0)
 
 
+## Follow entry point for a continuously-moving target (the player), added
+## beside look_at_cell rather than folded into it -- --at=, --sector= and the
+## probe route all call look_at_cell directly and must keep placing the
+## camera exactly where they place it today.
+##
+## The player's cell is continuous; the camera's position is not allowed to
+## be, or every pixel comparison this project makes becomes meaningless. At
+## scale s a world-integer point lands on a pixel integer only when the
+## camera's own coordinate is itself a multiple of 1/s, so the snapped
+## coordinate is the world coordinate times s, rounded, divided by s. At the
+## middle zoom step (s=1.0) that is exactly "round to the nearest whole
+## world unit" -- Success Criterion 4's case -- and the same formula covers
+## the other two measured steps without special-casing any of them.
+##
+## Half the viewport enters the same arithmetic (`position` is the view's
+## centre), so an odd viewport height puts the centre on a half pixel no
+## matter how the camera itself is snapped -- checked here at follow time
+## and reported with push_error rather than silently rendering a frame that
+## cannot be compared, the same runtime-check-not-assert posture the sim's
+## radius ordering uses.
+func follow_cell(cell: Vector2) -> void:
+	var h := get_viewport().get_visible_rect().size.y
+	if int(h) % 2 != 0:
+		push_error("IsoCamera: viewport height %d is odd -- the view centre falls on a half pixel, breaking follow's pixel-grid snap" % int(h))
+	var p := cell_to_world(cell)
+	var s := zoom_scale()
+	position = Vector3(roundf(p.x * s) / s, roundf(p.y * s) / s, 1000.0)
+
+
 static func cell_to_world(cell: Vector2) -> Vector2:
 	return Vector2((cell.x - cell.y) * HW, -(cell.x + cell.y) * HH)
 
