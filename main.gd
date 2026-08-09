@@ -412,6 +412,10 @@ func _show_model(install: String, name: String) -> void:
 	view.name = "ModelView"
 	if not view.setup(models, idx):
 		printerr("grn\t%s (index %d) has no decodable mesh" % [models.entry_name(idx), idx])
+		# Never add_child'd, so nothing else frees it. quit() masks this on the
+		# CLI path, but this function is the one a corpus sweep would call in a
+		# loop, and there the orphans would accumulate.
+		view.free()
 		get_tree().quit(1)
 		return
 	add_child(view)

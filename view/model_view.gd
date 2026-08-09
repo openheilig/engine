@@ -108,6 +108,10 @@ func setup(models: Sacred.Models, entry: int) -> bool:
 	if not _build_rig(models, entry):
 		return false
 	if not _fill_weights(models, entry, m, arr):
+		# _build_rig succeeded, so _skeleton exists but has not been add_child'd
+		# yet -- that only happens on the success path below. Nothing else will
+		# free it.
+		_discard_rig()
 		return false
 
 	var mesh := ArrayMesh.new()
@@ -157,11 +161,25 @@ func rig_facts(models: Sacred.Models, entry: int) -> Dictionary:
 		"sanitised": bone_sanitised,
 	}
 	# The Skeleton3D was never added to a tree, so nothing else will free it.
+	_discard_rig()
+	return out
+
+
+## Frees a Skeleton3D built by _build_rig() but never handed to the scene tree,
+## and clears every field that referred to it.
+##
+## Every _build_rig() failure path after the Skeleton3D exists, and every caller
+## that abandons a successfully-built rig without add_child()-ing it, must come
+## through here: a Node created with .new() and never parented is never freed by
+## anything else, which is precisely the orphan Godot's own orphan-node counter
+## exists to surface.
+##
+## Safe to call when no rig was built -- the null check is the whole guard.
+func _discard_rig() -> void:
 	if _skeleton != null:
 		_skeleton.free()
 		_skeleton = null
-		_skin = null
-	return out
+	_skin = null
 
 
 ## Builds the Skeleton3D and the Skin for `entry`, checks rest against bind, and
@@ -276,6 +294,7 @@ func _build_rig(models: Sacred.Models, entry: int) -> bool:
 	_weights = models.mesh_weights(entry)
 	if _weights.is_empty():
 		push_error("ModelView: entry %d has bones but no readable weight blocks" % entry)
+		_discard_rig()
 		return false
 	# Space 4 -> space 3, one map per Mesh node.
 	_local_to_bind = []
@@ -297,6 +316,7 @@ func _build_rig(models: Sacred.Models, entry: int) -> bool:
 	bind_count = _skin.get_bind_count()
 	if bind_count == 0:
 		push_error("ModelView: entry %d has bones but nothing is weighted to any of them" % entry)
+		_discard_rig()
 		return false
 
 	# The rest-equals-bind assertion stood here and has been REMOVED, not

@@ -945,9 +945,19 @@ class Models extends RefCounted:
 	## boxes rather than picked to make the render look upright.
 	const GRN_TO_GODOT := Basis(Vector3(1, 0, 0), Vector3(0, 0, -1), Vector3(0, 1, 0))
 
-	## Set by the most recent coordinate_basis() call: true only when nine
-	## consecutive float32 forming an orthonormal matrix were actually found in
-	## the file. Single-threaded use only, exactly like last_walk_meta.
+	## Set by the most recent coordinate_basis() call: true when the basis has
+	## been established with confidence, NOT when it was found as literal bytes.
+	##
+	## The original meaning was the literal one -- "nine consecutive orthonormal
+	## float32 were found in the file" -- and it was always false, because an
+	## exhaustive scan of the header and node directory returns zero hits: this
+	## format does not store its basis. Plan 06 replaced the scan with a basis
+	## DERIVED from measured per-mesh bounding boxes and corroborated against two
+	## independent oracles to four decimals (findings row 495), and redefined
+	## `located` accordingly. Consumers printing `basis=located` are asserting
+	## "derived and corroborated", not "read from the file".
+	##
+	## Single-threaded use only, exactly like last_walk_meta.
 	var last_basis_located := false
 
 	## First entry whose name matches, comparing case-insensitively and adding
@@ -1189,6 +1199,17 @@ class Models extends RefCounted:
 			var t_len := _span(dir, tj, buf.size())
 			if v_len <= 0 or n_len <= 0 or t_len <= 0:
 				push_error("Sacred.Models.mesh_arrays: entry %d mesh at node %d has a non-positive span" % [entry, j])
+				return {}
+			# A span that is not a whole number of records means the stride is
+			# wrong or the span was mis-derived. Integer division would drop the
+			# remainder and hand back a truncated-but-plausible mesh -- exactly the
+			# quietly-wrong result this decoder refuses everywhere else.
+			# mesh_weights() already demands zero slack for the structurally
+			# identical case; demand it here too.
+			if v_len % VEC3_STRIDE != 0 or n_len % VEC3_STRIDE != 0 \
+					or t_len % TRI_STRIDE != 0:
+				push_error("Sacred.Models.mesh_arrays: entry %d mesh at node %d has a misaligned span (v=%d n=%d t=%d against strides %d/%d/%d)" % [
+					entry, j, v_len, n_len, t_len, VEC3_STRIDE, VEC3_STRIDE, TRI_STRIDE])
 				return {}
 			var n_pos := v_len / VEC3_STRIDE
 			var n_nrm := n_len / VEC3_STRIDE
@@ -1509,10 +1530,8 @@ class Models extends RefCounted:
 		var n := bl.size()
 		var world: Array[Transform3D] = []
 		var done := PackedByteArray()
-		var depth := PackedInt32Array()
 		world.resize(n)
 		done.resize(n)
-		depth.resize(n)
 		for i in n:
 			if done[i] != 0:
 				continue
@@ -1540,10 +1559,8 @@ class Models extends RefCounted:
 				var p2: int = bl[b]["parent_effective"]
 				if p2 == -1:
 					world[b] = bl[b]["rest"]
-					depth[b] = 0
 				else:
 					world[b] = world[p2] * bl[b]["rest"]
-					depth[b] = depth[p2] + 1
 				done[b] = 1
 		for i in n:
 			out.append(world[i])
@@ -1688,4 +1705,91 @@ class Models extends RefCounted:
 				"bone_map": lists[pick],
 			})
 			lists.remove_at(pick)
+		return out
+
+
+## Hero savegames (`*.pax` under `~/.lgp/sacred/`). A PAX file is a fixed
+## 256-byte header, a section table at 0x0100, and a body per used section.
+## Written from the bytes of eight retail heroes (TSV rows 530-531); the
+## HeroDump sources in unpack-tools/ were read as documentation of behaviour
+## only, and no code was taken from them.
+##
+##   0x0000  "AMH" + u8 version 0x1B
+##   0x0004  u32 section_count            (16 in every observed file)
+##   0x0008  u32 x9 unknown; u1 == the byte length of the 0xC3 section
+##   0x0034  212 zero bytes
+##   0x0100  section_count x { u32 type, u32 offset, u32 size } -- type 0 == unused
+##   @offset { u32 signature, u32 compressed_size, 24 zero bytes }
+##            signature == 0xBAADC0DE -> zlib payload at offset + 0x20
+##            otherwise               -> raw payload at offset, `size` bytes
+class Pax extends RefCounted:
+	const MAGIC := 0x1B484D41          ## "AMH" + version byte 0x1B, read as one u32
+	const TABLE := 0x0100              ## section table start; fixed, not a header field
+	const ENTRY := 12                  ## bytes per section-table entry
+	const COMPRESSED := 0xBAADC0DE     ## section signature marking a zlib payload
+	const PAYLOAD := 0x20              ## payload offset past a compressed section header
+	## Retail hardcodes this section's read length and ignores its table size.
+	## Observed value happens to agree (usz == 64), so this only matters for a
+	## file where it does not -- keep it, it is cheap insurance.
+	const TYPE_FIXED_64 := 0xC4
+
+	var types := PackedInt32Array()    ## used section types, in table order
+	var _off := PackedInt64Array()
+	var _usz := PackedInt64Array()
+	var _by_type: Dictionary[int, int] = {}
+	var _f: FileAccess
+
+	func _init(path: String) -> void:
+		_f = FileAccess.open(path, FileAccess.READ)
+		if _f == null:
+			push_error("Sacred.Pax: cannot open %s (%s)" % [path, error_string(FileAccess.get_open_error())])
+			return
+		if _f.get_32() != MAGIC:
+			push_error("Sacred.Pax: %s is not a PAX hero file" % path)
+			_f = null
+			return
+		var n := _f.get_32()
+		_f.seek(TABLE)
+		var tab := _f.get_buffer(n * ENTRY)
+		for i in n:
+			var t := tab.decode_u32(i * ENTRY + 0)
+			if t == 0:
+				continue                # unused slot; retail skips these, not an error
+			_by_type[t] = types.size()
+			types.append(t)
+			_off.append(tab.decode_u32(i * ENTRY + 4))
+			_usz.append(tab.decode_u32(i * ENTRY + 8))
+
+	func is_open() -> bool:
+		return _f != null
+
+	## Used sections only. The table always has 16 slots; most are empty.
+	func count() -> int:
+		return types.size()
+
+	func has_type(type_id: int) -> bool:
+		return _by_type.has(type_id)
+
+	## Decoded bytes of one section, inflating it if it is compressed. Returns
+	## an empty array for an unknown type or a stream that fails to inflate.
+	func section(type_id: int) -> PackedByteArray:
+		if not _by_type.has(type_id):
+			return PackedByteArray()
+		var i: int = _by_type[type_id]
+		var off: int = _off[i]
+		var usz: int = _usz[i]
+		_f.seek(off)
+		if _f.get_32() != COMPRESSED:
+			var raw_len := 64 if type_id == TYPE_FIXED_64 else usz
+			_f.seek(off)
+			return _f.get_buffer(raw_len)
+		var csz := _f.get_32()
+		_f.seek(off + PAYLOAD)
+		# Pass the whole zlib-wrapped stream (78 da here, not the 78 9c seen
+		# elsewhere). Godot 4.7's COMPRESSION_DEFLATE consumes the 2-byte
+		# wrapper itself and FAILS on a stripped stream -- measured, TSV row 534.
+		var out := _f.get_buffer(csz).decompress(usz, FileAccess.COMPRESSION_DEFLATE)
+		if out.size() != usz:
+			push_error("Sacred.Pax: section 0x%X inflated to %d, expected %d" % [type_id, out.size(), usz])
+			return PackedByteArray()
 		return out
