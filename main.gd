@@ -346,15 +346,25 @@ func _advance_sim(dt: float, focus: Vector2) -> int:
 		if p != null:
 			p.heading = intent
 	# Plan 04-02: the one scripted goal request, threaded into the LIVE sim
-	# exactly like a real caller would, at the moment it will actually be
-	# consumed (the tick about to run). Gated on the common case of one real
-	# tick per advance() call -- a catch-up burst spanning GOAL_REQUEST_TICK
-	# would request it one tick later than named, which is a harmless,
-	# documented Sim-local edge case, not a correctness bug (the request is
-	# still consumed exactly once, on the next tick that runs).
-	if recording and pre_tick + 1 == GOAL_REQUEST_TICK and _goal_cell != PathWindow.NO_GOAL:
+	# exactly like a real caller would. The request names the TICK it is for and
+	# Sim fires it when its own counter reaches that number.
+	#
+	# It used to be gated on `pre_tick + 1 == GOAL_REQUEST_TICK` -- "is the tick
+	# about to run the goal tick?" -- with a comment claiming a catch-up burst
+	# would merely delay it by one tick. That comment was wrong, and the gate
+	# was a latent divergence (04-REVIEW CR-01): advance() runs up to
+	# MAX_CATCHUP_TICKS ticks per call, so if GOAL_REQUEST_TICK landed second or
+	# later in a burst the test failed, the goal was applied ZERO times (`tick`
+	# only moves forward, so the edge could never fire again), and yet the
+	# recorder's write loop below -- which range-tests every tick actually run --
+	# still wrote the goal line. Replay then applied a goal the live run never
+	# did. Setting the tick number instead makes the two agree by construction:
+	# both now key off the same counter rather than off frame timing.
+	if recording and _goal_cell != PathWindow.NO_GOAL and _sim.pending_goal_tick < 0 \
+			and pre_tick < GOAL_REQUEST_TICK:
 		_sim.pending_goal_actor_id = _player_id
 		_sim.pending_goal = _goal_cell
+		_sim.pending_goal_tick = GOAL_REQUEST_TICK
 	var ran := _sim.advance(dt, _registry, focus)
 	if recording:
 		for t in range(pre_tick + 1, pre_tick + ran + 1):

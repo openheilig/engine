@@ -114,6 +114,26 @@ var path_window: PathWindow = null
 var pending_goal_actor_id: int = ActorRegistry.INVALID_ID
 var pending_goal: Vector2i = PathWindow.NO_GOAL
 
+## Tick this request is FOR. -1 (the default) keeps the original "consumed on
+## the very next tick_once()" contract, which is what Replay.replay() relies on
+## -- it drives exactly one tick per call, so "next tick" and "tick N" are the
+## same thing there. A caller that cannot know which tick will run next sets
+## this instead, and the request then fires on the tick that carries this
+## number and no other.
+##
+## Why this exists (04-REVIEW CR-01). main.gd used to decide BEFORE calling
+## advance() whether the upcoming tick was the goal tick, testing
+## `pre_tick + 1 == GOAL_REQUEST_TICK`. But advance() runs up to
+## MAX_CATCHUP_TICKS ticks per call, so after a slow frame the goal tick could
+## be the second or third tick of the burst -- the test then failed and the
+## goal was applied ZERO times, while the recorder, which range-tests every
+## tick it ran, still wrote the goal line. Replay obeyed the recording, the
+## live run had not, and the two diverged: a false failure in the project's
+## only determinism gate. Comparing against Sim's OWN counter here removes the
+## disagreement by construction, because the counter and the recorder are now
+## reading the same number.
+var pending_goal_tick: int = -1
+
 ## Single-shot window-origin offset, consumed the same way as the goal
 ## fields above. Zero in normal operation; Task 3's origin perturbation is
 ## the only writer, and it always sources the offset from the composition
@@ -191,11 +211,19 @@ func tick_once(reg: ActorRegistry, focus: Vector2) -> void:
 	var astar_event: Dictionary = {}
 	if path_window != null and tracked != null:
 		var goal_this_tick := PathWindow.NO_GOAL
-		if pending_goal_actor_id == tracked.id and pending_goal != PathWindow.NO_GOAL:
+		# pending_goal_tick < 0 means "the next tick", whichever that is (the
+		# original contract, still used by Replay.replay()). Otherwise the
+		# request is FOR a numbered tick and waits, unconsumed, until `tick`
+		# reaches it -- so a catch-up burst that runs several ticks in one
+		# advance() call still fires it on the right one. See CR-01 above.
+		var due := pending_goal_tick < 0 or pending_goal_tick == tick
+		if due and pending_goal_actor_id == tracked.id and pending_goal != PathWindow.NO_GOAL:
 			goal_this_tick = pending_goal
 		var offset := pending_origin_offset
-		pending_goal_actor_id = ActorRegistry.INVALID_ID
-		pending_goal = PathWindow.NO_GOAL
+		if due:
+			pending_goal_actor_id = ActorRegistry.INVALID_ID
+			pending_goal = PathWindow.NO_GOAL
+			pending_goal_tick = -1
 		pending_origin_offset = Vector2i.ZERO
 
 		var from_cell := Vector2i(floori(tracked.cell.x), floori(tracked.cell.y))
