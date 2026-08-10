@@ -423,7 +423,13 @@ func _fill_weights(models: Sacred.Models, entry: int, m: Dictionary, arr: Array)
 ## position/rotation track -- PlayerView.update() writes this rig's root
 ## bone's pose every tick from the sim's cell, and a placement track on the
 ## same bone would fight it every frame.
-func build_animation(models: Sacred.Models, clip_entry: int) -> Dictionary:
+##
+## `falsify` (05-12 Task 2 counterfactual, "" in normal operation) deliberately
+## breaks the name join to prove it is load-bearing: "offset" resolves to
+## find_bone(name) PLUS ONE instead of the exact match; "drop" skips the name
+## lookup entirely and binds every track to skeleton bone 0. Both are for
+## --anim-falsify= only and must never run outside that flag.
+func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "") -> Dictionary:
 	var fail := {"animation": null, "bound": 0, "tracks": 0, "unbound_names": PackedStringArray()}
 	if _skeleton == null:
 		return fail
@@ -445,14 +451,20 @@ func build_animation(models: Sacred.Models, clip_entry: int) -> Dictionary:
 	var bound := 0
 	var tracks := 0
 	var unbound := PackedStringArray()
+	var bone_count := _skeleton.get_bone_count()
 	for ri in records.size():
 		var bi: int = track_bone[ri]
 		var stored: String = clip_names[bi] if bi < clip_names.size() else ""
 		var nm := stored.replace(":", "_").replace("/", "_")
 		var skel_idx := _skeleton.find_bone(nm) if nm != "" else -1
+		if falsify == "drop":
+			skel_idx = 0 if bone_count > 0 else -1
+		elif falsify == "offset" and skel_idx != -1 and bone_count > 0:
+			skel_idx = (skel_idx + 1) % bone_count
 		if skel_idx == -1:
 			unbound.append(stored)
 			continue
+		nm = _skeleton.get_bone_name(skel_idx)
 		bound += 1
 		if int(clip_bone_list[bi]["parent_effective"]) == -1:
 			continue
@@ -494,10 +506,10 @@ func build_animation(models: Sacred.Models, clip_entry: int) -> Dictionary:
 ## anim_bound/anim_tracks/anim_unbound_names as a side effect, for
 ## main.gd's --anim= fact lines. Returns true iff at least one track bound
 ## and playback started.
-func play_clip(models: Sacred.Models, clip_entry: int) -> bool:
+func play_clip(models: Sacred.Models, clip_entry: int, falsify: String = "") -> bool:
 	if _skeleton == null:
 		return false
-	var built := build_animation(models, clip_entry)
+	var built := build_animation(models, clip_entry, falsify)
 	var anim: Animation = built["animation"]
 	anim_bound = int(built["bound"])
 	anim_tracks = int(built["tracks"])
@@ -536,6 +548,15 @@ func sample_bone_pose(bone_name: String) -> Transform3D:
 	if idx == -1:
 		return Transform3D.IDENTITY
 	return _skeleton.get_bone_pose(idx)
+
+
+## Seeks the live AnimationPlayer to an explicit time and immediately updates
+## the Skeleton3D pose (update=true) so a caller can sample_bone_pose() at a
+## chosen time without waiting on _process -- this file defines none (D-04).
+## A no-op when play_clip() has not been called yet.
+func seek_anim(t: float) -> void:
+	if _anim_player != null:
+		_anim_player.seek(t, true)
 
 
 ## True once the surface exists. There is no streaming here, so this is

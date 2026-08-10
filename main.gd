@@ -180,6 +180,30 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--anim="):
 			anim_name = a.trim_prefix("--anim=")
+	# 05-12 Task 2 counterfactual: deliberately breaks the clip-bone-name to
+	# model-bone-name join build_animation() performs, to show that join is
+	# load-bearing. "offset" resolves to find_bone(name) PLUS ONE; "drop"
+	# skips the name lookup and binds every track to skeleton bone 0. Empty
+	# is the normal, correct join and is what --anim= uses by default.
+	var anim_falsify := ""
+	for a in argv:
+		if a.begins_with("--anim-falsify="):
+			anim_falsify = a.trim_prefix("--anim-falsify=")
+	# 05-12 Task 2: settles, in GDScript, which within-file mapping (directory
+	# position, id-1, id) a clip record's bone actually is -- re-derived
+	# rather than cited from planning, against the bone's own stored rest
+	# translation (decoded by different code from a different structure).
+	var anim_key_report := ""
+	for a in argv:
+		if a.begins_with("--anim-key-report="):
+			anim_key_report = a.trim_prefix("--anim-key-report=")
+	# 05-12 Task 2: measures whether a clip's skeleton and the model's
+	# skeleton are the SAME rig -- matched by exact bone NAME only, never by
+	# index, never by parent_effective shape, never by the record's id.
+	var anim_rigcheck := ""
+	for a in argv:
+		if a.begins_with("--anim-rigcheck="):
+			anim_rigcheck = a.trim_prefix("--anim-rigcheck=")
 	for a in argv:
 		if a.begins_with("--tickhz="):
 			_tick_hz = clampi(int(a.trim_prefix("--tickhz=")), 1, 240)
@@ -227,7 +251,7 @@ func _ready() -> void:
 		Sim.R_SIM < Sim.R_RENDER and Sim.R_RENDER < Sim.R_LOAD])
 
 	if grn_name != "":
-		await _show_model(install, grn_name, anim_name)
+		await _show_model(install, grn_name, anim_name, anim_falsify, anim_key_report, anim_rigcheck)
 		return
 
 	if clip_name != "":
@@ -1094,7 +1118,8 @@ func _actor_probe(n: int, route: String) -> void:
 ## FileAccess.open, no use of the trimmed argument as a path. An unresolvable
 ## name is fatal and loud -- rendering nothing while exiting 0 is the failure
 ## mode that makes a broken capture look like a working one.
-func _show_model(install: String, name: String, anim_name: String = "") -> void:
+func _show_model(install: String, name: String, anim_name: String = "", anim_falsify: String = "",
+		anim_key_report: String = "", anim_rigcheck: String = "") -> void:
 	var pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 	if not pak.is_open():
 		printerr("grn\tcannot open pak/models.pak under %s" % install)
@@ -1131,6 +1156,12 @@ func _show_model(install: String, name: String, anim_name: String = "") -> void:
 	# it reported true unconditionally, including on a render a human rejected.
 	# It is removed rather than replaced: the skeleton and skin layer is
 	# unvalidated until an oracle independent of our own decode exists.
+	if anim_key_report != "":
+		_anim_key_report(models, anim_key_report)
+	if anim_rigcheck != "":
+		if not _anim_rigcheck(models, idx, anim_rigcheck):
+			get_tree().quit(1)
+			return
 	if anim_name != "":
 		# --anim=NAME resolves through Models.clip_index_of, the identical
 		# kind-scoped lookup --clip= uses -- a mesh-kind or wrong-kind name
@@ -1145,7 +1176,7 @@ func _show_model(install: String, name: String, anim_name: String = "") -> void:
 			printerr("anim\tno motion-kind entry named %s in pak/models.pak (%d entries)" % [anim_name, models.count()])
 			get_tree().quit(1)
 			return
-		if not view.play_clip(models, anim_idx):
+		if not view.play_clip(models, anim_idx, anim_falsify):
 			printerr("anim\t%s (index %d) bound no animation tracks to %s (index %d)" % [
 				models.entry_name(anim_idx), anim_idx, models.entry_name(idx), idx])
 			get_tree().quit(1)
@@ -1156,7 +1187,285 @@ func _show_model(install: String, name: String, anim_name: String = "") -> void:
 			view.anim_bound, total, view.anim_length, "linear"])
 		if not view.anim_unbound_names.is_empty():
 			print("anim-unbound\tclip=%d\tnames=%s" % [anim_idx, ",".join(view.anim_unbound_names)])
+		if anim_falsify != "":
+			# 05-12 Task 2 counterfactual proof: sample a fixed bone at a fixed
+			# advance time under the broken join and print it verbatim. A
+			# correct run's --anim= (no --anim-falsify=) sampled the same bone
+			# at the same time earlier in this task's verification -- the two
+			# outputs are compared by the human/task record, not by this
+			# process, since each is a separate headless invocation.
+			var probe_bone := "Bip01"
+			var t := view.anim_length * 0.5
+			view.seek_anim(t)
+			var pose := view.sample_bone_pose(probe_bone)
+			print("anim-falsify\tmode=%s\tbone=%s\tt=%.6f\torigin=%s\tbasis=%s" % [
+				anim_falsify, probe_bone, t, pose.origin, pose.basis])
 	await _maybe_screenshot()
+
+
+## 05-12 Task 2: settles, in GDScript, which within-file mapping (directory
+## position, id-1, id) a clip record's bone actually is -- re-derived here
+## rather than cited from planning, against the bone's own stored local rest
+## translation (Sacred.Models.clip_bones()), a quantity decoded by different
+## code from a different structure than the record's own first translation
+## keyframe -- not the circular comparison findings row 496 refuted. Prints
+## one `animkey` line per rival mapping, then a corpus census line over every
+## kind=65 clip in the pak. Adds no tolerance constant to sacred.gd; the
+## verdict is the raw SEPARATION between mappings' means.
+func _anim_key_report(models: Sacred.Models, name: String) -> void:
+	var clip_idx := models.clip_index_of(name)
+	if clip_idx < 0:
+		printerr("animkey\tno motion-kind entry named %s in pak/models.pak (%d entries)" % [name, models.count()])
+		return
+	var c := models.clip(clip_idx)
+	var bones := models.clip_bones(clip_idx)
+	if c.is_empty() or bones.is_empty():
+		printerr("animkey\tentry %d has no decodable clip/bone data" % clip_idx)
+		return
+	var records: Array = c["records"]
+	var n_bones := bones.size()
+	for mapping in ["dirpos", "id-1", "id"]:
+		var sum := 0.0
+		var mx := 0.0
+		var n := 0
+		for ri in records.size():
+			var r: Dictionary = records[ri]
+			var positions: PackedVector3Array = r["positions"]
+			if positions.is_empty():
+				continue
+			var bi := -1
+			match mapping:
+				"dirpos": bi = ri
+				"id-1": bi = int(r["id"]) - 1
+				"id": bi = int(r["id"])
+			if bi < 0 or bi >= n_bones:
+				continue
+			var rest: Vector3 = bones[bi]["position"]
+			var d := positions[0].distance_to(rest)
+			sum += d
+			mx = maxf(mx, d)
+			n += 1
+		var mean := (sum / n) if n > 0 else 0.0
+		print("animkey\tclip=%d\tmapping=%s\tmean=%.6f\tmax=%.6f\tn=%d" % [clip_idx, mapping, mean, mx, n])
+
+	# Corpus census over every kind=65 entry that IS a clip (is_animation()
+	# discriminates a clip from a motion-model such as GLADIATOR.GRN's own
+	# entry 2845, which carries no per-bone track records at all).
+	var decodable := 0
+	var undecodable := 0
+	var perm1 := 0
+	var perm0 := 0
+	var other := 0
+	var countmismatch := 0
+	var other_names := PackedStringArray()
+	for i in models.count():
+		if models.kind_of(i) != Sacred.Models.KIND_MOTION or not models.is_animation(i):
+			continue
+		var cc := models.clip(i)
+		var bb := models.clip_bones(i)
+		if cc.is_empty() or bb.is_empty():
+			undecodable += 1
+			continue
+		decodable += 1
+		var recs: Array = cc["records"]
+		var nb := bb.size()
+		if recs.size() != nb:
+			countmismatch += 1
+		var ids := PackedInt32Array()
+		for r2 in recs:
+			ids.append(int(r2["id"]))
+		if _is_permutation(ids, 1, nb):
+			perm1 += 1
+		elif _is_permutation(ids, 0, nb):
+			perm0 += 1
+		else:
+			other += 1
+			other_names.append(models.entry_name(i))
+	print("animkey\tcorpus=kind65\tdecodable=%d\tperm1=%d\tperm0=%d\tother=%d\tcountmismatch=%d" % [
+		decodable, perm1, perm0, other, countmismatch])
+	# Not part of the plan's fixed corpus-line format, printed as an honest
+	# extra fact: entries clip() itself refuses outright (a decode-level
+	# failure, before an id-pattern classification is even possible) are
+	# NEITHER decodable nor classifiable as perm1/perm0/other under this
+	# census. See the findings row and 05-12-SUMMARY.md for which entries
+	# these are and why -- Task 1 already surfaced the same refusal on this
+	# corpus's two named exceptions.
+	if undecodable > 0:
+		print("animkey\tcorpus=kind65\tundecodable=%d" % undecodable)
+	if not other_names.is_empty():
+		print("animkey\tcorpus=kind65\tother_names=%s" % ",".join(other_names))
+
+
+## True iff every value of `ids` falls in `base..base+n-1` and each value in
+## that range appears EXACTLY once -- an exact permutation, not merely a
+## count match. `ids.size() != n` is an immediate false (a record/bone count
+## mismatch is a different finding, counted separately as `countmismatch`).
+func _is_permutation(ids: PackedInt32Array, base: int, n: int) -> bool:
+	if ids.size() != n or n <= 0:
+		return false
+	var seen := PackedByteArray()
+	seen.resize(n)
+	for v in ids:
+		var i := v - base
+		if i < 0 or i >= n or seen[i] != 0:
+			return false
+		seen[i] = 1
+	return true
+
+
+## Composes world-space bind transforms parent-first from a stored local bone
+## chain, in the SAME shape and with the SAME cycle-safety step budget
+## Sacred.Models.bind_poses() already implements for kind=64 model entries.
+## bind_poses() itself is hardcoded to bones() (kind=64 only, by its own doc
+## comment's design), so this is the IDENTICAL algorithm applied here to
+## clip_bones()'s kind=65 shape, which returns the same per-bone Dictionary
+## (parent_effective, rest). Duplicated rather than added to sacred.gd
+## because Task 2's own file list does not include sacred.gd -- bind_poses()
+## itself already forbids a rival spelling of an EXISTING rule, and this is
+## a NEW one, generic over either bone-list shape, that belongs in the file
+## that consumes it.
+func _compose_world(bl: Array[Dictionary]) -> Array[Transform3D]:
+	var out: Array[Transform3D] = []
+	if bl.is_empty():
+		return out
+	var n := bl.size()
+	var world: Array[Transform3D] = []
+	var done := PackedByteArray()
+	world.resize(n)
+	done.resize(n)
+	for i in n:
+		if done[i] != 0:
+			continue
+		var chain: Array[int] = []
+		var c := i
+		var steps := 0
+		while done[c] == 0:
+			if steps > n:
+				push_error("main._compose_world: bone %d sits on a parent cycle" % i)
+				return []
+			chain.append(c)
+			var p: int = bl[c]["parent_effective"]
+			if p == -1:
+				break
+			if chain.has(p):
+				push_error("main._compose_world: bone %d sits on a parent cycle" % i)
+				return []
+			c = p
+			steps += 1
+		chain.reverse()
+		for b in chain:
+			var p2: int = bl[b]["parent_effective"]
+			if p2 == -1:
+				world[b] = bl[b]["rest"]
+			else:
+				world[b] = world[p2] * bl[b]["rest"]
+			done[b] = 1
+	for i in n:
+		out.append(world[i])
+	return out
+
+
+## The wrong-character control arm (planning_measurements section 4):
+## BATX_ATTACK_BH_A.GRN matches 26 bone names by generic 3ds Max Biped
+## naming, so a check that only counted matches would not discriminate --
+## what must discriminate is whether the matched bones AGREE in world bind
+## transform. 0.01 is the same tight discriminator planning's own probe used
+## on this corpus; it is not tuned here to pass, it is the value stated
+## before this task ran.
+const ANIM_RIGCHECK_CONTROL := "BATX_ATTACK_BH_A.GRN"
+const ANIM_RIGCHECK_WITHIN := 0.01
+
+## One rig-agreement measurement, matching bones by exact NAME only (never
+## index, never parent_effective shape, never the record's dword id) between
+## `clip_idx`'s composed world bind transforms and `model_idx`'s. Empty
+## Dictionary on an undecodable side.
+func _rigcheck_one(models: Sacred.Models, model_idx: int, clip_idx: int) -> Dictionary:
+	var model_bones := models.bones(model_idx)
+	var model_world := models.bind_poses(model_idx)
+	if model_bones.is_empty() or model_world.is_empty():
+		printerr("animrig\tmodel entry %d has no decodable bones" % model_idx)
+		return {}
+	var model_by_name := {}
+	for i in model_bones.size():
+		var nm: String = (model_bones[i]["name"] as PackedByteArray).get_string_from_utf8()
+		if nm != "" and not model_by_name.has(nm):
+			model_by_name[nm] = model_world[i]
+
+	var clip_names := models.clip_bone_names(clip_idx)
+	var clip_bones := models.clip_bones(clip_idx)
+	var clip_world := _compose_world(clip_bones)
+	if clip_names.is_empty() or clip_world.is_empty():
+		printerr("animrig\tclip entry %d has no decodable bones" % clip_idx)
+		return {}
+
+	var matched := 0
+	var maxorigin := 0.0
+	var maxbasis := 0.0
+	var within := 0
+	var worstbone := ""
+	for i in clip_names.size():
+		var nm: String = clip_names[i]
+		if nm == "" or not model_by_name.has(nm):
+			continue
+		matched += 1
+		var a: Transform3D = clip_world[i]
+		var b: Transform3D = model_by_name[nm]
+		var od := a.origin.distance_to(b.origin)
+		var bd := 0.0
+		for axis in 3:
+			bd = maxf(bd, (a.basis[axis] - b.basis[axis]).length())
+		if od > maxorigin:
+			maxorigin = od
+			worstbone = nm
+		maxbasis = maxf(maxbasis, bd)
+		if od <= ANIM_RIGCHECK_WITHIN:
+			within += 1
+	return {
+		"matched": matched, "total": clip_names.size(), "unmatched": clip_names.size() - matched,
+		"maxorigin": maxorigin, "maxbasis": maxbasis, "within": within, "worstbone": worstbone,
+	}
+
+
+## 05-12 Task 2 halt: whether a clip's skeleton and the model's skeleton are
+## the same rig, measured by name, with the wrong-character control run
+## alongside it in the SAME invocation whenever `clip_name` is not itself the
+## control. Prints one `animrig` line for `clip_name` and, unless it IS the
+## control, a second `animrig` line for the control -- so "two animrig lines
+## exist" is true of a single `--anim-rigcheck=` run naming the real clip.
+## Discriminates by AGREEMENT (maxorigin, within), never by match count --
+## the control MATCHES 26 names and must still be told apart by disagreeing.
+## Returns false (having printed `verdict=REFUTED`) when it does not
+## separate; the caller must not proceed to Task 3 in that case. Adds no
+## epsilon or tolerance constant to sacred.gd.
+func _anim_rigcheck(models: Sacred.Models, model_idx: int, clip_name: String) -> bool:
+	var clip_idx := models.clip_index_of(clip_name)
+	if clip_idx < 0:
+		printerr("animrig\tno motion-kind entry named %s in pak/models.pak (%d entries)" % [clip_name, models.count()])
+		return false
+	var r := _rigcheck_one(models, model_idx, clip_idx)
+	if r.is_empty():
+		return false
+	print("animrig\tclip=%d\tmodel=%d\tmatched=%d/%d\tunmatched=%d\tmaxorigin=%.6f\tmaxbasis=%.6f\twithin=%d\tworstbone=%s" % [
+		clip_idx, model_idx, r.matched, r.total, r.unmatched, r.maxorigin, r.maxbasis, r.within, r.worstbone])
+
+	var control_idx := models.clip_index_of(ANIM_RIGCHECK_CONTROL)
+	if control_idx < 0 or control_idx == clip_idx:
+		return true
+	var cr := _rigcheck_one(models, model_idx, control_idx)
+	if cr.is_empty():
+		printerr("animrig\tcontrol entry %s unavailable for comparison" % ANIM_RIGCHECK_CONTROL)
+		return true
+	print("animrig\tclip=%d\tmodel=%d\tmatched=%d/%d\tunmatched=%d\tmaxorigin=%.6f\tmaxbasis=%.6f\twithin=%d\tworstbone=%s\tcontrol=true" % [
+		control_idx, model_idx, cr.matched, cr.total, cr.unmatched, cr.maxorigin, cr.maxbasis, cr.within, cr.worstbone])
+
+	var clip_agreement := float(r.within) / maxf(1.0, float(r.total))
+	var control_agreement := float(cr.within) / maxf(1.0, float(cr.total))
+	if r.maxorigin >= cr.maxorigin or clip_agreement <= control_agreement:
+		print("animrig\tverdict=REFUTED\treason=control-agrees-as-well-as-clip")
+		return false
+	var ratio: float = (cr.maxorigin / r.maxorigin) if r.maxorigin > 0.0 else INF
+	print("animrig\tverdict=CONFIRMED\tseparation_ratio=%.6f" % ratio)
+	return true
 
 
 ## --clip=NAME decodes one animation clip from pak/models.pak, mirroring
