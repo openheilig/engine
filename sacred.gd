@@ -1707,6 +1707,375 @@ class Models extends RefCounted:
 			lists.remove_at(pick)
 		return out
 
+	# ---------------------------------------------------------------------
+	# Animation clip decode (Plan 05-05, R1.5). kind=65 entries.
+	#
+	# CORRECTION: 05-RESEARCH.md records 0xCA5E1204 (AnimationTransformTrackKeys)
+	# as "genuinely absent" from Sacred's motion bytes. That was measured against
+	# entry 2845, GLADIATOR.GRN's kind=65 counterpart -- which is a MODEL (five
+	# Mesh nodes, no per-bone animation records), not a clip. A clip such as
+	# entry 2847 (GLAD_ATTACK_1H_A.GRN) carries exactly one 0xCA5E1204 record per
+	# bone. 05-02-SUMMARY.md corrected this in the findings log (row 589); this
+	# section must not re-inherit the "absent" claim.
+	#
+	# The animation node tree, reached through _directory()/_direct_children()
+	# exactly as geometry and bones already are -- no byte-pattern scan:
+	#
+	#   AnimationSection (0xCA5E1205)
+	#     -> Animation (0xCA5E1200), a direct child
+	#        -> AnimationTransformTrackSection (0xCA5E1203), a direct child
+	#           -> AnimationTransformTrackKeys (0xCA5E1204), one direct child per bone
+	#
+	# Per-bone record layout (zero-slack reconciled by 05-02 against Sacred's own
+	# bytes on three sampled clips -- 2847/2899/2903, all three 100% unit-quaternion
+	# at ANIM_QUAT_EPS below):
+	#
+	#   +0   u32     id                (carried through as data, never an index --
+	#                                    05-02's --idjoin REFUTED it as a cross-file
+	#                                    join key, BAT.GRN control arm included)
+	#   +4   5x u32   unknown
+	#   +24  u32     numTranslates (nt)
+	#   +28  u32     numQuaternions (nq)
+	#   +32  u32     numUnknowns (nu)
+	#   +36  4x u32   unknown
+	#   +52  nt x f32  translate-track times
+	#        nq x f32  rotation-track times
+	#        nu x f32  "other"-track times
+	#        nt x 3 f32  translations
+	#        nq x 4 f32  rotations, stored x,y,z,w -- same order bones() uses
+	#        nu x 3 f32  "other" payload, uninterpreted
+	#   + ANIM_RECORD_TRAILER (48) undocumented, measured, count-independent
+	#     fixed bytes -- part of the size a record must reconcile to exactly,
+	#     never itself decoded. An earlier search attempt folded these bytes
+	#     into the header instead (widening the header bound to reach them
+	#     directly); that produced 8 zero-slack survivors that ALL failed the
+	#     unit-quaternion check, which is how 05-02 confirmed this is a
+	#     trailing block and not part of the header/field region.
+	#
+	# LICENCE BOUNDARY (D-21, D-23): this layout is attributed to 05-02's
+	# zero-slack reconciliation against Sacred's own bytes, not lifted from
+	# either github.com/SiENcE/Iris1 (GPL v2) or the AoM Model Plugin (no
+	# licence file, so used on the same all-rights-reserved terms as Iris1).
+	# Both were consulted during planning only as documentation of node-type
+	# NAMES, which are facts about the format -- no code, comment or structure
+	# from either is reproduced here; the decode below is this codebase's own.
+	const TAG_ANIMATION_SECTION := 0xCA5E1205            # AnimationSection
+	const TAG_ANIMATION := 0xCA5E1200                    # Animation
+	const TAG_ANIM_VECTOR_TRACK_SECTION := 0xCA5E1201    # AnimationVectorTrackSection
+	const TAG_ANIM_VECTOR_TRACK_KEYS := 0xCA5E1202       # AnimationVectorTrackKeys
+	const TAG_ANIM_TRANSFORM_TRACK_SECTION := 0xCA5E1203 # AnimationTransformTrackSection
+	const TAG_ANIM_TRANSFORM_TRACK_KEYS := 0xCA5E1204    # AnimationTransformTrackKeys
+	## DataExtension directory node. Same numeric tag TAG_SIZES already uses for
+	## the unrelated 12-byte chunk-stream leaf family walk() reads -- a distinct
+	## context (flat node directory vs. header chain), so this is a second,
+	## non-conflicting named use of the same real on-disk tag value, not a
+	## redefinition.
+	const TAG_DATA_EXTENSION := 0xCA5E0F00
+
+	## `section_offset(kind) = magic_offset(kind) + 376`, confirmed corpus-wide
+	## (4991/4993 walkable entries, 05-02-SUMMARY.md) and shown falsifiable (a
+	## real 1- or 4-byte desync collapses every directory read to baddir). For
+	## kind=64 this reconciles the pre-existing SECTION_OFF_MESH=1634
+	## (1258+376); for kind=65 it resolves to 320+376=696. -1 when the entry has
+	## no kind-scoped magic offset.
+	##
+	## Plan 05-05's wave_note: if a future plan's Models.section_offset() has a
+	## different body, that is a rival spelling of this rule and must not exist.
+	const SECTION_OFF_DELTA := 376
+
+	func section_offset(entry: int) -> int:
+		var off := magic_offset(entry)
+		if off == -1:
+			return -1
+		return off + SECTION_OFF_DELTA
+
+	## Ceiling on any of a clip record's declared counts (numTranslates/
+	## numQuaternions/numUnknowns), applied BEFORE a count sizes anything -- the
+	## same posture MAX_NODES and MAX_BONES already take. The largest sampled
+	## clip (2847) declares 920 quaternion keys; this leaves generous headroom.
+	const MAX_KEYFRAMES := 1 << 20
+
+	const ANIM_RECORD_HEADER := 52
+	const ANIM_OFF_NUM_TRANSLATES := 24
+	const ANIM_OFF_NUM_QUATERNIONS := 28
+	const ANIM_OFF_NUM_UNKNOWNS := 32
+	## Undocumented, measured (05-02), fixed trailer following the documented
+	## payload on every real AnimationTransformTrackKeys record -- constant
+	## across all 200 records 05-02 sampled, regardless of that record's own
+	## nt/nq/nu. See the section header comment above for how folding it into
+	## the header instead was tried and refuted.
+	const ANIM_RECORD_TRAILER := 48
+
+	## Track-quaternion unit-length tolerance. DELIBERATELY NOT BONE_QUAT_EPS:
+	## bind-pose quaternions in bones() are exact static values, but
+	## AnimationTransformTrackKeys quaternions are keyframed data with measured
+	## mid-track quantization drift (05-02-SUMMARY.md: max deviation 0.0611 on
+	## entry 2847, 0.0330 on 2903, 0.00086 on 2899 -- all far above
+	## BONE_QUAT_EPS=0.001). 05-02 exhaustively re-ranked every other
+	## size-reconciled (header, field-offset) candidate by the epsilon IT would
+	## require: the documented layout sits in an isolated cluster at 0.0611,
+	## with a 7x gap to the next candidate (0.4142) and 50x+ to the rest. 0.07
+	## is set above the worst measured value with headroom -- a property of
+	## this being the correct layout for keyframed track data, not a loosened
+	## precision claim. Reusing BONE_QUAT_EPS here would incorrectly refuse
+	## every real clip in the corpus.
+	const ANIM_QUAT_EPS := 0.07
+
+	## Generalises _directory() to an arbitrary section offset. _directory()
+	## itself stays hardcoded to SECTION_OFF_MESH (kind=64 geometry only) so
+	## every existing mesh/skeleton/weight call site, and the pre-existing
+	## `models`/`bones` fact-line md5s, are untouched by this plan. kind=65
+	## clips need section_offset(entry) instead -- this is that rule applied to
+	## the identical flat-directory shape _directory() already reads.
+	func _directory_sec(buf: PackedByteArray, sec: int) -> Array[Dictionary]:
+		var out: Array[Dictionary] = []
+		if sec < 0 or buf.size() < sec + DIR_OFF + NODE_STRIDE:
+			return out
+		var n := buf.decode_u32(sec)
+		if n <= 0 or n > MAX_NODES:
+			return out
+		var dir_off := sec + DIR_OFF
+		if dir_off + n * NODE_STRIDE > buf.size():
+			return out
+		for j in n:
+			var o := dir_off + j * NODE_STRIDE
+			var tag := buf.decode_u32(o)
+			if (tag & 0xFFFF0000) != MAGIC:
+				return []
+			out.append({"tag": tag, "rel": buf.decode_u32(o + 4), "children": buf.decode_u32(o + 8)})
+		return out
+
+	## _span()'s twin for an arbitrary section offset, same rule: the gap to
+	## the next node with a strictly larger rel, or to the end of the section.
+	func _span_sec(dir: Array[Dictionary], j: int, buf_size: int, sec: int) -> int:
+		var r: int = dir[j]["rel"]
+		for k in range(j + 1, dir.size()):
+			var nr: int = dir[k]["rel"]
+			if nr > r:
+				return nr - r
+		return buf_size - sec - r
+
+	## The structural model/clip discriminator 05-02 measured (grn_motion.py
+	## --census, 0 disagreements across all 4991 walkable entries, both kinds):
+	## an entry is a clip when it has no Mesh nodes at all AND its
+	## DataExtension count equals its Bone count; when those two independent
+	## predicates disagree, the entry is neither classified and this returns
+	## false rather than guessing. Computed purely from the entry's own
+	## directory structure -- no reference to entry_name(), per D-03, so a
+	## second character needs only data, never a new branch here. False for an
+	## out-of-range or non-walkable entry.
+	func is_animation(entry: int) -> bool:
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			return false
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			return false
+		var dir := _directory_sec(buf, section_offset(entry))
+		if dir.is_empty():
+			return false
+		var meshes := 0
+		var bone_n := 0
+		var objects := 0
+		for node in dir:
+			match int(node["tag"]):
+				TAG_MESH:
+					meshes += 1
+				TAG_BONE:
+					bone_n += 1
+				TAG_DATA_EXTENSION:
+					objects += 1
+		var clip_by_meshes := meshes == 0
+		var clip_by_objeqbones := objects == bone_n
+		return clip_by_meshes == clip_by_objeqbones and clip_by_meshes
+
+	## Kind-scoped twin of index_of(): the first entry whose name matches AND
+	## whose kind is KIND_MOTION. This exists because models.pak carries
+	## GLADIATOR.GRN TWICE -- entry 589 (kind=64 mesh) and entry 2845 (kind=65,
+	## itself a MODEL per is_animation() above, not a clip) -- so
+	## index_of("GLADIATOR.GRN") returns 589 and any animation lookup built on
+	## it would silently resolve to the wrong entry. Carries index_of()'s
+	## security constraint verbatim: the string is compared against the pak's
+	## own 64-byte name fields and never joined into a path or handed to
+	## FileAccess.
+	func clip_index_of(name: String) -> int:
+		var want := name.strip_edges().to_upper()
+		if want == "":
+			return -1
+		if not want.ends_with(".GRN"):
+			want += ".GRN"
+		for i in _pak.count():
+			if kind_of(i) == KIND_MOTION and entry_name(i).to_upper() == want:
+				return i
+		return -1
+
+	## The decode. Reaches TAG_ANIMATION_SECTION through the entry's own
+	## directory, then its direct child TAG_ANIMATION, then that node's direct
+	## child TAG_ANIM_TRANSFORM_TRACK_SECTION, then that section's direct
+	## TAG_ANIM_TRANSFORM_TRACK_KEYS children -- one per bone. Every hop is
+	## _direct_children()/_child_with_tag() over the decoded directory, exactly
+	## as bones()/mesh_arrays() already reach their nodes; never a byte-pattern
+	## scan.
+	##
+	## For each record: derive its span with _span_sec(), read the three count
+	## fields, and require the implied byte size (header + tracks + payload +
+	## ANIM_RECORD_TRAILER) to equal that span EXACTLY. One byte of slack
+	## refuses the WHOLE entry with push_error() naming the record index, span
+	## and implied size -- never a partial decode. Every declared count is
+	## bounded by MAX_KEYFRAMES and re-checked against the span before it sizes
+	## anything.
+	##
+	## Returns {bones: int, records: Array[Dictionary], length: float,
+	## source: String} where each record is {id: int, times_pos:
+	## PackedFloat32Array, times_rot: PackedFloat32Array, times_other:
+	## PackedFloat32Array, positions: PackedVector3Array,
+	## rotations: Array[Quaternion], others: PackedVector3Array}. Empty
+	## Dictionary plus push_error() on any malformed input, including a
+	## KIND_MOTION entry that is a model rather than a clip (no per-bone
+	## records) -- decoding a non-clip is a caller error, not a partial
+	## success. Every decoded rotation is checked unit-length to within
+	## ANIM_QUAT_EPS (see that constant's own doc comment for why it is not
+	## BONE_QUAT_EPS) and a clip whose rotations are not unit quaternions is
+	## refused whole, matching bones()'s existing posture.
+	func clip(entry: int) -> Dictionary:
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			push_error("Sacred.Models.clip: entry %d is not a walkable motion entry" % entry)
+			return {}
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			push_error("Sacred.Models.clip: entry %d short read (%d of %d)" % [entry, buf.size(), length])
+			return {}
+		var sec := section_offset(entry)
+		var dir := _directory_sec(buf, sec)
+		if dir.is_empty():
+			push_error("Sacred.Models.clip: entry %d has no readable node directory" % entry)
+			return {}
+
+		var bone_count := 0
+		for node in dir:
+			if int(node["tag"]) == TAG_BONE:
+				bone_count += 1
+
+		var sec_j := -1
+		for j in dir.size():
+			if int(dir[j]["tag"]) == TAG_ANIMATION_SECTION:
+				sec_j = j
+				break
+		if sec_j == -1:
+			push_error("Sacred.Models.clip: entry %d has no AnimationSection node" % entry)
+			return {}
+		var anim_j := _child_with_tag(dir, sec_j, TAG_ANIMATION)
+		if anim_j == -1:
+			push_error("Sacred.Models.clip: entry %d AnimationSection has no Animation child" % entry)
+			return {}
+		var tts_j := _child_with_tag(dir, anim_j, TAG_ANIM_TRANSFORM_TRACK_SECTION)
+		if tts_j == -1:
+			push_error("Sacred.Models.clip: entry %d Animation has no AnimationTransformTrackSection child" % entry)
+			return {}
+		var key_nodes: Array[int] = []
+		for k in _direct_children(dir, tts_j):
+			if int(dir[k]["tag"]) == TAG_ANIM_TRANSFORM_TRACK_KEYS:
+				key_nodes.append(k)
+		if key_nodes.is_empty():
+			push_error("Sacred.Models.clip: entry %d carries no per-bone AnimationTransformTrackKeys records" % entry)
+			return {}
+
+		var records: Array[Dictionary] = []
+		var max_length := 0.0
+		for ridx in key_nodes.size():
+			var j: int = key_nodes[ridx]
+			var off := sec + int(dir[j]["rel"])
+			var span := _span_sec(dir, j, buf.size(), sec)
+			if off < 0 or span <= ANIM_RECORD_HEADER or off + span > buf.size():
+				push_error("Sacred.Models.clip: entry %d record %d has an unusable span %d" % [entry, ridx, span])
+				return {}
+			if off + ANIM_OFF_NUM_UNKNOWNS + 4 > buf.size():
+				push_error("Sacred.Models.clip: entry %d record %d too short to read its count fields" % [entry, ridx])
+				return {}
+			var rid := buf.decode_u32(off)
+			var nt := buf.decode_u32(off + ANIM_OFF_NUM_TRANSLATES)
+			var nq := buf.decode_u32(off + ANIM_OFF_NUM_QUATERNIONS)
+			var nu := buf.decode_u32(off + ANIM_OFF_NUM_UNKNOWNS)
+			if nt > MAX_KEYFRAMES or nq > MAX_KEYFRAMES or nu > MAX_KEYFRAMES:
+				push_error("Sacred.Models.clip: entry %d record %d declares a count above MAX_KEYFRAMES (nt=%d nq=%d nu=%d)" % [
+					entry, ridx, nt, nq, nu])
+				return {}
+			var implied := ANIM_RECORD_HEADER + 16 * nt + 20 * nq + 16 * nu + ANIM_RECORD_TRAILER
+			if implied != span:
+				push_error("Sacred.Models.clip: entry %d record %d implied size %d does not equal its span %d exactly (nt=%d nq=%d nu=%d)" % [
+					entry, ridx, implied, span, nt, nq, nu])
+				return {}
+
+			var p := off + ANIM_RECORD_HEADER
+			var times_pos := PackedFloat32Array()
+			times_pos.resize(nt)
+			for i in nt:
+				times_pos[i] = buf.decode_float(p + i * 4)
+			p += nt * 4
+			var times_rot := PackedFloat32Array()
+			times_rot.resize(nq)
+			for i in nq:
+				times_rot[i] = buf.decode_float(p + i * 4)
+			p += nq * 4
+			var times_other := PackedFloat32Array()
+			times_other.resize(nu)
+			for i in nu:
+				times_other[i] = buf.decode_float(p + i * 4)
+			p += nu * 4
+
+			var positions := PackedVector3Array()
+			positions.resize(nt)
+			for i in nt:
+				positions[i] = Vector3(buf.decode_float(p + i * 12), buf.decode_float(p + i * 12 + 4), buf.decode_float(p + i * 12 + 8))
+			p += nt * 12
+
+			var rotations: Array[Quaternion] = []
+			rotations.resize(nq)
+			for i in nq:
+				var q := Quaternion(buf.decode_float(p + i * 16), buf.decode_float(p + i * 16 + 4),
+					buf.decode_float(p + i * 16 + 8), buf.decode_float(p + i * 16 + 12))
+				var qlen := sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+				if is_nan(qlen) or absf(qlen - 1.0) > ANIM_QUAT_EPS:
+					push_error("Sacred.Models.clip: entry %d record %d rotation %d is not a unit quaternion (|q|=%f)" % [
+						entry, ridx, i, qlen])
+					return {}
+				rotations[i] = q
+			p += nq * 16
+
+			var others := PackedVector3Array()
+			others.resize(nu)
+			for i in nu:
+				others[i] = Vector3(buf.decode_float(p + i * 12), buf.decode_float(p + i * 12 + 4), buf.decode_float(p + i * 12 + 8))
+			p += nu * 12
+			# p + ANIM_RECORD_TRAILER == off + span exactly, by the implied-size
+			# check above -- the trailer itself is never decoded.
+
+			records.append({
+				"id": rid, "times_pos": times_pos, "times_rot": times_rot,
+				"times_other": times_other, "positions": positions,
+				"rotations": rotations, "others": others,
+			})
+			if nt > 0 and times_pos[nt - 1] > max_length:
+				max_length = times_pos[nt - 1]
+
+		return {
+			"bones": bone_count, "records": records, "length": max_length,
+			"source": "h=%d,nt=%d,nq=%d,nu=%d,trailer=%d(documented)" % [
+				ANIM_RECORD_HEADER, ANIM_OFF_NUM_TRANSLATES, ANIM_OFF_NUM_QUATERNIONS,
+				ANIM_OFF_NUM_UNKNOWNS, ANIM_RECORD_TRAILER],
+		}
+
+	## The rule 05-02 measured: the maximum, across all records, of that
+	## record's last translate-track time. 0.0 for a non-clip or any malformed
+	## entry -- clip() already refuses those, so this just forwards its
+	## "length" field or the safe default.
+	func clip_length(entry: int) -> float:
+		var c := clip(entry)
+		if c.is_empty():
+			return 0.0
+		return float(c["length"])
+
 
 ## Hero savegames (`*.pax` under `~/.lgp/sacred/`). A PAX file is a fixed
 ## 256-byte header, a section table at 0x0100, and a body per used section.

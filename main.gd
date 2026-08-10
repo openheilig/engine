@@ -150,6 +150,12 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--grn="):
 			grn_name = a.trim_prefix("--grn=")
+	# Single-clip mode. NAME is only ever looked up in the pak's own name
+	# table by Models.clip_index_of -- kind-scoped, never joined into a path.
+	var clip_name := ""
+	for a in argv:
+		if a.begins_with("--clip="):
+			clip_name = a.trim_prefix("--clip=")
 	for a in argv:
 		if a.begins_with("--tickhz="):
 			_tick_hz = clampi(int(a.trim_prefix("--tickhz=")), 1, 240)
@@ -194,6 +200,10 @@ func _ready() -> void:
 
 	if grn_name != "":
 		await _show_model(install, grn_name)
+		return
+
+	if clip_name != "":
+		_show_clip(install, clip_name)
 		return
 
 	if "--window-probe" in argv:
@@ -923,6 +933,43 @@ func _show_model(install: String, name: String) -> void:
 	# It is removed rather than replaced: the skeleton and skin layer is
 	# unvalidated until an oracle independent of our own decode exists.
 	await _maybe_screenshot()
+
+
+## --clip=NAME decodes one animation clip from pak/models.pak, mirroring
+## _show_model()'s resolve-then-fail-loud shape: an unresolvable name is fatal
+## and loud, because exiting 0 having decoded nothing is the failure mode that
+## makes a broken run look like a working one.
+##
+## NAME is resolved through Models.clip_index_of, kind-scoped so the
+## GLADIATOR.GRN name collision (589 mesh, 2845 motion-but-not-clip) cannot
+## silently resolve to the wrong entry. Renders nothing and builds no view --
+## a reader-level probe only -- so it quits itself explicitly rather than
+## relying on _maybe_screenshot's settle-and-quit path, which only fires when
+## --shot=/--drawcalls is also given.
+func _show_clip(install: String, name: String) -> void:
+	var pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
+	if not pak.is_open():
+		printerr("clip\tcannot open pak/models.pak under %s" % install)
+		get_tree().quit(1)
+		return
+	var models := Sacred.Models.new(pak)
+	var idx := models.clip_index_of(name)
+	if idx < 0:
+		printerr("clip\tno motion-kind entry named %s in pak/models.pak (%d entries)" % [name, models.count()])
+		get_tree().quit(1)
+		return
+	var decoded := models.clip(idx)
+	if decoded.is_empty():
+		printerr("clip\t%s (index %d) carries no decodable per-bone animation records" % [models.entry_name(idx), idx])
+		get_tree().quit(1)
+		return
+	var records: Array = decoded["records"]
+	var keys := 0
+	for r in records:
+		keys += r["times_pos"].size() + r["times_rot"].size() + r["times_other"].size()
+	print("clip\tindex %d\tname %s\tbones %d\trecords %d\tlength %.6f\tkeys %d" % [
+		idx, models.entry_name(idx), int(decoded["bones"]), records.size(), float(decoded["length"]), keys])
+	get_tree().quit()
 
 
 ## Waits for the streamer to settle, so a measurement/screenshot reflects a
