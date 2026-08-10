@@ -82,6 +82,14 @@ var _show_player := true   ## --noplayer: suppress building the player view enti
 ## only PlayerView.set_shown(false) on an otherwise-normal player gives.
 var _hide_player_mesh := false
 
+# Plan 05-08: crowd benchmark. Opt-in only -- _has_crowd stays false unless
+# --crowd= is literally present, so a bare "0" or a negative value still
+# reaches the refuse-and-name-it path in _run_crowd() rather than silently
+# doing nothing (T-05-44).
+var _has_crowd := false
+var _crowd_n := 0
+var _crowd_arg := ""
+
 
 func _ready() -> void:
 	var install := Sacred.find_install()
@@ -188,6 +196,10 @@ func _ready() -> void:
 			_falsify_mode = a.trim_prefix("--falsify-mode=")
 		elif a.begins_with("--falsify="):
 			_falsify_tick = int(a.trim_prefix("--falsify="))
+		elif a.begins_with("--crowd="):
+			_has_crowd = true
+			_crowd_arg = a.trim_prefix("--crowd=")
+			_crowd_n = int(_crowd_arg)
 
 	_registry = ActorRegistry.new()
 	_sim = Sim.new(_tick_hz)
@@ -220,6 +232,10 @@ func _ready() -> void:
 
 	if "--follow-probe" in argv:
 		_follow_probe()
+		return
+
+	if _has_crowd:
+		await _run_crowd(install, world, tex_pak, tiles, statics, mixed, items)
 		return
 
 	if _record_path != "" or _replay_path != "":
@@ -736,6 +752,173 @@ func _pump_until_settled(budget: int) -> void:
 			return
 		if _view.is_settled():
 			return
+
+
+## Plan 05-08: --crowd=N. Opt-in only, never runs without the flag.
+##
+## DEGRADED SCOPE (05-08's own Task 1 precondition, read before this was
+## written): both 05-06 (multi-piece composition) and 05-07 (animation
+## playback) HALTED with no code written -- ModelView.setup_composed(),
+## swap_slot(), play_clip() and sample_bone_pose() do not exist anywhere in
+## godot-port/, confirmed both by their own SUMMARYs and by direct
+## inspection of view/model_view.gd and view/player_view.gd. This route
+## therefore cannot reach the plan's literal action text ("ModelView.
+## setup_composed() for the equipment, play_clip() for the animation") --
+## that would require methods this codebase does not have. It instead
+## reuses PlayerView (view/player_view.gd) once per crowd member -- the
+## ONLY rig-construction code path that exists, the same one the one real
+## player already uses -- to build N STATIC, SINGLE-MESH, NON-ANIMATED
+## Gladiator rigs. This substitution is pre-authorized by the precondition,
+## not a silent scope change; see 05-08-SUMMARY.md for the full accounting.
+##
+## Every number this route prints is a single-mesh/no-composition/
+## no-animation number. It is NOT a full phase-5 crowd-budget figure and
+## must never be read as one -- read it only as "N static rigs, on top of
+## the world already streaming, cost this much."
+##
+## Existing load to read every number against (D-13 / STATE.md's carried
+## defect): object build is already measured at ~54 ms mean / ~186 ms worst
+## per sector, against a 33 ms per-frame budget at 30 Hz. This benchmark
+## does not idle the streamer to get a flattering number -- the camera pans
+## for the whole per-frame measurement window, so sectors keep streaming
+## under real load exactly as D-13's own figures were taken.
+const CROWD_MAX := 200              ## ponytail: T-05-44's stated ceiling -- no
+	## retail capture has measured a real crowd size or formation; refuse
+	## anything larger rather than let an operator-supplied N size an
+	## unbounded spawn loop.
+const CROWD_SPACING := 3.0          ## ponytail: synthetic grid spacing (world
+	## cells) between adjacent rigs -- not a retail-measured crowd formation.
+const CROWD_FRAMES := 90            ## measured frames, well past a 30-frame floor
+const CROWD_PAN_STEP := Vector2(0.4, 0.25)  ## per measured frame, keeps sectors
+	## streaming under load for the whole window instead of measuring an
+	## idle, fully-settled scene.
+
+
+## Builds the streaming world exactly like the default branch above (camera +
+## SectorView), spawns n static PlayerView rigs in a grid around start_cell,
+## measures build cost and per-frame cost separately while the camera pans,
+## and prints exactly one `crowd` fact line plus explanatory notes. Never
+## asserts pass/fail -- this route measures, it does not gate.
+func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
+		tiles: Sacred.Tiles, statics: Sacred.Statics, mixed: Sacred.Mixed,
+		items: Sacred.Items) -> void:
+	if _crowd_n <= 0:
+		printerr("crowd\trefused: --crowd=%s must be a positive integer" % _crowd_arg)
+		get_tree().quit(1)
+		return
+	if _crowd_n > CROWD_MAX:
+		printerr("crowd\trefused: --crowd=%d exceeds the stated ceiling of %d (T-05-44)" % [
+			_crowd_n, CROWD_MAX])
+		get_tree().quit(1)
+		return
+
+	var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
+	if not models_pak.is_open():
+		printerr("crowd\trefused: cannot open pak/models.pak under %s" % install)
+		get_tree().quit(1)
+		return
+	var models := Sacred.Models.new(models_pak)
+
+	_cam = IsoCamera.new()
+	_cam.cell_limit = Vector2(world.size) * SECT
+	add_child(_cam)
+	_view = SectorView.new()
+	_view.name = "SectorView"
+	_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {})
+	add_child(_view)
+	_cam.set_zoom_index(1)
+	_cam.look_at_cell(start_cell)
+	await _pump_until_settled(PROBE_FRAME_BUDGET)
+	if not is_instance_valid(self):
+		return
+
+	# Grid centred on start_cell, CROWD_SPACING cells apart, so distinct rigs
+	# occupy distinct cells rather than stacking on one point (which the
+	# depth-sort would then have to fight over).
+	var side := ceili(sqrt(float(_crowd_n)))
+	var half := float(side - 1) * 0.5
+	var rigs: Array[PlayerView] = []
+	var build_times_ms: PackedFloat64Array = PackedFloat64Array()
+	var verts := 0
+	var tris := 0
+	var build_t0 := Time.get_ticks_usec()
+	for i in _crowd_n:
+		var gx := i % side
+		var gy := i / side
+		var cell := start_cell + Vector2(float(gx) - half, float(gy) - half) * CROWD_SPACING
+		var t0 := Time.get_ticks_usec()
+		var pv := PlayerView.new(models)
+		build_times_ms.append((Time.get_ticks_usec() - t0) / 1000.0)
+		if pv.node == null:
+			continue
+		add_child(pv.node)
+		pv.update(cell)
+		verts = pv.vertex_count
+		tris = pv.triangle_count
+		rigs.append(pv)
+	var build_total_ms := (Time.get_ticks_usec() - build_t0) / 1000.0
+	var build_mean_ms := 0.0
+	for bt in build_times_ms:
+		build_mean_ms += bt
+	if build_times_ms.size() > 0:
+		build_mean_ms /= build_times_ms.size()
+
+	if rigs.is_empty():
+		printerr("crowd\tn=%d\tno rig built -- %s failed to resolve or build" % [
+			_crowd_n, PlayerView.MODEL_NAME])
+		get_tree().quit(1)
+		return
+
+	await _pump_until_settled(PROBE_FRAME_BUDGET)
+	if not is_instance_valid(self):
+		return
+
+	# Per-frame cost, measured while the camera pans -- process_frame, not
+	# RenderingServer.frame_post_draw: under plain --headless there is no
+	# draw pass, so frame_post_draw never fires and this loop would park
+	# forever (same reasoning as _pump_until_settled above). No animation
+	# and no per-frame rig update exists to drive here (both halted
+	# upstream) -- every rig's pose was baked once above and does not move
+	# again, matching PlayerView.update()'s own static-placement contract.
+	var frame_times_ms: PackedFloat64Array = PackedFloat64Array()
+	var pan := start_cell
+	var draw_calls := 0
+	for _f in CROWD_FRAMES:
+		var ft0 := Time.get_ticks_usec()
+		pan += CROWD_PAN_STEP
+		_cam.look_at_cell(pan)
+		await get_tree().process_frame
+		if not is_instance_valid(self):
+			return
+		frame_times_ms.append((Time.get_ticks_usec() - ft0) / 1000.0)
+		draw_calls = RenderingServer.get_rendering_info(
+			RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+
+	frame_times_ms.sort()
+	var frame_mean_ms := 0.0
+	for ft in frame_times_ms:
+		frame_mean_ms += ft
+	if frame_times_ms.size() > 0:
+		frame_mean_ms /= frame_times_ms.size()
+	var p95_idx := clampi(
+		int(ceil(float(frame_times_ms.size()) * 0.95)) - 1, 0, frame_times_ms.size() - 1)
+	var frame_p95_ms: float = frame_times_ms[p95_idx] if frame_times_ms.size() > 0 else 0.0
+	var frame_worst_ms: float = (
+		frame_times_ms[frame_times_ms.size() - 1] if frame_times_ms.size() > 0 else 0.0)
+
+	print(("crowd\tn=%d\tframes=%d\tframe_mean_ms=%.6f\tframe_p95_ms=%.6f\t"
+		+ "frame_worst_ms=%.6f\tbuild_mean_ms=%.6f\tbuild_total_ms=%.6f\t"
+		+ "verts=%d\ttris=%d\tdrawcalls=%d") % [
+		rigs.size(), frame_times_ms.size(), frame_mean_ms, frame_p95_ms, frame_worst_ms,
+		build_mean_ms, build_total_ms, verts * rigs.size(), tris * rigs.size(), draw_calls])
+	if draw_calls == 0:
+		print("crowd-note\tdrawcalls=0 -- plain --headless never submits a draw call "
+			+ "(RenderingServer never presents a frame there); this reading is not a "
+			+ "rendering-cost measurement, only frame_mean_ms/build_mean_ms are")
+	print("crowd-scope\tcomposition=absent\tanimation=absent\t"
+		+ "reason=05-06_and_05-07_both_halted -- this measures N static, single-mesh, "
+		+ "non-animated rigs only; it is not a full phase-5 crowd-budget number")
+	get_tree().quit()
 
 
 ## Scans mixed.pak source indices upward from 1 for the first record that
