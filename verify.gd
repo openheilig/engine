@@ -169,6 +169,27 @@ func _init() -> void:
 			idx, int(f["count"]), int(f["roots"]), int(f["binds"]), int(f["sanitised"]),
 			_md5(models.bone_bytes(idx))])
 
+	# Bone-name layer (05-10, discharging 05-04's halt) -- one fact line per
+	# sampled model, directly after the bones block on BOTH sides of the
+	# harness. named/empty enforces the honest-empty contract (D-19): an
+	# unresolved bone contributes "" to Sacred.Models.bone_names(), never a
+	# substitute name, so `empty` is never silently absorbed into `named`.
+	# The md5 is over the RESOLVED NAMES themselves (newline-joined, in bone
+	# order) -- unlike `bones` above, there is no raw stored field to hash
+	# instead; the resolved name IS the fact under comparison here.
+	for idx: int in MODELS:
+		var names := models.bone_names(idx)
+		var named := 0
+		var uniq := {}
+		var text := ""
+		for n: String in names:
+			if n != "":
+				named += 1
+			uniq[n] = true
+			text += n + "\n"
+		print("bonename\t%d\tnamed=%d\tempty=%d\tunique=%d\tmd5=%s" % [
+			idx, named, names.size() - named, uniq.size(), _md5(text.to_utf8_buffer())])
+
 	# Animation-clip layer, between the bones block and the layer check on
 	# BOTH sides (Plan 05-05 Task 2).
 	#

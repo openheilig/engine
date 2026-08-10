@@ -1379,6 +1379,49 @@ class Models extends RefCounted:
 	## ARRAY_FLAG_USE_8_BONE_WEIGHTS. The format's own maximum influence count,
 	## measured across all five MeshWeights blocks in the sample, is 3.
 	const WEIGHT_SLOTS := 4
+
+	# ---------------------------------------------------------------------
+	# Bone-name chain (05-10, R1.4/R1.5, discharging 05-04's halt). 05-09
+	# independently reconfirmed this two-hop chain CONFIRMED on the mesh
+	# entry (05-09-SUMMARY.md, findings row 603): FormBoneChannels[bone_i] -
+	# 1 selects a TransformChannel node; that node's FIRST direct child, if
+	# a DataExtensionReference, carries a 1-based DataExtensionIndex; that
+	# DataExtension's __ObjectName property resolves through the string
+	# table. BOTH -1s are load-bearing -- dropping either one is the exact
+	# bug that once resolved bone 0 to a light object (findings row 582).
+	# Reimplemented here in GDScript house style from this project's own
+	# analysis/tools/grn_bonenames.py (not from any outside reader; D-21/D-23
+	# reserve that treatment for Iris1/AoM only).
+	## StringTable (0xCA5E0200) inside the SECTION_OFF_MESH node directory --
+	## a different node than the identically-tagged 12-byte fixed leaf
+	## walk() sees in the top-level header chain (TAG_SIZES); this constant
+	## scopes the name resolved below to that chain, not the header one.
+	const TAG_STRING_TABLE := 0xCA5E0200
+	## DataExtension family. TAG_DATA_EXTENSION (0xCA5E0F00, the extension
+	## node itself) is already declared below for is_animation()'s
+	## object-count heuristic -- reused here, not redeclared. 0xCA5E0F01 a
+	## property leaf whose OWN rel is a key textid; 0xCA5E0F05 the
+	## PropertySection container; 0xCA5E0F06 a ValueSection that shares its
+	## wrapping property's declared rel (the same zero-length-nested-leaf
+	## convention _span() already documents for BoneSection/Bone) and
+	## carries the value textid at its OWN rel + 4, not at the property's
+	## rel; 0xCA5E0F04 a DataExtensionReference whose payload is a 1-based
+	## DataExtensionIndex. Measured against real bytes (grn_bonenames.py
+	## data_extensions()): rel 16700 (F06) + 4 = 16704 resolves to string
+	## index 5, 'Omni03'.
+	const TAG_DATA_EXTENSION_PROPERTY := 0xCA5E0F01
+	const TAG_DATA_EXTENSION_PROPERTY_SECTION := 0xCA5E0F05
+	const TAG_DATA_EXTENSION_VALUE_SECTION := 0xCA5E0F06
+	const TAG_DATA_EXTENSION_REFERENCE := 0xCA5E0F04
+	## TransformChannel (0xCA5E0B00), hop 2's anchor, and FormBoneChannels
+	## (0xCA5E0C02), hop 1: a flat u32 array with NO header word (unlike
+	## StringTable/DataExtension, this node's whole payload IS the array),
+	## one 1-based TransformChannel index per bone.
+	const TAG_TRANSFORM_CHANNEL := 0xCA5E0B00
+	const TAG_FORM_BONE_CHANNELS := 0xCA5E0C02
+	## StringTable property key naming the resolved bone/object name.
+	const OBJECT_NAME_KEY := "__ObjectName"
+
 	# REST_BIND_ULPS, REST_BIND_EPS, last_bind_maxmag / _ulp / _depth and
 	# f32_ulp() stood here. All were machinery for sizing the rest-equals-bind
 	# tolerance, and all went when that assertion was removed for being
@@ -1435,19 +1478,205 @@ class Models extends RefCounted:
 			return empty
 		return buf.slice(off, off + n * BONE_STRIDE)
 
+	## Single u32 payload word at node j's own rel, or -1 when the read would
+	## run past the entry. -1 is an unambiguous sentinel: decode_u32 never
+	## returns a negative value, so it cannot collide with a real payload.
+	func _node_u32(buf: PackedByteArray, dir: Array[Dictionary], j: int) -> int:
+		var off := SECTION_OFF_MESH + int(dir[j]["rel"])
+		if off < 0 or off + 4 > buf.size():
+			return -1
+		return buf.decode_u32(off)
+
+	## `strs[textid]`, or "" when textid is -1 (the _node_u32 sentinel) or out
+	## of range. "" also happens to be the genuine value of string index 0
+	## (StringTable's own empty-string entry), so this cannot distinguish
+	## "resolved to the empty string" from "did not resolve" -- callers below
+	## only ever compare the result against a specific key name or fold it
+	## into a name field where both cases already mean the honest-empty
+	## contract, so the ambiguity is harmless here.
+	func _resolve_textid(strs: PackedStringArray, textid: int) -> String:
+		if textid < 0 or textid >= strs.size():
+			return ""
+		return strs[textid]
+
+	## StringTable (0xCA5E0200) decode: dword numEntries, dword unknown, then
+	## numEntries NUL-terminated strings. Index 0 (the empty string) is a
+	## valid, decodable result, not a sentinel for "missing". The declared
+	## count is re-validated against the node's derived span -- each string
+	## needs at least 1 byte (its own NUL) -- before it sizes anything, and
+	## a truncated string (no NUL before the span ends) refuses the whole
+	## table rather than returning a partial one. Empty plus push_error on
+	## any malformed input, the same posture bone_bytes() takes.
+	func strings(entry: int) -> PackedStringArray:
+		var empty := PackedStringArray()
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			return empty
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			return empty
+		var dir := _directory(buf)
+		if dir.is_empty():
+			return empty
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_STRING_TABLE:
+				continue
+			var off := SECTION_OFF_MESH + int(dir[j]["rel"])
+			if off < 0 or off + 8 > buf.size():
+				push_error("Sacred.Models.strings: entry %d string table header runs past the entry" % entry)
+				return empty
+			var n := buf.decode_u32(off)
+			var span_bytes := _span(dir, j, buf.size())
+			if n < 0 or 8 + n > span_bytes:
+				push_error("Sacred.Models.strings: entry %d string table declares %d entries against a %d-byte span" % [
+					entry, n, span_bytes])
+				return empty
+			var out := PackedStringArray()
+			var pos := off + 8
+			var end := off + span_bytes
+			for i in n:
+				var e := pos
+				while e < end and buf[e] != 0:
+					e += 1
+				if e >= end:
+					push_error("Sacred.Models.strings: entry %d string %d runs past the table's span" % [entry, i])
+					return empty
+				out.append(buf.slice(pos, e).get_string_from_utf8())
+				pos = e + 1
+			return out
+		return empty
+
+	## One entry per 0xCA5E0F00 DataExtension node, in directory order --
+	## __ObjectName's resolved string when the extension carries that
+	## property, "" when it does not (an object without the key yields an
+	## empty string in place, the array is never shortened). Nesting is
+	## three levels deep, not a sibling triple (see TAG_DATA_EXTENSION_*
+	## constants' doc comment): DataExtension -> PropertySection (direct
+	## child) -> Property (direct child of the section) -> ValueSection
+	## (somewhere in the property's own descendant span) -> the value
+	## textid at the ValueSection's rel + 4.
+	func object_names(entry: int) -> PackedStringArray:
+		var empty := PackedStringArray()
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			return empty
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			return empty
+		var dir := _directory(buf)
+		if dir.is_empty():
+			return empty
+		var strs := strings(entry)
+		var out := PackedStringArray()
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_DATA_EXTENSION:
+				continue
+			var name := ""
+			for sk in _direct_children(dir, j):
+				if dir[sk]["tag"] != TAG_DATA_EXTENSION_PROPERTY_SECTION:
+					continue
+				for kn in _direct_children(dir, sk):
+					if dir[kn]["tag"] != TAG_DATA_EXTENSION_PROPERTY:
+						continue
+					var key := _resolve_textid(strs, _node_u32(buf, dir, kn))
+					if key != OBJECT_NAME_KEY:
+						continue
+					var value_section := -1
+					var last: int = mini(kn + 1 + int(dir[kn]["children"]), dir.size())
+					for vk in range(kn + 1, last):
+						if dir[vk]["tag"] == TAG_DATA_EXTENSION_VALUE_SECTION:
+							value_section = vk
+							break
+					if value_section == -1:
+						continue
+					var voff := SECTION_OFF_MESH + int(dir[value_section]["rel"]) + 4
+					if voff + 4 > buf.size():
+						continue
+					name = _resolve_textid(strs, buf.decode_u32(voff))
+			out.append(name)
+		return out
+
+	## Resolved bone name per bone in bones() order, through the two-hop
+	## chain documented on the tag constants above: FormBoneChannels[bone_i]
+	## - 1 selects a TransformChannel; its first direct child, if a
+	## DataExtensionReference, carries ref_raw; ref_raw - 1 indexes
+	## object_names(). An unresolvable bone (out-of-range hop, a
+	## TransformChannel whose first child is not a DataExtensionReference,
+	## or an object with no __ObjectName) yields "" -- nothing is
+	## substituted for it (D-19).
+	func bone_names(entry: int) -> PackedStringArray:
+		var empty := PackedStringArray()
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			return empty
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			return empty
+		var dir := _directory(buf)
+		if dir.is_empty():
+			return empty
+		var bone_count := bone_bytes(entry).size() / BONE_STRIDE
+		if bone_count <= 0:
+			return empty
+		var names := object_names(entry)
+
+		# Hop 2's raw ingredient: one entry per TransformChannel node, in
+		# directory order, its first direct child's DataExtensionReference
+		# payload dword, or -1 when the first child is not that tag.
+		var tc_refs := PackedInt32Array()
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_TRANSFORM_CHANNEL:
+				continue
+			var kids := _direct_children(dir, j)
+			if not kids.is_empty() and dir[kids[0]]["tag"] == TAG_DATA_EXTENSION_REFERENCE:
+				tc_refs.append(_node_u32(buf, dir, kids[0]))
+			else:
+				tc_refs.append(-1)
+
+		# Hop 1's raw ingredient: FormBoneChannels' payload, a flat u32 array
+		# with no header word, one 1-based TransformChannel index per bone.
+		var fbc := PackedInt32Array()
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_FORM_BONE_CHANNELS:
+				continue
+			var off := SECTION_OFF_MESH + int(dir[j]["rel"])
+			var span_bytes := _span(dir, j, buf.size())
+			var count := span_bytes / 4
+			if off < 0 or count < 0 or off + count * 4 > buf.size():
+				push_error("Sacred.Models.bone_names: entry %d FormBoneChannels runs past the entry" % entry)
+				return empty
+			for i in count:
+				fbc.append(buf.decode_u32(off + i * 4))
+			break
+
+		var out := PackedStringArray()
+		out.resize(bone_count)
+		for i in bone_count:
+			out[i] = ""
+			if i >= fbc.size():
+				continue
+			var channel := fbc[i] - 1
+			if channel < 0 or channel >= tc_refs.size():
+				continue
+			var ref_raw := tc_refs[channel]
+			if ref_raw < 0:
+				continue
+			var ext := ref_raw - 1
+			if ext < 0 or ext >= names.size():
+				continue
+			out[i] = names[ext]
+		return out
+
 	## One Dictionary per bone in Granny's own file order:
-	##   name        PackedByteArray -- the raw name bytes AS STORED IN THE BONE
-	##               RECORD, which is always empty: the 68-byte record has no
-	##               name field and no room for one. Bone name strings DO exist
-	##               in the entry (GLADIATOR.GRN carries "__Root",
-	##               "Bip01 R Finger31" and 200-odd more from offset 16911), but
-	##               binding a string to a bone runs through a four-level
-	##               DataExtension chain this plan did not decode, and the one
-	##               published parser resolves it with an explicit heuristic
-	##               ("take the strings after __Root in order"). Guessing that
-	##               here would put an unfalsifiable name on every bone, so the
-	##               field is returned honestly empty and the caller generates a
-	##               name -- see 03-06-SUMMARY.md "Known Stubs".
+	##   name        PackedByteArray -- the resolved bone name's UTF-8 bytes,
+	##               via bone_names() (the two-hop DataExtension chain 05-09
+	##               reconfirmed CONFIRMED), when the chain resolves this
+	##               bone; PackedByteArray() (honestly empty), unconditionally,
+	##               when it does not. The 68-byte bone record itself has no
+	##               name field -- this is resolved through a separate chain,
+	##               not read from the record. No heuristic fallback is ever
+	##               substituted for an unresolved bone (D-19): a name here is
+	##               either the chain's own answer or nothing.
 	##   parent      the parent index EXACTLY AS STORED, self-referential for
 	##               the root (measured: root's parent field is its own index,
 	##               not -1)
@@ -1473,6 +1702,7 @@ class Models extends RefCounted:
 		if raw.is_empty():
 			return out
 		var n := raw.size() / BONE_STRIDE
+		var names := bone_names(entry)
 		for i in n:
 			var o := i * BONE_STRIDE
 			var parent := raw.decode_s32(o)
@@ -1495,7 +1725,7 @@ class Models extends RefCounted:
 			# Row-major storage into Godot's column-taking Basis constructor.
 			var b := Basis(Vector3(ss[0], ss[3], ss[6]), Vector3(ss[1], ss[4], ss[7]), Vector3(ss[2], ss[5], ss[8]))
 			out.append({
-				"name": PackedByteArray(),
+				"name": names[i].to_utf8_buffer() if i < names.size() else PackedByteArray(),
 				"parent": parent,
 				"parent_effective": -1 if parent == i else parent,
 				"position": pos,
