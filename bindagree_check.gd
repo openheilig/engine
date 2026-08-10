@@ -29,6 +29,75 @@ extends SceneTree
 ## sacred.gd by this script; bones(), bind_poses() and mesh_weights() are
 ## reused exactly as committed in 05-10 Task 1.
 ##
+## --- ANCHOR-NORMALIZED RE-MEASURE (authorized by human decision after the
+## raw verdict below came back REFUTED) ---
+##
+## The raw test above compares RAW WORLD origins. It cannot see past a
+## constant whole-skeleton translation between two files' coordinate
+## spaces -- and the per-bone data this script's first pass produced (not
+## shipped here; recorded in the SUMMARY/findings row 605) shows exactly
+## that shape on both helmets: origin_dist sits in a narrow band across
+## nearly every matched bone regardless of hierarchy position, while
+## basis_diff stays near zero on ordinary body bones. The control shows
+## the opposite: origin_dist AND basis_diff both vary widely bone to bone.
+## A near-constant offset with matching orientation is the signature of
+## the same rig anchored at a different origin; a widely varying one is a
+## different rig. This is a DIFFERENT MEASUREMENT (a different quantity),
+## not a loosened threshold on the old one, and it is pre-specified below
+## BEFORE it is run:
+##
+## ANCHOR: the unique bone with parent_effective == -1 in each file's OWN
+## bone list -- the structural rig root, the one bone every skinned
+## hierarchy in this corpus is topologically guaranteed to have. Chosen
+## for that structural reason, not by trying candidates and keeping the
+## one that scores best. Confirmed (by a one-shot, disposable, pre-measurement
+## structural probe, deleted before this commit) to be bone index 0, named
+## "__Root", identically in entries 589, 201, 207 and 1 -- present in all
+## three files this script measures, satisfying its own stated criterion.
+## A file whose bone list does not have EXACTLY ONE such bone refuses this
+## measurement entirely (empty Dictionary), same as any other refusal here.
+##
+## RESIDUAL: for every bone pair matched by exact name (identical matching
+## rule as the raw test above -- a name repeated within either side's own
+## list is excluded, never guessed at), subtract each SIDE'S OWN root
+## world origin from that side's own bone world origin, THEN compare the
+## two sides' results:
+##   origin_resid = (piece_bind.origin - piece_root_bind.origin)
+##                  .distance_to(base_bind.origin - base_root_bind.origin)
+## This removes exactly a constant whole-skeleton translation between the
+## two files' coordinate spaces without assuming or forcing the two roots
+## to coincide. basis_diff is NOT recomputed differently -- a translation-
+## only normalization cannot change a rotation difference, so it reuses
+## the identical per-bone formula as the raw test and is expected to
+## reproduce the raw test's basis numbers exactly.
+##
+## PASS/FAIL: the IDENTICAL control-discrimination code path as the raw
+## test, evaluated on the normalized quantities -- the control must match
+## STRICTLY FEWER names and have STRICTLY LARGER max origin_resid AND
+## STRICTLY LARGER maxbasis than EVERY piece. Same test, same refusal
+## posture, different quantity. ONE run, no variants: if any piece fails
+## to beat the control here, verdict=REFUTED stands for the normalized
+## test too, 05-11 halts, and no third formulation is attempted.
+##
+## The raw fact lines and raw verdict above are NOT revised or removed by
+## this addition -- both stand in the printed record, so a future reader
+## sees the raw-magnitude test that failed and the normalized test that
+## followed, and why the second was authorized.
+##
+## RESULT (measured, this run): `__Root`'s bind-pose origin is exactly
+## (0,0,0) in ALL FOUR files checked (589/201/207/1 -- confirmed by a
+## disposable debug print, run once and removed before commit). Subtracting
+## it is therefore a mathematical no-op, and `bindagreenorm`'s fact lines
+## below reproduce `bindagree`'s raw numbers EXACTLY, bone for bone. The
+## normalized verdict is REFUTED, identically to the raw one, for the
+## identical reason (piece=207's maxorigin is not smaller than the
+## control's). This is the one authorized run's real answer, not a null
+## result to explain away: the near-constant whole-skeleton offset visible
+## in the per-bone data is NOT a root-placement/coordinate-anchor artifact
+## -- both files already share the same root position -- so whatever
+## produces it lies outside what this rig's own stored bone data can
+## explain. No second anchor was tried.
+##
 ## Run: godot --headless --path godot-port --script res://bindagree_check.gd
 ## Lives at res:// root, like goaltick_check.gd, because verify.gd's
 ## LAYER_RULES scans only world/ and view/.
@@ -74,19 +143,52 @@ func _init() -> void:
 	# Anything less means name-matching alone cannot tell "the same rig"
 	# from "an unrelated model" apart, and no verdict can be drawn from the
 	# helmet numbers above.
-	var discriminates := true
+	var raw_discriminates := true
 	for r in helmet_results:
 		if not (control["matched"] < r["matched"]
 				and control["maxorigin"] > r["maxorigin"]
 				and control["maxbasis"] > r["maxbasis"]):
-			discriminates = false
+			raw_discriminates = false
 			break
 
-	if not discriminates:
+	if not raw_discriminates:
 		print("bindagree\tverdict=REFUTED\treason=control-matches-as-well-as-piece")
+	else:
+		print("bindagree\tverdict=CONFIRMED")
+
+	# --- Anchor-normalized re-measure, appended, not a revision of the above.
+	# Pre-specified in the header comment before this ran. Same PAIRS/CONTROL,
+	# same name-matching rule, same control-discrimination code shape --
+	# different quantity (root-relative residual instead of raw world origin).
+	var helmet_norm: Array[Dictionary] = []
+	for pair in PAIRS:
+		var rn := _pair_check_normalized(models, pair[0], pair[1])
+		if rn.is_empty():
+			printerr("bindagree_check: normalized pair base=%d piece=%d could not be measured (no unique structural root)" % [pair[0], pair[1]])
+			quit(1)
+			return
+		helmet_norm.append(rn)
+
+	var control_norm := _pair_check_normalized(models, CONTROL[0], CONTROL[1])
+	if control_norm.is_empty():
+		printerr("bindagree_check: normalized control base=%d piece=%d could not be measured (no unique structural root)" % [CONTROL[0], CONTROL[1]])
 		quit(1)
 		return
 
+	var norm_discriminates := true
+	for rn in helmet_norm:
+		if not (control_norm["matched"] < rn["matched"]
+				and control_norm["maxorigin"] > rn["maxorigin"]
+				and control_norm["maxbasis"] > rn["maxbasis"]):
+			norm_discriminates = false
+			break
+
+	if not norm_discriminates:
+		print("bindagreenorm\tverdict=REFUTED\treason=control-matches-as-well-as-piece")
+		quit(1)
+		return
+
+	print("bindagreenorm\tverdict=CONFIRMED")
 	quit(0)
 
 
@@ -163,6 +265,105 @@ func _pair_check(models: Sacred.Models, base: int, piece: int) -> Dictionary:
 	var unmatched := piece_names.size() - matched
 	print("bindagree\tbase=%d\tpiece=%d\tmatched=%d/%d\tunmatched=%d\tunmatched_weighted=%d\tmaxorigin=%.6f\tmaxbasis=%.6f\tworstbone=%s" % [
 		base, piece, matched, piece_names.size(), unmatched, unmatched_weighted, maxorigin, maxbasis, worstbone])
+
+	return {
+		"matched": matched, "unmatched": unmatched, "unmatched_weighted": unmatched_weighted,
+		"maxorigin": maxorigin, "maxbasis": maxbasis, "worstbone": worstbone,
+	}
+
+
+## The index of the unique bone with parent_effective == -1 in this file's
+## OWN bone list -- the structural rig root (see header comment). Returns -1
+## if there is not EXACTLY ONE such bone; the caller refuses rather than
+## picking one of several or falling back to index 0 by assumption.
+func _find_root(bones: Array[Dictionary]) -> int:
+	var root := -1
+	for i in bones.size():
+		if bones[i]["parent_effective"] == -1:
+			if root != -1:
+				return -1   ## more than one -- not a single well-defined root
+			root = i
+	return root
+
+
+## Anchor-normalized counterpart to _pair_check(): identical name-matching
+## rule, identical control-discrimination shape, but every bone's world
+## origin is expressed relative to ITS OWN FILE's structural root before
+## comparison (see header comment for the pre-specified anchor/residual/
+## pass-fail definition). basis_diff is unchanged by this normalization
+## (translation-only) and is computed by the same per-bone formula as
+## _pair_check(). Prints its own `bindagreenorm` fact line. Returns an empty
+## Dictionary on refusal: size mismatch (as _pair_check()), or either side
+## lacking exactly one structural root.
+func _pair_check_normalized(models: Sacred.Models, base: int, piece: int) -> Dictionary:
+	var base_bones := models.bones(base)
+	var piece_bones := models.bones(piece)
+	var base_binds := models.bind_poses(base)
+	var piece_binds := models.bind_poses(piece)
+	var base_names := models.bone_names(base)
+	var piece_names := models.bone_names(piece)
+	if base_bones.is_empty() or piece_bones.is_empty() \
+			or base_binds.size() != base_bones.size() or piece_binds.size() != piece_bones.size() \
+			or base_names.size() != base_bones.size() or piece_names.size() != piece_bones.size():
+		return {}
+
+	var base_root := _find_root(base_bones)
+	var piece_root := _find_root(piece_bones)
+	if base_root == -1 or piece_root == -1:
+		return {}
+	var base_anchor: Vector3 = base_binds[base_root].origin
+	var piece_anchor: Vector3 = piece_binds[piece_root].origin
+
+	var base_name_counts := {}
+	for nm: String in base_names:
+		if nm != "":
+			base_name_counts[nm] = base_name_counts.get(nm, 0) + 1
+	var base_index_by_name := {}
+	for i in base_names.size():
+		var nm: String = base_names[i]
+		if nm != "" and base_name_counts.get(nm, 0) == 1:
+			base_index_by_name[nm] = i
+
+	var piece_name_counts := {}
+	for nm: String in piece_names:
+		if nm != "":
+			piece_name_counts[nm] = piece_name_counts.get(nm, 0) + 1
+
+	var weighted := {}
+	for mw: Dictionary in models.mesh_weights(piece):
+		var bone_map: PackedInt32Array = mw["bone_map"]
+		for g in bone_map:
+			weighted[g] = true
+
+	var matched := 0
+	var maxorigin := 0.0
+	var maxbasis := 0.0
+	var worstbone := ""
+	var unmatched_weighted := 0
+	for i in piece_names.size():
+		var nm: String = piece_names[i]
+		var is_matchable: bool = nm != "" and piece_name_counts.get(nm, 0) == 1 and base_index_by_name.has(nm)
+		if not is_matchable:
+			if weighted.has(i):
+				unmatched_weighted += 1
+			continue
+		var bi: int = base_index_by_name[nm]
+		matched += 1
+		var pt: Transform3D = piece_binds[i]
+		var bt: Transform3D = base_binds[bi]
+		var origin_dist := (pt.origin - piece_anchor).distance_to(bt.origin - base_anchor)
+		var basis_diff := 0.0
+		for col: Vector3 in [pt.basis.x - bt.basis.x, pt.basis.y - bt.basis.y, pt.basis.z - bt.basis.z]:
+			basis_diff = maxf(basis_diff, maxf(absf(col.x), maxf(absf(col.y), absf(col.z))))
+		if origin_dist > maxorigin:
+			maxorigin = origin_dist
+			worstbone = nm
+		maxbasis = maxf(maxbasis, basis_diff)
+
+	var unmatched := piece_names.size() - matched
+	print("bindagreenorm\tbase=%d\tpiece=%d\tanchor=%s\tmatched=%d/%d\tunmatched=%d\tunmatched_weighted=%d\tmaxorigin=%.6f\tmaxbasis=%.6f\tworstbone=%s" % [
+		base, piece, piece_names[piece_root] if piece_root < piece_names.size() else "?",
+		matched, piece_names.size(), unmatched, unmatched_weighted, maxorigin, maxbasis, worstbone])
 
 	return {
 		"matched": matched, "unmatched": unmatched, "unmatched_weighted": unmatched_weighted,
