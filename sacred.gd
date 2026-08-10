@@ -2128,6 +2128,62 @@ class Models extends RefCounted:
 			out.append_array(buf.slice(off, off + span))
 		return out
 
+	## The 13 German weapon-category tokens ATTACK_* clip names carry,
+	## longest-token-first (2H_AXT before 2H, KLINGENWAFFEN before nothing
+	## shorter overlaps it) so a compound token is never shadowed by a
+	## shorter one nested inside it. D-07: attack animation names encode a
+	## weapon category (ATTACK_1H_A, ATTACK_2H_A, ATTACK_2H_AXT_A/B,
+	## ATTACK_2WAFFEN_A/B, ATTACK_ARMBRUST_A, ATTACK_BH_A, ...). Decode and
+	## record the category here; nothing in this file or godot-port/view/
+	## selects an animation from gear a character is carrying -- no
+	## equipment or weapon system exists yet, and a selection rule built
+	## without one would be untestable invention. That wiring is the
+	## combat phase's job.
+	const CLIP_CATEGORIES := [
+		"KLINGENWAFFEN", "ARMBRUST", "PEITSCHE", "2WAFFEN", "2H_AXT",
+		"BOGEN", "DOLCH", "STAB", "WURF", "AXT", "BH", "1H", "2H",
+	]
+
+	## First CLIP_CATEGORIES token found as an underscore-delimited word in
+	## name (case-sensitive -- the pak's own names are already upper-case),
+	## checked longest-first so "2H_AXT" wins over the "2H" nested inside
+	## it. Empty string if none match (e.g. GLAD_PICKUP.GRN). ponytail:
+	## this is a substring match over an artist naming convention, not a
+	## shipped binding table (D-02) -- motions.pak was opened and refuted
+	## as that table (see the grn-clip-categories findings row); ceiling is
+	## "wrong category if a future name introduces a token this list
+	## doesn't cover".
+	func clip_category(name: String) -> String:
+		var wrapped := "_" + name.trim_suffix(".GRN") + "_"
+		for token in CLIP_CATEGORIES:
+			if wrapped.find("_" + token + "_") != -1:
+				return token
+		return ""
+
+	## Every KIND_MOTION entry whose name begins with prefix, as
+	## {entry: int, name: String, action: String, category: String}.
+	## `action` is the portion of the name between prefix and the matched
+	## category token (e.g. "ATTACK" for "GLAD_ATTACK_2H_AXT_A.GRN" with
+	## prefix "GLAD"); category is clip_category(name), empty string if no
+	## token matched. prefix is a parameter, never a literal character name
+	## compared in a conditional here (D-03).
+	func clip_catalogue(prefix: String) -> Array[Dictionary]:
+		var out: Array[Dictionary] = []
+		for entry in _pak.count():
+			if kind_of(entry) != KIND_MOTION:
+				continue
+			var name := entry_name(entry)
+			if not name.begins_with(prefix):
+				continue
+			var category := clip_category(name)
+			var body := name.trim_suffix(".GRN").substr(prefix.length()).trim_prefix("_")
+			var action := body
+			var token_at := body.find(category) if category != "" else -1
+			if token_at != -1:
+				action = body.substr(0, token_at).trim_suffix("_")
+			out.append({"entry": entry, "name": name, "action": action, "category": category})
+		return out
+
 
 ## Hero savegames (`*.pax` under `~/.lgp/sacred/`). A PAX file is a fixed
 ## 256-byte header, a section table at 0x0100, and a body per used section.
