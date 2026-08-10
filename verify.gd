@@ -28,6 +28,10 @@ const TEXTURES := [0, 1, 2, 1000, 5000, 20000]
 ## BAT.GRN, GLADIATOR.GRN, GLAD_SA5_SHOULDER.GRN -- mirrored verbatim in
 ## analysis/tools/verify_ref.py's MODELS constant, 03-PATTERNS.md's sample.
 const MODELS := [1, 589, 203]
+## One attack, one idle, one run, two bone counts between them -- mirrored
+## verbatim in analysis/tools/verify_ref.py's MOTIONS constant (Plan 05-05
+## Task 2).
+const MOTIONS := [2847, 2899, 2903]
 
 ## world/ never touches the scene tree/threads; view/ never names a world
 ## type or defines its own per-frame entry point -- checked, not just written.
@@ -164,6 +168,31 @@ func _init() -> void:
 		print("bones\t%d\tcount=%d\troots=%d\tbinds=%d\tsanitised=%d\tmd5=%s" % [
 			idx, int(f["count"]), int(f["roots"]), int(f["binds"]), int(f["sanitised"]),
 			_md5(models.bone_bytes(idx))])
+
+	# Animation-clip layer, between the bones block and the layer check on
+	# BOTH sides (Plan 05-05 Task 2).
+	#
+	# The md5 is over the RAW STORED per-bone record bytes --
+	# Sacred.Models.clip_bytes()'s concatenated spans, exactly as they sit in
+	# the file -- not over decoded floats, the same choice the `bones` line
+	# above already makes and for the same reason: both harness sides then
+	# compute it from offsets, and neither needs the other's float decoder to
+	# be identical for the hash to mean anything. `keys` IS a decoded number
+	# (total keyframe count across all records), so this line carries one
+	# byte-level field and one interpretation-level field.
+	for idx: int in MOTIONS:
+		var c := models.clip(idx)
+		if c.is_empty():
+			print("motion\t%d\tname=%s\tbones=0\trecords=0\tlength=0.000000\tkeys=0\tmd5=%s" % [
+				idx, models.entry_name(idx), _md5(PackedByteArray())])
+			continue
+		var records: Array = c["records"]
+		var keys := 0
+		for r in records:
+			keys += r["times_pos"].size() + r["times_rot"].size() + r["times_other"].size()
+		print("motion\t%d\tname=%s\tbones=%d\trecords=%d\tlength=%.6f\tkeys=%d\tmd5=%s" % [
+			idx, models.entry_name(idx), int(c["bones"]), records.size(), float(c["length"]), keys,
+			_md5(models.clip_bytes(idx))])
 
 	_layer_check()
 	quit(0)

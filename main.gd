@@ -156,6 +156,14 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--clip="):
 			clip_name = a.trim_prefix("--clip=")
+	# Task 2 counterfactual, the Godot-side twin of grn_tagwalk.py's
+	# --falsify=N applied to the clip path: displaces the clip record's
+	# base offset by N bytes before its count fields are read, so a real
+	# desync can be shown to collapse the decode on this side too.
+	var clip_falsify := 0
+	for a in argv:
+		if a.begins_with("--clip-falsify="):
+			clip_falsify = int(a.trim_prefix("--clip-falsify="))
 	for a in argv:
 		if a.begins_with("--tickhz="):
 			_tick_hz = clampi(int(a.trim_prefix("--tickhz=")), 1, 240)
@@ -203,7 +211,7 @@ func _ready() -> void:
 		return
 
 	if clip_name != "":
-		_show_clip(install, clip_name)
+		_show_clip(install, clip_name, clip_falsify)
 		return
 
 	if "--window-probe" in argv:
@@ -946,7 +954,7 @@ func _show_model(install: String, name: String) -> void:
 ## a reader-level probe only -- so it quits itself explicitly rather than
 ## relying on _maybe_screenshot's settle-and-quit path, which only fires when
 ## --shot=/--drawcalls is also given.
-func _show_clip(install: String, name: String) -> void:
+func _show_clip(install: String, name: String, desync: int = 0) -> void:
 	var pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 	if not pak.is_open():
 		printerr("clip\tcannot open pak/models.pak under %s" % install)
@@ -958,7 +966,7 @@ func _show_clip(install: String, name: String) -> void:
 		printerr("clip\tno motion-kind entry named %s in pak/models.pak (%d entries)" % [name, models.count()])
 		get_tree().quit(1)
 		return
-	var decoded := models.clip(idx)
+	var decoded := models.clip(idx, desync)
 	if decoded.is_empty():
 		printerr("clip\t%s (index %d) carries no decodable per-bone animation records" % [models.entry_name(idx), idx])
 		get_tree().quit(1)
@@ -967,8 +975,9 @@ func _show_clip(install: String, name: String) -> void:
 	var keys := 0
 	for r in records:
 		keys += r["times_pos"].size() + r["times_rot"].size() + r["times_other"].size()
-	print("clip\tindex %d\tname %s\tbones %d\trecords %d\tlength %.6f\tkeys %d" % [
-		idx, models.entry_name(idx), int(decoded["bones"]), records.size(), float(decoded["length"]), keys])
+	var suffix := "\tfalsify=%d" % desync if desync != 0 else ""
+	print("clip\tindex %d\tname %s\tbones %d\trecords %d\tlength %.6f\tkeys %d%s" % [
+		idx, models.entry_name(idx), int(decoded["bones"]), records.size(), float(decoded["length"]), keys, suffix])
 	get_tree().quit()
 
 

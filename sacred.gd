@@ -1937,7 +1937,13 @@ class Models extends RefCounted:
 	## ANIM_QUAT_EPS (see that constant's own doc comment for why it is not
 	## BONE_QUAT_EPS) and a clip whose rotations are not unit quaternions is
 	## refused whole, matching bones()'s existing posture.
-	func clip(entry: int) -> Dictionary:
+	##
+	## `desync` displaces each record's computed base offset by that many
+	## bytes before its count fields are read -- the Godot-side twin of
+	## analysis/tools/grn_tagwalk.py's clip_decode(desync=) (Plan 05-05 Task
+	## 2's --clip-falsify=N counterfactual). 0 (the default) is every
+	## existing caller's behaviour, unchanged.
+	func clip(entry: int, desync: int = 0) -> Dictionary:
 		var length := true_length(entry)
 		if length <= 0 or not magic_ok(entry):
 			push_error("Sacred.Models.clip: entry %d is not a walkable motion entry" % entry)
@@ -1985,7 +1991,7 @@ class Models extends RefCounted:
 		var max_length := 0.0
 		for ridx in key_nodes.size():
 			var j: int = key_nodes[ridx]
-			var off := sec + int(dir[j]["rel"])
+			var off := sec + int(dir[j]["rel"]) + desync
 			var span := _span_sec(dir, j, buf.size(), sec)
 			if off < 0 or span <= ANIM_RECORD_HEADER or off + span > buf.size():
 				push_error("Sacred.Models.clip: entry %d record %d has an unusable span %d" % [entry, ridx, span])
@@ -2075,6 +2081,52 @@ class Models extends RefCounted:
 		if c.is_empty():
 			return 0.0
 		return float(c["length"])
+
+	## Raw stored bytes for entry's per-bone AnimationTransformTrackKeys
+	## records, concatenated in directory order -- the RAW STORED bytes
+	## exactly as they sit in the file, not the decoded floats clip() returns.
+	## The `motion` fact line (verify.gd/verify_ref.py, Plan 05-05 Task 2)
+	## hashes these bytes for the same reason bones()'s `bones` line hashes
+	## bone_bytes(): both harness sides then compute the hash from offsets,
+	## and neither needs the other's float decoder to agree for it to mean
+	## anything. Redoes clip()'s own directory walk rather than returning
+	## bytes from clip() itself -- the same relationship bone_bytes() already
+	## has to bones().
+	func clip_bytes(entry: int) -> PackedByteArray:
+		var empty := PackedByteArray()
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			return empty
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			return empty
+		var sec := section_offset(entry)
+		var dir := _directory_sec(buf, sec)
+		if dir.is_empty():
+			return empty
+		var sec_j := -1
+		for j in dir.size():
+			if int(dir[j]["tag"]) == TAG_ANIMATION_SECTION:
+				sec_j = j
+				break
+		if sec_j == -1:
+			return empty
+		var anim_j := _child_with_tag(dir, sec_j, TAG_ANIMATION)
+		if anim_j == -1:
+			return empty
+		var tts_j := _child_with_tag(dir, anim_j, TAG_ANIM_TRANSFORM_TRACK_SECTION)
+		if tts_j == -1:
+			return empty
+		var out := PackedByteArray()
+		for k in _direct_children(dir, tts_j):
+			if int(dir[k]["tag"]) != TAG_ANIM_TRANSFORM_TRACK_KEYS:
+				continue
+			var off := sec + int(dir[k]["rel"])
+			var span := _span_sec(dir, k, buf.size(), sec)
+			if off < 0 or span <= 0 or off + span > buf.size():
+				return empty
+			out.append_array(buf.slice(off, off + span))
+		return out
 
 
 ## Hero savegames (`*.pax` under `~/.lgp/sacred/`). A PAX file is a fixed
