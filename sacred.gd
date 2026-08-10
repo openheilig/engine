@@ -2358,6 +2358,249 @@ class Models extends RefCounted:
 			out.append_array(buf.slice(off, off + span))
 		return out
 
+	# ---------------------------------------------------------------------
+	# Clip-side bone chain (05-12 Task 1). Section-aware TWINS of
+	# _node_u32()/strings()/object_names()/bone_names() above -- NOT
+	# extensions of them. Those four are hardwired to SECTION_OFF_MESH
+	# (confirmed by direct reading: every one of them opens with
+	# `_directory(buf)`, never `_directory_sec(buf, sec)`), so a kind=65
+	# clip entry's own section (section_offset(entry), not SECTION_OFF_MESH)
+	# needs its own read path. The two-hop DataExtension chain itself
+	# (FormBoneChannels[bone_i]-1 -> TransformChannel -> first child
+	# DataExtensionReference -> DataExtensionIndex-1 -> DataExtension.
+	# __ObjectName) is UNCHANGED -- only the section anchor differs.
+	#
+	# clip_bones()'s bone block is NOT the contiguous BONE_STRIDE-stride run
+	# bone_bytes() reads: measured, each TAG_BONE is its own directory node
+	# with its own rel (unlike kind=64's BoneSection+contiguous-Bone-block).
+	# So clip_bones() collects each TAG_BONE node's rel individually, the
+	# same directory-order scan clip()'s own bone_count already uses, rather
+	# than reading one bone_count*BONE_STRIDE slice.
+
+	## Section-aware twin of _node_u32(): single u32 payload word at node j's
+	## own rel, offset from sec instead of SECTION_OFF_MESH.
+	func _node_u32_sec(buf: PackedByteArray, dir: Array[Dictionary], j: int, sec: int) -> int:
+		var off := sec + int(dir[j]["rel"])
+		if off < 0 or off + 4 > buf.size():
+			return -1
+		return buf.decode_u32(off)
+
+	## Section-aware twin of strings(): identical StringTable decode, offset
+	## from sec instead of SECTION_OFF_MESH.
+	func _strings_sec(buf: PackedByteArray, dir: Array[Dictionary], sec: int) -> PackedStringArray:
+		var empty := PackedStringArray()
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_STRING_TABLE:
+				continue
+			var off := sec + int(dir[j]["rel"])
+			if off < 0 or off + 8 > buf.size():
+				return empty
+			var n := buf.decode_u32(off)
+			var span_bytes := _span_sec(dir, j, buf.size(), sec)
+			if n < 0 or 8 + n > span_bytes:
+				return empty
+			var out := PackedStringArray()
+			var pos := off + 8
+			var end := off + span_bytes
+			for i in n:
+				var e := pos
+				while e < end and buf[e] != 0:
+					e += 1
+				if e >= end:
+					return empty
+				out.append(buf.slice(pos, e).get_string_from_utf8())
+				pos = e + 1
+			return out
+		return empty
+
+	## Section-aware twin of object_names(): identical DataExtension ->
+	## PropertySection -> Property -> ValueSection walk, offset from sec.
+	func _object_names_sec(buf: PackedByteArray, dir: Array[Dictionary], sec: int) -> PackedStringArray:
+		var strs := _strings_sec(buf, dir, sec)
+		var out := PackedStringArray()
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_DATA_EXTENSION:
+				continue
+			var name := ""
+			for sk in _direct_children(dir, j):
+				if dir[sk]["tag"] != TAG_DATA_EXTENSION_PROPERTY_SECTION:
+					continue
+				for kn in _direct_children(dir, sk):
+					if dir[kn]["tag"] != TAG_DATA_EXTENSION_PROPERTY:
+						continue
+					var key := _resolve_textid(strs, _node_u32_sec(buf, dir, kn, sec))
+					if key != OBJECT_NAME_KEY:
+						continue
+					var value_section := -1
+					var last: int = mini(kn + 1 + int(dir[kn]["children"]), dir.size())
+					for vk in range(kn + 1, last):
+						if dir[vk]["tag"] == TAG_DATA_EXTENSION_VALUE_SECTION:
+							value_section = vk
+							break
+					if value_section == -1:
+						continue
+					var voff := sec + int(dir[value_section]["rel"]) + 4
+					if voff + 4 > buf.size():
+						continue
+					name = _resolve_textid(strs, buf.decode_u32(voff))
+			out.append(name)
+		return out
+
+	## Per-bone rest transform for a kind=65 clip entry's OWN bone list --
+	## NOT the model's. Same 68-byte Bone record layout bones() decodes
+	## (TAG_BONE is shared, 0xCA5E0506, same fields at the same offsets),
+	## same rejection posture (out-of-range parent, non-unit quaternion both
+	## refuse the whole entry), but each TAG_BONE node is read at its OWN
+	## rel rather than a contiguous bone_count*BONE_STRIDE block -- see the
+	## section header comment above for why. Field shape mirrors bones()'s
+	## dict minus "name" (clip_bone_names() carries that, kept separate the
+	## same way bones()/bone_names() are two calls rather than one).
+	func clip_bones(entry: int) -> Array[Dictionary]:
+		var out: Array[Dictionary] = []
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			return out
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			return out
+		var sec := section_offset(entry)
+		var dir := _directory_sec(buf, sec)
+		if dir.is_empty():
+			return out
+		var bone_nodes: Array[int] = []
+		for j in dir.size():
+			if int(dir[j]["tag"]) == TAG_BONE:
+				bone_nodes.append(j)
+		var n := bone_nodes.size()
+		if n <= 0 or n > MAX_BONES:
+			return out
+		for i in n:
+			var j: int = bone_nodes[i]
+			var off := sec + int(dir[j]["rel"])
+			if off < 0 or off + BONE_STRIDE > buf.size():
+				push_error("Sacred.Models.clip_bones: entry %d bone node %d runs past the entry" % [entry, j])
+				return []
+			var parent := buf.decode_s32(off)
+			if parent < 0 or parent >= n:
+				push_error("Sacred.Models.clip_bones: entry %d bone %d has out-of-range parent %d (of %d)" % [entry, i, parent, n])
+				return []
+			var pos := Vector3(buf.decode_float(off + 4), buf.decode_float(off + 8), buf.decode_float(off + 12))
+			var q := Quaternion(buf.decode_float(off + 16), buf.decode_float(off + 20), buf.decode_float(off + 24), buf.decode_float(off + 28))
+			var qlen := sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+			if is_nan(qlen) or absf(qlen - 1.0) > BONE_QUAT_EPS:
+				push_error("Sacred.Models.clip_bones: entry %d bone %d rotation is not a unit quaternion (|q|=%f)" % [entry, i, qlen])
+				return []
+			var ss := PackedFloat32Array()
+			ss.resize(9)
+			for k in 9:
+				ss[k] = buf.decode_float(off + 32 + k * 4)
+			var b := Basis(Vector3(ss[0], ss[3], ss[6]), Vector3(ss[1], ss[4], ss[7]), Vector3(ss[2], ss[5], ss[8]))
+			out.append({
+				"parent": parent,
+				"parent_effective": -1 if parent == i else parent,
+				"position": pos,
+				"rotation": q,
+				"scale_shear": ss,
+				"rest": Transform3D(Basis(q) * b, pos),
+			})
+		return out
+
+	## Resolved bone name per bone in clip_bones() order -- the section-aware
+	## twin of bone_names(), same two-hop chain, same honest-empty-on-
+	## unresolved posture (D-19: nothing is substituted for a bone the chain
+	## does not resolve). bone_count here is clip_bones()'s own TAG_BONE
+	## node count, not a bone_bytes()-style contiguous-block division -- see
+	## the section header comment above.
+	func clip_bone_names(entry: int) -> PackedStringArray:
+		var empty := PackedStringArray()
+		var length := true_length(entry)
+		if length <= 0 or not magic_ok(entry):
+			return empty
+		var buf := _pak.read_at(_pak.entry_offset(entry), length)
+		if buf.size() < length:
+			return empty
+		var sec := section_offset(entry)
+		var dir := _directory_sec(buf, sec)
+		if dir.is_empty():
+			return empty
+		var bone_count := 0
+		for node in dir:
+			if int(node["tag"]) == TAG_BONE:
+				bone_count += 1
+		if bone_count <= 0:
+			return empty
+		var names := _object_names_sec(buf, dir, sec)
+
+		var tc_refs := PackedInt32Array()
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_TRANSFORM_CHANNEL:
+				continue
+			var kids := _direct_children(dir, j)
+			if not kids.is_empty() and dir[kids[0]]["tag"] == TAG_DATA_EXTENSION_REFERENCE:
+				tc_refs.append(_node_u32_sec(buf, dir, kids[0], sec))
+			else:
+				tc_refs.append(-1)
+
+		var fbc := PackedInt32Array()
+		for j in dir.size():
+			if dir[j]["tag"] != TAG_FORM_BONE_CHANNELS:
+				continue
+			var off := sec + int(dir[j]["rel"])
+			var span_bytes := _span_sec(dir, j, buf.size(), sec)
+			var count := span_bytes / 4
+			if off < 0 or count < 0 or off + count * 4 > buf.size():
+				push_error("Sacred.Models.clip_bone_names: entry %d FormBoneChannels runs past the entry" % entry)
+				return empty
+			for i in count:
+				fbc.append(buf.decode_u32(off + i * 4))
+			break
+
+		var out := PackedStringArray()
+		out.resize(bone_count)
+		for i in bone_count:
+			out[i] = ""
+			if i >= fbc.size():
+				continue
+			var channel := fbc[i] - 1
+			if channel < 0 or channel >= tc_refs.size():
+				continue
+			var ref_raw := tc_refs[channel]
+			if ref_raw < 0:
+				continue
+			var ext := ref_raw - 1
+			if ext < 0 or ext >= names.size():
+				continue
+			out[i] = names[ext]
+		return out
+
+	## Binds clip()'s records[] to clip_bones() by DIRECTORY POSITION,
+	## WITHIN THIS SINGLE FILE ONLY -- record i (the i-th
+	## AnimationTransformTrackKeys child of AnimationTransformTrackSection,
+	## the same order clip()'s own `records` array is built in) is bone i
+	## (the i-th TAG_BONE node, the same order clip_bones() is built in).
+	## This is NEVER a cross-file join -- clip_track_bone() never touches a
+	## model entry, and binding a clip track to a MODEL bone happens only in
+	## ModelView.build_animation(), by NAME, never by this index. Refuses
+	## (empty array, push_error naming both counts) when record count does
+	## not equal bone count -- measured exception: FX_E_IDLE_BH.GRN (2583)
+	## and FX_G_IDLE_BH.GRN (2585) each declare 12 bones but 24 records
+	## (duplicated ids), so a positional bind there would be a guess, not a
+	## resolution, and is refused rather than truncated or paired arbitrarily.
+	func clip_track_bone(entry: int) -> PackedInt32Array:
+		var c := clip(entry)
+		var bl := clip_bones(entry)
+		if c.is_empty() or bl.is_empty():
+			return PackedInt32Array()
+		var records: Array = c["records"]
+		if records.size() != bl.size():
+			push_error("Sacred.Models.clip_track_bone: entry %d has %d records but %d bones -- refusing to bind by directory position (count mismatch)" % [entry, records.size(), bl.size()])
+			return PackedInt32Array()
+		var out := PackedInt32Array()
+		out.resize(records.size())
+		for i in records.size():
+			out[i] = i
+		return out
+
 	## The 13 German weapon-category tokens ATTACK_* clip names carry,
 	## longest-token-first (2H_AXT before 2H, KLINGENWAFFEN before nothing
 	## shorter overlaps it) so a compound token is never shadowed by a

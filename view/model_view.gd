@@ -73,6 +73,20 @@ var _skin: Skin = null
 var _weights: Array[Dictionary] = []
 var _local_to_bind: Array[PackedInt32Array] = []
 
+## Animation facts, printed by main.gd's --anim= route. anim_bound counts
+## clip bones whose sanitized name resolved to a real Skeleton3D bone via
+## find_bone() (05-12 Task 1); anim_tracks counts the position/rotation
+## tracks actually added to the built Animation (fewer than 2*bound, since
+## D-06 omits the clip's own root-bone track(s)); anim_unbound_names carries
+## the STORED clip-side name (or "" when the clip's own two-hop chain never
+## resolved a name at all) for every bone build_animation() could not match.
+var _anim_player: AnimationPlayer = null
+var _built_anim: Animation = null
+var anim_bound := 0
+var anim_tracks := 0
+var anim_length := 0.0
+var anim_unbound_names := PackedStringArray()
+
 
 ## Builds the mesh for `entry` and returns true on success. On failure the
 ## node is left empty and false is returned -- the caller decides whether an
@@ -379,6 +393,149 @@ func _fill_weights(models: Sacred.Models, entry: int, m: Dictionary, arr: Array)
 	arr[Mesh.ARRAY_BONES] = ab
 	arr[Mesh.ARRAY_WEIGHTS] = aw
 	return true
+
+
+# ---------------------------------------------------------------------
+# Animation (05-12). Binds a decoded kind=65 clip to THIS rig's Skeleton3D
+# BY NAME ONLY -- Sacred.Models.clip_track_bone() resolves a clip record to
+# a clip-file bone by DIRECTORY POSITION (within that one file), but the
+# clip-file bone is then matched to a MODEL Skeleton3D bone here, in this
+# function, exclusively by comparing sanitized name strings. No cross-file
+# index join exists anywhere in this section.
+
+## Builds an Animation for `clip_entry`, bound to this rig's Skeleton3D bones
+## by name. Returns {"animation": Animation, "bound": int, "tracks": int,
+## "unbound_names": PackedStringArray}; "animation" is null and the rest
+## zeroed/empty when no skeleton has been built yet, the clip has no
+## decodable records, or clip_track_bone() refuses (record/bone count
+## mismatch -- see its own doc comment).
+##
+## A clip bone's stored name goes through the IDENTICAL ':'/'/' -> '_'
+## sanitizing substitution _build_rig() applies to a model bone's stored
+## name before either side is compared -- the two names must go through the
+## same transform to mean the same string. Unlike _build_rig(), no
+## Bone_%d/dedup-suffix fallback is applied here: an empty or duplicate
+## clip-side name simply fails find_bone() and is recorded unbound (D-19 --
+## nothing invented to make a track bind).
+##
+## D-06: a clip bone whose OWN parent_effective is -1 (the clip's structural
+## root) still counts toward `bound` when its name resolves, but gets NO
+## position/rotation track -- PlayerView.update() writes this rig's root
+## bone's pose every tick from the sim's cell, and a placement track on the
+## same bone would fight it every frame.
+func build_animation(models: Sacred.Models, clip_entry: int) -> Dictionary:
+	var fail := {"animation": null, "bound": 0, "tracks": 0, "unbound_names": PackedStringArray()}
+	if _skeleton == null:
+		return fail
+	var c := models.clip(clip_entry)
+	var track_bone := models.clip_track_bone(clip_entry)
+	var clip_names := models.clip_bone_names(clip_entry)
+	var clip_bone_list := models.clip_bones(clip_entry)
+	if c.is_empty() or track_bone.is_empty() or clip_names.is_empty() or clip_bone_list.is_empty():
+		return fail
+
+	var records: Array = c["records"]
+	var anim := Animation.new()
+	anim.length = maxf(float(c["length"]), 0.001)
+	# ponytail: every clip loops uniformly; the format has not yielded a
+	# decoded per-clip loop flag yet, so LOOP_LINEAR is applied to all of
+	# them rather than guessed per name. Upgrade when that field is found.
+	anim.loop_mode = Animation.LOOP_LINEAR
+
+	var bound := 0
+	var tracks := 0
+	var unbound := PackedStringArray()
+	for ri in records.size():
+		var bi: int = track_bone[ri]
+		var stored: String = clip_names[bi] if bi < clip_names.size() else ""
+		var nm := stored.replace(":", "_").replace("/", "_")
+		var skel_idx := _skeleton.find_bone(nm) if nm != "" else -1
+		if skel_idx == -1:
+			unbound.append(stored)
+			continue
+		bound += 1
+		if int(clip_bone_list[bi]["parent_effective"]) == -1:
+			continue
+		var r: Dictionary = records[ri]
+		var path := NodePath("%s:%s" % [_skeleton.name, nm])
+		var times_pos: PackedFloat32Array = r["times_pos"]
+		var positions: PackedVector3Array = r["positions"]
+		if times_pos.size() > 0:
+			var pt := anim.add_track(Animation.TYPE_POSITION_3D)
+			anim.track_set_path(pt, path)
+			for i in times_pos.size():
+				anim.position_track_insert_key(pt, times_pos[i], positions[i])
+			tracks += 1
+		var times_rot: PackedFloat32Array = r["times_rot"]
+		var rotations: Array = r["rotations"]
+		if times_rot.size() > 0:
+			var rt := anim.add_track(Animation.TYPE_ROTATION_3D)
+			anim.track_set_path(rt, path)
+			for i in times_rot.size():
+				# clip() only checks unit-length to within ANIM_QUAT_EPS
+				# (0.07 -- a decode-validity discriminator, not a precision
+				# claim). Godot's own rotation-track interpolation demands
+				# an exact unit quaternion and logs an ERROR per sampled
+				# frame otherwise; normalized() re-scales the SAME
+				# already-accepted rotation rather than changing what was
+				# decoded or loosening what clip() itself checks.
+				anim.rotation_track_insert_key(rt, times_rot[i], (rotations[i] as Quaternion).normalized())
+			tracks += 1
+
+	return {"animation": anim, "bound": bound, "tracks": tracks, "unbound_names": unbound}
+
+
+## Plays `clip_entry` on this rig through a real AnimationPlayer /
+## AnimationLibrary / Animation triad (D-04: Godot's own playback owns
+## sampling here, never a hand-rolled per-frame writer -- this file defines
+## no _process). The AnimationPlayer is created once and reused; each call
+## rebuilds the Animation via build_animation() and (re)registers it under
+## the clip's own entry name in the player's default ("") library. Updates
+## anim_bound/anim_tracks/anim_unbound_names as a side effect, for
+## main.gd's --anim= fact lines. Returns true iff at least one track bound
+## and playback started.
+func play_clip(models: Sacred.Models, clip_entry: int) -> bool:
+	if _skeleton == null:
+		return false
+	var built := build_animation(models, clip_entry)
+	var anim: Animation = built["animation"]
+	anim_bound = int(built["bound"])
+	anim_tracks = int(built["tracks"])
+	anim_unbound_names = built["unbound_names"]
+	if anim == null or anim_tracks == 0:
+		anim_length = 0.0
+		return false
+	anim_length = anim.length
+	if _anim_player == null:
+		_anim_player = AnimationPlayer.new()
+		_anim_player.name = "AnimationPlayer"
+		add_child(_anim_player)
+	var lib: AnimationLibrary = _anim_player.get_animation_library("") if _anim_player.has_animation_library("") else null
+	if lib == null:
+		lib = AnimationLibrary.new()
+		_anim_player.add_animation_library("", lib)
+	var clip_name := models.entry_name(clip_entry)
+	if lib.has_animation(clip_name):
+		lib.remove_animation(clip_name)
+	lib.add_animation(clip_name, anim)
+	_built_anim = anim
+	_anim_player.play(clip_name)
+	return true
+
+
+## The Skeleton3D's CURRENT pose transform for `bone_name`, sanitized the
+## same way _build_rig() sanitizes a stored model-bone name. A probe for
+## main.gd's headless --anim= verify (confirms sampled poses actually move
+## between two advance() calls) -- never called from a per-frame path.
+## Transform3D.IDENTITY if this rig has no such bone.
+func sample_bone_pose(bone_name: String) -> Transform3D:
+	if _skeleton == null:
+		return Transform3D.IDENTITY
+	var nm := bone_name.replace(":", "_").replace("/", "_")
+	var idx := _skeleton.find_bone(nm)
+	if idx == -1:
+		return Transform3D.IDENTITY
+	return _skeleton.get_bone_pose(idx)
 
 
 ## True once the surface exists. There is no streaming here, so this is

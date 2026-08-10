@@ -172,6 +172,14 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--clip-falsify="):
 			clip_falsify = int(a.trim_prefix("--clip-falsify="))
+	# 05-12 Task 1: --anim=NAME, valid only alongside --grn=NAME -- it
+	# plays NAME on the single-mesh rig --grn= already builds. NAME is
+	# resolved through Models.clip_index_of, the identical kind-scoped
+	# lookup --clip= uses, so it can never silently land on a mesh entry.
+	var anim_name := ""
+	for a in argv:
+		if a.begins_with("--anim="):
+			anim_name = a.trim_prefix("--anim=")
 	for a in argv:
 		if a.begins_with("--tickhz="):
 			_tick_hz = clampi(int(a.trim_prefix("--tickhz=")), 1, 240)
@@ -219,7 +227,7 @@ func _ready() -> void:
 		Sim.R_SIM < Sim.R_RENDER and Sim.R_RENDER < Sim.R_LOAD])
 
 	if grn_name != "":
-		await _show_model(install, grn_name)
+		await _show_model(install, grn_name, anim_name)
 		return
 
 	if clip_name != "":
@@ -1086,7 +1094,7 @@ func _actor_probe(n: int, route: String) -> void:
 ## FileAccess.open, no use of the trimmed argument as a path. An unresolvable
 ## name is fatal and loud -- rendering nothing while exiting 0 is the failure
 ## mode that makes a broken capture look like a working one.
-func _show_model(install: String, name: String) -> void:
+func _show_model(install: String, name: String, anim_name: String = "") -> void:
 	var pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 	if not pak.is_open():
 		printerr("grn\tcannot open pak/models.pak under %s" % install)
@@ -1123,6 +1131,31 @@ func _show_model(install: String, name: String) -> void:
 	# it reported true unconditionally, including on a render a human rejected.
 	# It is removed rather than replaced: the skeleton and skin layer is
 	# unvalidated until an oracle independent of our own decode exists.
+	if anim_name != "":
+		# --anim=NAME resolves through Models.clip_index_of, the identical
+		# kind-scoped lookup --clip= uses -- a mesh-kind or wrong-kind name
+		# cannot silently resolve here either. Fatal and loud on both an
+		# unresolvable name and a resolved-but-unbindable one (a motion-kind
+		# entry with no per-bone AnimationTransformTrackKeys records, e.g.
+		# GLADIATOR.GRN's own motion-model entry): exiting 0 having bound
+		# nothing is the failure mode _show_clip's own doc comment already
+		# names.
+		var anim_idx := models.clip_index_of(anim_name)
+		if anim_idx < 0:
+			printerr("anim\tno motion-kind entry named %s in pak/models.pak (%d entries)" % [anim_name, models.count()])
+			get_tree().quit(1)
+			return
+		if not view.play_clip(models, anim_idx):
+			printerr("anim\t%s (index %d) bound no animation tracks to %s (index %d)" % [
+				models.entry_name(anim_idx), anim_idx, models.entry_name(idx), idx])
+			get_tree().quit(1)
+			return
+		var total := view.anim_bound + view.anim_unbound_names.size()
+		print("anim\tclip=%d\tname=%s\tmodel=%d\ttracks=%d\tbound=%d/%d\tlength=%.6f\tloop=%s" % [
+			anim_idx, models.entry_name(anim_idx), idx, view.anim_tracks,
+			view.anim_bound, total, view.anim_length, "linear"])
+		if not view.anim_unbound_names.is_empty():
+			print("anim-unbound\tclip=%d\tnames=%s" % [anim_idx, ",".join(view.anim_unbound_names)])
 	await _maybe_screenshot()
 
 
