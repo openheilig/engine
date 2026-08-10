@@ -788,25 +788,36 @@ func _pump_until_settled(budget: int) -> void:
 
 ## Plan 05-08: --crowd=N. Opt-in only, never runs without the flag.
 ##
-## DEGRADED SCOPE (05-08's own Task 1 precondition, read before this was
-## written): both 05-06 (multi-piece composition) and 05-07 (animation
-## playback) HALTED with no code written -- ModelView.setup_composed(),
-## swap_slot(), play_clip() and sample_bone_pose() do not exist anywhere in
-## godot-port/, confirmed both by their own SUMMARYs and by direct
-## inspection of view/model_view.gd and view/player_view.gd. This route
-## therefore cannot reach the plan's literal action text ("ModelView.
-## setup_composed() for the equipment, play_clip() for the animation") --
-## that would require methods this codebase does not have. It instead
-## reuses PlayerView (view/player_view.gd) once per crowd member -- the
-## ONLY rig-construction code path that exists, the same one the one real
-## player already uses -- to build N STATIC, SINGLE-MESH, NON-ANIMATED
-## Gladiator rigs. This substitution is pre-authorized by the precondition,
-## not a silent scope change; see 05-08-SUMMARY.md for the full accounting.
+## CURRENT SCOPE (05-14; set by reading the FIRST PARAGRAPHS of
+## 05-11-SUMMARY.md, 05-12-SUMMARY.md and 05-13-SUMMARY.md before touching
+## this code, per 05-14-PLAN.md's halt_contract -- the one-landed/
+## one-halted branch, so this route measures exactly what exists and every
+## printed line names what is absent):
 ##
-## Every number this route prints is a single-mesh/no-composition/
-## no-animation number. It is NOT a full phase-5 crowd-budget figure and
-## must never be read as one -- read it only as "N static rigs, on top of
-## the world already streaming, cost this much."
+##   composition=ABSENT. 05-11 HALTED: "There is NO composed multi-piece
+##     rig anywhere in godot-port/" (05-11-SUMMARY.md first paragraph,
+##     findings row 607); the one-shared-skeleton design is REFUTED by
+##     measurement, twice, by two independent tests (05-10, rows 605/606).
+##     ModelView.setup_composed()/swap_slot() and a PlayerView equipment
+##     list do not exist anywhere.
+##   animation=PRESENT at the ModelView/reader level ONLY. 05-12 Task 1
+##     landed ModelView.build_animation()/play_clip() (commit 5c3ddbc),
+##     checkpoint-verified playing a named clip on the single-mesh base
+##     rig. The PlayerView/live-game-world wiring (05-12 Task 3) did NOT
+##     run -- 05-12 Task 2's clip-vs-model rig-agreement measurement came
+##     back REFUTED (row 609) -- so PlayerView has no play_clip() and no
+##     animation plays during normal streaming. 05-13 then halted as well:
+##     no anim_check.gd sequence gate exists.
+##
+## This route therefore builds N SINGLE-MESH PlayerView rigs -- still the
+## only rig-construction code path that exists, the same one the real
+## player uses -- and drives playback on each rig's ModelView through the
+## identical play_clip() call main.gd's --anim= route makes. Every number
+## it prints EXCLUDES composition cost (none exists) and EXCLUDES any
+## live-world animation wiring (none exists): it is the cost of N
+## single-mesh rigs each playing one named clip at the reader level, on
+## top of a world that keeps streaming. It is NOT a full phase-5
+## crowd-budget figure and must never be read as one.
 ##
 ## Existing load to read every number against (D-13 / STATE.md's carried
 ## defect): object build is already measured at ~54 ms mean / ~186 ms worst
@@ -824,13 +835,24 @@ const CROWD_FRAMES := 90            ## measured frames, well past a 30-frame flo
 const CROWD_PAN_STEP := Vector2(0.4, 0.25)  ## per measured frame, keeps sectors
 	## streaming under load for the whole window instead of measuring an
 	## idle, fully-settled scene.
+const CROWD_CLIP := "GLAD_ATTACK_1H_A.GRN"  ## 05-14: the one clip
+	## checkpoint-verified to bind BY NAME and play on this exact rig (05-12
+	## Task 1, commit 5c3ddbc). Resolved through Models.clip_index_of (the
+	## kind-scoped name lookup), never a hardcoded entry number; an
+	## unresolved name degrades the run to animation=absent, labelled as
+	## such on the crowd-scope line, never silently retried under another
+	## name.
 
 
 ## Builds the streaming world exactly like the default branch above (camera +
-## SectorView), spawns n static PlayerView rigs in a grid around start_cell,
-## measures build cost and per-frame cost separately while the camera pans,
-## and prints exactly one `crowd` fact line plus explanatory notes. Never
-## asserts pass/fail -- this route measures, it does not gate.
+## SectorView), spawns n PlayerView rigs in a grid around start_cell, starts
+## CROWD_CLIP playing on each rig's ModelView through the same play_clip()
+## call the --anim= route uses, measures build cost (clip bind included --
+## that is what an animated rig costs to spawn) and per-frame cost
+## separately while the camera pans, and prints exactly one `crowd` fact
+## line plus an unconditional `crowd-scope` line naming what the
+## measurement includes. Never asserts pass/fail -- this route measures, it
+## does not gate.
 func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 		tiles: Sacred.Tiles, statics: Sacred.Statics, mixed: Sacred.Mixed,
 		items: Sacred.Items) -> void:
@@ -850,6 +872,7 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 		get_tree().quit(1)
 		return
 	var models := Sacred.Models.new(models_pak)
+	var clip_idx := models.clip_index_of(CROWD_CLIP)
 
 	_cam = IsoCamera.new()
 	_cam.cell_limit = Vector2(world.size) * SECT
@@ -873,6 +896,9 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 	var build_times_ms: PackedFloat64Array = PackedFloat64Array()
 	var verts := 0
 	var tris := 0
+	var rig_bones := 0
+	var rig_tracks := 0
+	var anim_rigs := 0
 	var build_t0 := Time.get_ticks_usec()
 	for i in _crowd_n:
 		var gx := i % side
@@ -880,13 +906,26 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 		var cell := start_cell + Vector2(float(gx) - half, float(gy) - half) * CROWD_SPACING
 		var t0 := Time.get_ticks_usec()
 		var pv := PlayerView.new(models)
-		build_times_ms.append((Time.get_ticks_usec() - t0) / 1000.0)
 		if pv.node == null:
+			build_times_ms.append((Time.get_ticks_usec() - t0) / 1000.0)
 			continue
 		add_child(pv.node)
 		pv.update(cell)
+		# 05-14: playback through the SAME ModelView.play_clip() main.gd's
+		# --anim= route calls (05-12's landed reader-level path) -- no
+		# benchmark-only animation path, and no new rig builder: the rig is
+		# PlayerView's, parented into the tree so the tree frees it on
+		# quit exactly like the single-player path. The clip's bind/decode
+		# cost belongs to the per-rig build cost of an animated rig, so
+		# this call sits inside the timed region.
+		var mv := pv.node as ModelView
+		if mv != null and clip_idx >= 0 and mv.play_clip(models, clip_idx):
+			anim_rigs += 1
+		build_times_ms.append((Time.get_ticks_usec() - t0) / 1000.0)
 		verts = pv.vertex_count
 		tris = pv.triangle_count
+		rig_bones = mv.bone_count if mv != null else 0
+		rig_tracks = mv.anim_tracks if mv != null else 0
 		rigs.append(pv)
 	var build_total_ms := (Time.get_ticks_usec() - build_t0) / 1000.0
 	var build_mean_ms := 0.0
@@ -908,10 +947,14 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 	# Per-frame cost, measured while the camera pans -- process_frame, not
 	# RenderingServer.frame_post_draw: under plain --headless there is no
 	# draw pass, so frame_post_draw never fires and this loop would park
-	# forever (same reasoning as _pump_until_settled above). No animation
-	# and no per-frame rig update exists to drive here (both halted
-	# upstream) -- every rig's pose was baked once above and does not move
-	# again, matching PlayerView.update()'s own static-placement contract.
+	# forever (same reasoning as _pump_until_settled above). Each rig whose
+	# clip resolved has its AnimationPlayer ticking on these frames through
+	# the engine's own playback (D-04) -- that per-frame animation cost is
+	# exactly what this window is here to measure, on top of the streaming
+	# load the pan keeps alive. PlayerView.update() still runs only once
+	# per rig (static grid placement baked into the root-bone pose); D-06
+	# keeps the clip's root-bone tracks out of the Animation, so playback
+	# and placement never fight over the same bone.
 	var frame_times_ms: PackedFloat64Array = PackedFloat64Array()
 	var pan := start_cell
 	var draw_calls := 0
@@ -940,16 +983,38 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 
 	print(("crowd\tn=%d\tframes=%d\tframe_mean_ms=%.6f\tframe_p95_ms=%.6f\t"
 		+ "frame_worst_ms=%.6f\tbuild_mean_ms=%.6f\tbuild_total_ms=%.6f\t"
-		+ "verts=%d\ttris=%d\tdrawcalls=%d") % [
+		+ "verts=%d\ttris=%d\tdrawcalls=%d\trigverts=%d\trigtris=%d\t"
+		+ "rigbones=%d\trigtracks=%d") % [
 		rigs.size(), frame_times_ms.size(), frame_mean_ms, frame_p95_ms, frame_worst_ms,
-		build_mean_ms, build_total_ms, verts * rigs.size(), tris * rigs.size(), draw_calls])
+		build_mean_ms, build_total_ms, verts * rigs.size(), tris * rigs.size(), draw_calls,
+		verts, tris, rig_bones, rig_tracks])
 	if draw_calls == 0:
 		print("crowd-note\tdrawcalls=0 -- plain --headless never submits a draw call "
 			+ "(RenderingServer never presents a frame there); this reading is not a "
 			+ "rendering-cost measurement, only frame_mean_ms/build_mean_ms are")
-	print("crowd-scope\tcomposition=absent\tanimation=absent\t"
-		+ "reason=05-06_and_05-07_both_halted -- this measures N static, single-mesh, "
-		+ "non-animated rigs only; it is not a full phase-5 crowd-budget number")
+	# 05-14: unconditional, on EVERY run -- this line is what stops a number
+	# being read as a fuller answer than it is. pieces=1: every crowd rig is
+	# the single-mesh base rig; composition does not exist (05-11 halted).
+	var anim_word := "present" if anim_rigs == rigs.size() else "absent"
+	var scope_reason := ""
+	if anim_word == "present":
+		scope_reason = ("composition absent per 05-11-SUMMARY.md (no composed "
+			+ "multi-piece rig exists anywhere in godot-port/; bind-agreement REFUTED "
+			+ "twice, rows 605-607); animation present at the reader level only, via "
+			+ "ModelView.play_clip (05-12 Task 1, commit 5c3ddbc) -- the PlayerView/"
+			+ "live-game-world wiring does not exist per 05-12-SUMMARY.md (Task 3 did "
+			+ "not run; rig-agreement REFUTED, row 609) -- this measures N single-mesh "
+			+ "rigs each playing one named clip at the reader level while the world "
+			+ "streams, excluding composition cost and any live-world animation "
+			+ "wiring; it is not a full phase-5 crowd-budget number")
+	else:
+		scope_reason = ("composition absent per 05-11-SUMMARY.md; animation ALSO "
+			+ "absent this run -- %s resolved to clip index %d and playback started "
+			+ "on %d of %d rigs (expected all, via ModelView.play_clip, 05-12 Task 1) "
+			+ "-- investigate before quoting any number from this run"
+			% [CROWD_CLIP, clip_idx, anim_rigs, rigs.size()])
+	print("crowd-scope\tcomposition=absent\tanimation=%s\tpieces=%d\tclip=%d\treason=%s" % [
+		anim_word, 1, clip_idx if anim_word == "present" else -1, scope_reason])
 	get_tree().quit()
 
 
