@@ -46,11 +46,11 @@ const MAX_CATCHUP_TICKS := 5
 ## recovered constants.
 const R_SIM := 96.0      ## actors inside this TICK. Consumed by tick_once().
 const R_RENDER := 128.0  ## actors inside this are eligible for a view node.
-                          ## Reported now as a band count; view/actor_view.gd
-                          ## (a later phase) is its second consumer.
+						  ## Reported now as a band count; view/actor_view.gd
+						  ## (a later phase) is its second consumer.
 const R_LOAD := 160.0    ## the documented outer bound: terrain inside this is
-                          ## expected resident, so an actor inside R_SIM can
-                          ## assume its ground already exists.
+						  ## expected resident, so an actor inside R_SIM can
+						  ## assume its ground already exists.
 
 var tick: int = 0
 var dropped: int = 0
@@ -71,6 +71,11 @@ var _accum: float = 0.0
 ## placeholder kinematics as a fallback" instruction -- not moving is not a
 ## fallback, it is what "no navmesh available" means.
 var walk: Walkable = null
+
+## Building swap derivation. Unset (null) by default: no derivation occurs and
+## there is never a camera/caller-focus fallback. When assigned, tick_once()
+## supplies only the focus actor's own cell.
+var interior: Interior = null
 
 ## Per-tick output hook, invoked at the very end of tick_once(), after the
 ## actor loop, as `call(tick, dropped, astar_event)`. `astar_event` is the
@@ -236,6 +241,11 @@ func tick_once(reg: ActorRegistry, focus: Vector2) -> void:
 
 	for id: int in reg.in_radius(effective_focus, R_SIM):
 		_step_actor(reg.get_actor(id))
+	# Derive after movement so this tick's dump observes the cell the actor
+	# actually reached. The source is still the focus actor itself -- never
+	# effective_focus's caller value, camera state, or streaming state.
+	if interior != null and tracked != null:
+		interior.derive(tracked.cell)
 	if output_hook.is_valid():
 		output_hook.call(tick, dropped, astar_event)
 

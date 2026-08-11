@@ -438,6 +438,86 @@ class Regions extends RefCounted:
 		return 0 if b == 0 else b & 0x0f
 
 
+## Data-layer correspondence between region/navmesh footprints and placed art.
+## Consumes one sector stream plus the two retail readers that own object and
+## name data; no world-layer or node type reaches this class.
+class Footprints extends RefCounted:
+	var _statics: Sacred.Statics
+	var _items: Sacred.Items
+	## Number of regions in the most recent resolve() whose levelled members
+	## voted for more than one family. Mixed footprints remain deterministic
+	## (majority, then lexical tie-break) but are exposed rather than hidden.
+	var mixed: int = 0
+
+	func _init(statics: Sacred.Statics, items: Sacred.Items) -> void:
+		_statics = statics
+		_items = items
+
+	## Per region-index, in Sacred.Regions.list order:
+	## {anchor, size, family, members, props}. Object arrays carry mixed.pak
+	## sprite ids in the sector cell-grid's ascending row-major order.
+	func resolve(stream: PackedByteArray, gx: int, gy: int) -> Dictionary:
+		var out: Dictionary = {}
+		mixed = 0
+		var regions := Sacred.Regions.new(stream, gx, gy)
+		for ri in regions.list.size():
+			var r: Dictionary = regions.list[ri]
+			out[ri] = {
+				"anchor": r["cell"], "size": r["size"], "family": "",
+				"members": [], "props": [], "region": r,
+			}
+		if _statics == null or _items == null or out.is_empty():
+			return out
+		var entries_end := Sacred.NAME + Sacred.SECT * Sacred.SECT * Sacred.CELL
+		if stream.size() < entries_end:
+			push_error("Sacred.Footprints: sector %d,%d stream is too short for its cell grid (%d < %d)" % [
+				gx, gy, stream.size(), entries_end])
+			return out
+		for i in Sacred.SECT * Sacred.SECT:
+			var o := _statics.get_object(stream.decode_u32(Sacred.NAME + i * Sacred.CELL + 4))
+			if o.is_empty():
+				continue
+			var cell := _object_cell(o["pos"])
+			for ri in regions.list.size():
+				var fp: Dictionary = out[ri]
+				if not Rect2i(fp["anchor"], fp["size"]).has_point(cell):
+					continue
+				var sid: int = o["type"]
+				if _items.levels(sid) != 0:
+					fp["members"].append(sid)
+				else:
+					fp["props"].append(sid)
+				out[ri] = fp
+		for ri in regions.list.size():
+			var fp: Dictionary = out[ri]
+			var votes: Dictionary = {}
+			for sid: int in fp["members"]:
+				var family := _items.family_of(sid)
+				if family != "":
+					votes[family] = int(votes.get(family, 0)) + 1
+			if votes.size() > 1:
+				mixed += 1
+			var families: Array = votes.keys()
+			families.sort()
+			var winner := ""
+			var best := 0
+			for family: String in families:
+				var count: int = votes[family]
+				if count > best:
+					best = count
+					winner = family
+			fp["family"] = winner
+			out[ri] = fp
+		return out
+
+	## static.pak positions are absolute isometric screen coordinates (Statics'
+	## own format contract). Invert ox=48*(cx-cy), oy=-24*(cx+cy), then floor so
+	## negative fractional coordinates land in the same cell as simulation.
+	static func _object_cell(pos: Vector2) -> Vector2i:
+		return Vector2i(floori(pos.x / 96.0 - pos.y / 48.0),
+			floori(-pos.y / 48.0 - pos.x / 96.0))
+
+
 ## pak/items.pak -- the object DEFINITION table, and the only place retail keeps
 ## the German authoring names ("DCTower innenunten 1A_1", "TH01 Wand innen 1_02").
 ##
@@ -534,6 +614,12 @@ class Items extends RefCounted:
 
 	func level_count() -> int:
 		return _levels.size()
+
+	## Building-family name parsed from this sprite's level token, or "" for
+	## an unlevelled/unnamed sprite. Public read accessor for Footprints: the
+	## family table stays owned and populated by Items rather than duplicated.
+	func family_of(sprite_id: int) -> String:
+		return _fam_of.get(sprite_id, "")
 
 	## True if this sprite is on its family's TOP level, i.e. the interior set.
 	## Props (fences, flowers, market stalls) carry no level and return false --

@@ -112,6 +112,18 @@ class Dumper extends RefCounted:
 		_f.store_line("astar\ttick=%d\torigin=%d,%d\tgoal=%d,%d\tlen=%d\t" % [
 			tick, origin.x, origin.y, goal.x, goal.y, path_len])
 
+	## One line per swap transition, from Interior.last_changes() as passed
+	## through the same output_hook on record and replay. Nothing camera-,
+	## streaming-, or time-derived reaches this file; data is never re-derived.
+	func write_swap(tick: int, changes: Array) -> void:
+		if _f == null or changes.is_empty():
+			return
+		for change: Dictionary in changes:
+			var parts := Interior.unpack_region_key(change["key"])
+			_f.store_line("swap\ttick=%d\tregion=%d,%d,%d\tstate=%s\tfamily=%s\t" % [
+				tick, parts.x, parts.y, parts.z,
+				Interior.state_name(change["to"]), change["family"]])
+
 	func close() -> void:
 		if _f != null:
 			_f.close()

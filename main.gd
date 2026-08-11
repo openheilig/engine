@@ -262,6 +262,10 @@ func _ready() -> void:
 		_window_probe(world)
 		return
 
+	if "--interior-probe" in argv:
+		_interior_probe(world, statics, items)
+		return
+
 	if "--follow-probe" in argv:
 		_follow_probe()
 		return
@@ -329,6 +333,8 @@ func _ready() -> void:
 			_player_id = _registry.spawn(_first_real_record_id(), player_cell, 100, 100)
 			_sim.walk = walk
 			_sim.focus_actor_id = _player_id
+			if statics != null and items != null:
+				_sim.interior = Interior.new(world, walk, Sacred.Footprints.new(statics, items))
 			print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
 				player_cell.x, player_cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
 			if _show_player:
@@ -639,6 +645,64 @@ func _window_probe(world: Sacred.World) -> void:
 ##                      at family level and was replaced by this stricter
 ##                      variant, satisfying the contract the plan itself
 ##                      states: the control must be able to disagree.)
+## --interior-probe (06-03 Task 1): a scripted-cell tracer through the REAL
+## Sim.tick_once -> Interior.derive -> output_hook -> Replay.Dumper path. Direct
+## cell assignment is probe scaffolding only; Task 2 separately proves movement.
+## Site is 06-02 row 625's measured OZELT1 tent: sector 53,28, region anchor
+## 3410,1829 size 16x19, door 3422,1844, interior floor 3420,1840.
+func _interior_probe(world: Sacred.World, statics: Sacred.Statics, items: Sacred.Items) -> void:
+	if statics == null or items == null or _dump_path == "":
+		printerr("interior_probe\trequires static.pak, items.pak and --dump=PATH")
+		get_tree().quit(1)
+		return
+	var walk := Walkable.new(world)
+	var footprints := Sacred.Footprints.new(statics, items)
+	var resolved := footprints.resolve(world.sector(53, 28), 53, 28)
+	var target_index := -1
+	for index: int in resolved:
+		var fp: Dictionary = resolved[index]
+		if String(fp["family"]).begins_with("OZELT1"):
+			target_index = index
+			break
+	if target_index < 0:
+		printerr("interior_probe\tno OZELT1 footprint in measured sector 53,28")
+		get_tree().quit(1)
+		return
+	var target_key := 53 * 1000000 + 28 * 1000 + target_index
+	var interior := Interior.new(world, walk, footprints)
+	var sim := Sim.new(_tick_hz)
+	var reg := ActorRegistry.new()
+	var outside := Vector2(3420.5, 1826.5)  # north wall-negative side, row 625
+	var actor_id := reg.spawn(_first_real_record_id(), outside, 100, 100)
+	reg.get_actor(actor_id).heading = Vector2.ZERO
+	sim.focus_actor_id = actor_id
+	sim.interior = interior
+	var dumper := Replay.Dumper.new(_dump_path)
+	if not dumper.is_open():
+		get_tree().quit(1)
+		return
+	sim.output_hook = func(tick: int, dropped: int, astar_event: Dictionary) -> void:
+		dumper.write_tick(tick, dropped, reg)
+		dumper.write_astar(tick, astar_event)
+		dumper.write_swap(tick, interior.last_changes())
+		for change: Dictionary in interior.last_changes():
+			print("interior_probe\ttick=%d\tregion=%d\tfrom=%s\tstate=%s\tfamily=%s" % [
+				tick, change["key"], Interior.state_name(change["from"]),
+				Interior.state_name(change["to"]), change["family"]])
+	var sequence: Array[Vector2] = [
+		outside, Vector2(3422.5, 1844.5), Vector2(3420.5, 1840.5), outside,
+	]
+	for position: Vector2 in sequence:
+		reg.get_actor(actor_id).cell = position
+		sim.tick_once(reg, position)
+	dumper.close()
+	var states := interior.current()
+	print("interior_probe\tresult=%s\tregion=%d\tmixed=%d" % [
+		"PASS" if states.get(target_key, Interior.State.EXTERIOR) == Interior.State.EXTERIOR else "FAIL",
+		target_key, footprints.mixed])
+	get_tree().quit(0)
+
+
 const CENSUS_RX := {
 	"current": "_(\\d)(?:U(\\d))?_\\d+$",
 	"trailing-letter": "_(\\d)(?:U(\\d))?_\\d+[A-Za-z]?$",
@@ -848,6 +912,9 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 	_player_id = _registry.spawn(rec_id, cell, 100, 100)
 	_sim.walk = walk
 	_sim.focus_actor_id = _player_id
+	var footprints := Sacred.Footprints.new(statics, items)
+	var interior := Interior.new(world, walk, footprints)
+	_sim.interior = interior
 
 	if live_view and _record_path != "":
 		_cam = IsoCamera.new()
@@ -892,9 +959,12 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 			# back to Sim.
 			var dumper := _dumper
 			var reg := _registry
+			# `interior` is another non-Sim RefCounted capture, like path_window:
+			# it holds no reference back to Sim, so no self-cycle is introduced.
 			_sim.output_hook = func(tick: int, dropped: int, astar_event: Dictionary) -> void:
 				dumper.write_tick(tick, dropped, reg)
 				dumper.write_astar(tick, astar_event)
+				dumper.write_swap(tick, interior.last_changes())
 
 	if _record_path != "":
 		await _run_record()
