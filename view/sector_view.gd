@@ -93,6 +93,7 @@ var _hide_levels := 0                     ## --hidelevel=N: bitmask of levels to
 var _exterior := false                    ## --exterior: drop each building's top level
 var _pending: Array[int] = []             ## sectors queued for a later frame
 var _last_view := Vector3(NAN, NAN, NAN)  ## camera x/y/zoom the wanted-set was derived from
+var _in_sync := false                     ## true once _loaded provably covers the wanted set (stream() sets/clears)
 var _streaming := true
 var _stats := false
 var _objects := true                      ## draw static object sprites
@@ -163,15 +164,22 @@ func stream(_delta: float) -> void:
 	if not _streaming or _cam == null:
 		return
 	# The visible set only changes when the camera does. Re-deriving it every
-	# frame allocated a Dictionary and re-walked the sector grid for nothing;
-	# skip while the view is still and there is no backlog.
+	# frame allocated a Dictionary and walked the sector grid for nothing, so
+	# a settled view is skipped -- but "settled" must mean the wanted set is
+	# actually loaded, not merely that the camera stopped moving: after a
+	# camera jump the OLD cell's backlog drains one sector per frame below,
+	# and the frame that empties it would otherwise early-return forever with
+	# the new cell's sectors never queued (TSV rows 614/617: want=25,
+	# loaded=14, pending=0 at shot time -- a permanent void frame).
 	var view := Vector3(_cam.position.x, _cam.position.y, _cam.size)
-	if view == _last_view and _pending.is_empty():
-		return
-	_last_view = view
+	if view != _last_view:
+		_last_view = view
+		_in_sync = false
 
 	if not _pending.is_empty():
 		_add_sector(_pending.pop_front())
+		return
+	if _in_sync:
 		return
 
 	var want := _wanted_sectors()
@@ -188,6 +196,7 @@ func stream(_delta: float) -> void:
 		if not _loaded.has(key):
 			missing.append(key)
 	if missing.is_empty():
+		_in_sync = true
 		return
 
 	# Nearest first, then drained one per frame from _pending so a big camera
@@ -772,5 +781,22 @@ func load_region(cx: int, cy: int, r: int) -> void:
 ## streaming at all (--region= mode already finished its one-shot build), or
 ## the wanted set and the loaded set agree. The settle test main.gd's
 ## _maybe_screenshot and _actor_probe both pump frames against.
+##
+## Set membership, not counts: after a camera jump the backlog of the OLD
+## cell's sectors drains one per frame (stream() above), and a count-only
+## test passes spuriously the moment _loaded.size() happens to equal the new
+## wanted size while every loaded sector is still the old cell's -- a --shot
+## then fires on an unstreamed void (TSV row 614). _pending must be empty
+## AND every wanted key actually loaded.
 func is_settled() -> bool:
-	return not _streaming or _wanted_sectors().size() == _loaded.size()
+	if not _streaming:
+		return true
+	if not _pending.is_empty():
+		return false
+	var want := _wanted_sectors()
+	if want.size() != _loaded.size():
+		return false
+	for key in want:
+		if not _loaded.has(key):
+			return false
+	return true
