@@ -277,11 +277,10 @@ func _build_rig(models: Sacred.Models, entry: int) -> bool:
 		var raw: PackedByteArray = bl[g]["name"]
 		var stored := raw.get_string_from_utf8().strip_edges()
 		# Godot reserves ':' and '/' in bone names, rejects the empty name, and
-		# needs uniqueness for get_bone_by_name to mean anything. Every stored
-		# name in this format is empty (the 68-byte bone record has no name
-		# field), so in practice every name is generated -- see
-		# Sacred.Models.bones()'s `name` documentation for why the real strings
-		# in the file are deliberately not guessed at.
+		# needs uniqueness for get_bone_by_name to mean anything. Names are real
+		# since 05-10 (commit a415ac4): Sacred.Models.bone_names() resolves them
+		# via the two-hop DataExtension chain. The Bone_%d fallback below covers
+		# any entry whose name record is genuinely empty.
 		var nm := stored.replace(":", "_").replace("/", "_")
 		if nm.is_empty():
 			nm = "Bone_%d" % g
