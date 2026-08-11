@@ -266,6 +266,10 @@ func _ready() -> void:
 		_follow_probe()
 		return
 
+	if "--level-census" in argv:
+		_level_census(items)
+		return
+
 	if _has_crowd:
 		await _run_crowd(install, world, tex_pak, tiles, statics, mixed, items)
 		return
@@ -604,6 +608,62 @@ func _window_probe(world: Sacred.World) -> void:
 
 	print("window\tresult=%s" % ("MISMATCH" if mismatch else "PASS"))
 	get_tree().quit(1 if mismatch else 0)
+
+
+## --level-census (06-01 Task 1): re-runs the research pass's strings-level
+## family census through the real pipeline -- Sacred.Items' own `_name`
+## table, the same one the swap reads, never a second parse of the pak.
+## Regexes, re-stated here as named constants so a future regex edit cannot
+## silently change what each arm meant in THIS measurement:
+##   current         -- the exact pattern Items._init uses today.
+##   trailing-letter -- current with one optional trailing ASCII letter after
+##                      the final part number (the `_0_00A` / `_0_BODEN`
+##                      shape), so the price and coverage of the parser-
+##                      extension question are measured, not guessed.
+##   control         -- deliberately wrong: requires a THREE-digit part
+##                      number. It MUST differ from current on at least one
+##                      named family; a census whose control cannot disagree
+##                      certifies nothing -- printed as control_check.
+##                      (06-01 executor note: the plan's literal two-digit
+##                      variant was measured first and produced IDENTICAL
+##                      counts on all six families -- their parseable parts
+##                      are all already two-digit -- so it certified nothing
+##                      at family level and was replaced by this stricter
+##                      variant, satisfying the contract the plan itself
+##                      states: the control must be able to disagree.)
+const CENSUS_RX := {
+	"current": "_(\\d)(?:U(\\d))?_\\d+$",
+	"trailing-letter": "_(\\d)(?:U(\\d))?_\\d+[A-Za-z]?$",
+	"control": "_(\\d)(?:U(\\d))?_\\d\\d\\d+$",
+}
+const CENSUS_FAMILIES := [
+	"OZELT1", "BLACKSMITH", "KLOSTER_KAPELLE01",
+	"ARENA_V", "ARENA_DUNGEON", "KELLER_PENTA",
+]
+const CENSUS_RX_ORDER := ["current", "trailing-letter", "control"]
+
+func _level_census(items: Sacred.Items) -> void:
+	if items == null:
+		push_error("OpenSacred: --level-census needs items.pak")
+		return
+	var results := {}
+	for rxname in CENSUS_RX_ORDER:
+		var rx := RegEx.create_from_string(CENSUS_RX[rxname])
+		results[rxname] = items.census(CENSUS_FAMILIES, rx)
+		for r in results[rxname]:
+			print("census\t%s\t%s\tnamed=%d\tparseable=%d" % [
+				r["prefix"], rxname, r["named"], r["parseable"]])
+		var t := items.census_totals(rx)
+		print("census_total\t%s\tnamed=%d\tparseable=%d" % [
+			rxname, t["named"], t["parseable"]])
+	var differing: Array[String] = []
+	for i in CENSUS_FAMILIES.size():
+		var cur: Dictionary = results["current"][i]
+		var ctl: Dictionary = results["control"][i]
+		if ctl["parseable"] != cur["parseable"]:
+			differing.append(cur["prefix"])
+	print("control_check=%s\tdiffering=%s" % [
+		"PASS" if differing.size() > 0 else "FAIL", ",".join(differing)])
 
 
 ## --follow-probe: IsoCamera.follow_cell() fed a fixed cell carrying a

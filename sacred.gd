@@ -549,6 +549,42 @@ class Items extends RefCounted:
 	func name_of(sprite_id: int) -> String:
 		return _name.get(sprite_id, "")
 
+	## Prefix census over the one-way, last-wins `_name` table: for each prefix
+	## string, count how many stored names begin with it (`named`) and how many
+	## of those additionally match the caller-supplied regex (`parseable`).
+	## Returns one Dictionary per prefix {prefix, named, parseable}, in the
+	## caller's prefix order. This is a READER of the same table the swap uses,
+	## so its counts are pipeline truth, not a second parse. It carries the
+	## same caveat the strings-level measurement did, now stated at the
+	## pipeline level: duplicate sprite ids collapse to their last-seen name
+	## (see `_name`'s HONEST AMBIGUITY header), so a sprite counts once, under
+	## its last name.
+	func census(prefixes: Array, rx: RegEx) -> Array[Dictionary]:
+		var out: Array[Dictionary] = []
+		for p in prefixes:
+			var named := 0
+			var parseable := 0
+			for sid in _name:
+				var nm: String = _name[sid]
+				if not nm.begins_with(p):
+					continue
+				named += 1
+				if rx.search(nm) != null:
+					parseable += 1
+			out.append({"prefix": p, "named": named, "parseable": parseable})
+		return out
+
+	## {named, parseable} over ALL of `_name` under `rx`, so the corpus totals
+	## can be checked against the row-320 token-frequency census.
+	func census_totals(rx: RegEx) -> Dictionary:
+		var named := 0
+		var parseable := 0
+		for sid in _name:
+			named += 1
+			if rx.search(_name[sid]) != null:
+				parseable += 1
+		return {"named": named, "parseable": parseable}
+
 
 ## texture.pak entry -> Image. Type 4 is ARGB4444.
 ##
