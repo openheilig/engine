@@ -270,6 +270,14 @@ func _ready() -> void:
 		_level_census(items)
 		return
 
+	var family_scan := ""
+	for a in argv:
+		if a.begins_with("--family-scan="):
+			family_scan = a.trim_prefix("--family-scan=")
+	if family_scan != "":
+		_family_scan(world, statics, items, family_scan.split(",", false))
+		return
+
 	if _has_crowd:
 		await _run_crowd(install, world, tex_pak, tiles, statics, mixed, items)
 		return
@@ -664,6 +672,110 @@ func _level_census(items: Sacred.Items) -> void:
 			differing.append(cur["prefix"])
 	print("control_check=%s\tdiffering=%s" % [
 		"PASS" if differing.size() > 0 else "FAIL", ",".join(differing)])
+
+
+## --family-scan=PREFIX[,PREFIX...] (06-01 Task 2): world-wide sector
+## localisation by sprite-name prefix. Walks the whole sector grid in
+## ascending gy*100+gx order (two runs print byte-identical output), decodes
+## each cell's object handle exactly the way SectorView._build_objects does
+## (the `i * Sacred.CELL + 4` offset), resolves it through
+## Statics.get_object -> mixed.pak sprite id -> Items.name_of, and counts
+## names beginning with each prefix. Prints one `scan` fact line per
+## (prefix, sector) with a non-zero count, a `scan_progress` line every 500
+## populated sectors (a stuck run is distinguishable from a slow one), one
+## `arena_site` summary per prefix, a `coverage` line per hit sector (region
+## records at the site -- zero records means the player cannot path there),
+## and, when the run carries ARENA_V plus a cellar prefix, the
+## cellar_position verdict. A full grid pass is allowed to take minutes.
+func _family_scan(world: Sacred.World, statics: Sacred.Statics,
+		items: Sacred.Items, prefixes: PackedStringArray) -> void:
+	if statics == null or items == null:
+		push_error("OpenSacred: --family-scan needs static.pak and items.pak")
+		return
+	var by_sector := {}   # prefix -> {Vector2i: count}
+	for p in prefixes:
+		by_sector[p] = {}
+	var populated := 0
+	for gy in world.size.y:
+		for gx in world.size.x:
+			if not world.has_sector(gx, gy):
+				continue
+			populated += 1
+			if populated % 500 == 0:
+				print("scan_progress\tpopulated=%d" % populated)
+			var cells := world.entries(gx, gy)
+			if cells.is_empty():
+				continue
+			var here := {}   # prefix -> count, this sector only
+			for i in Sacred.SECT * Sacred.SECT:
+				var o := statics.get_object(cells.decode_u32(i * Sacred.CELL + 4))
+				if o.is_empty():
+					continue
+				var nm := items.name_of(o["type"])
+				for p in prefixes:
+					if nm.begins_with(p):
+						here[p] = here.get(p, 0) + 1
+			for p in prefixes:
+				if here.get(p, 0) > 0:
+					by_sector[p][Vector2i(gx, gy)] = here[p]
+					print("scan\tprefix=%s\tsector=%d,%d\tcount=%d" % [
+						p, gx, gy, here[p]])
+	# Per-prefix site summary: hit sectors ascending plus total sprites.
+	var hit_union := {}   # Vector2i -> true
+	for p in prefixes:
+		var sectors: Array = by_sector[p].keys()
+		sectors.sort_custom(func(a, b): return a.y * 100 + a.x < b.y * 100 + b.x)
+		var total := 0
+		var names: Array[String] = []
+		for s in sectors:
+			total += by_sector[p][s]
+			names.append("%d,%d" % [s.x, s.y])
+			hit_union[s] = true
+		print("arena_site\tprefix=%s\tsprites=%d\tsectors=[%s]" % [
+			p, total, ";".join(names)])
+	print("scan_summary\tprefixes=%s\thits=%d" % [",".join(prefixes), hit_union.size()])
+	# The disposition datum: does the cellar art stand at the arena, or
+	# somewhere disjoint? Only computable when the run carries both sides.
+	if "ARENA_V" in by_sector \
+			and ("ARENA_DUNGEON" in by_sector or "KELLER_PENTA" in by_sector):
+		var arena: Array = by_sector["ARENA_V"].keys()
+		var cellar: Array = []
+		for cp in ["ARENA_DUNGEON", "KELLER_PENTA"]:
+			if cp in by_sector:
+				cellar.append_array(by_sector[cp].keys())
+		cellar.sort_custom(func(a, b): return a.y * 100 + a.x < b.y * 100 + b.x)
+		var verdict := "absent"
+		if cellar.size() > 0:
+			verdict = "co-located"
+			for c in cellar:
+				var near := false
+				for a in arena:
+					if maxi(absi(c.x - a.x), absi(c.y - a.y)) <= 1:
+						near = true
+						break
+				if not near:
+					verdict = "disjoint"
+					break
+		var arena_names: Array[String] = []
+		arena.sort_custom(func(a, b): return a.y * 100 + a.x < b.y * 100 + b.x)
+		for s in arena:
+			arena_names.append("%d,%d" % [s.x, s.y])
+		var cellar_names: Array[String] = []
+		for s in cellar:
+			cellar_names.append("%d,%d" % [s.x, s.y])
+		print("cellar_position=%s\tarena_sectors=[%s]\tcellar_sectors=[%s]" % [
+			verdict, ";".join(arena_names), ";".join(cellar_names)])
+	# Region-record coverage at every hit sector: no records, no path.
+	var cov: Array = hit_union.keys()
+	cov.sort_custom(func(a, b): return a.y * 100 + a.x < b.y * 100 + b.x)
+	for s in cov:
+		var regions := Sacred.Regions.new(world.sector(s.x, s.y), s.x, s.y)
+		var recs: Array[String] = []
+		for r in regions.list:
+			recs.append("%d,%d %dx%d" % [
+				r["cell"].x, r["cell"].y, r["size"].x, r["size"].y])
+		print("coverage\tsector=%d,%d\tregions=%d\trecs=[%s]" % [
+			s.x, s.y, regions.list.size(), ";".join(recs)])
 
 
 ## --follow-probe: IsoCamera.follow_cell() fed a fixed cell carrying a
