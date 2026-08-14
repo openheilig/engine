@@ -1,5 +1,5 @@
 extends "res://check.gd"
-## Parity harness: prints the same facts analysis/tools/verify_ref.py prints,
+## Parity harness: prints the same facts analysis/tools/parity/verify_ref.py prints,
 ## so the Godot readers can be diffed against the Python decode byte-for-byte.
 ##
 ##   godot --headless --path godot-port --script res://verify.gd
@@ -16,7 +16,7 @@ const SECTORS := [[49, 49], [50, 50], [51, 51], [0, 15], [14, 19], [31, 24], [99
 ## to satisfy simultaneously with reusing SECTORS unmodified. Follows this
 ## file's own existing convention instead -- SECTORS/TEXTURES/MODELS are
 ## already three independent per-layer sample lists, mirrored verbatim on
-## analysis/tools/verify_ref.py -- rather than mutating the pre-existing
+## analysis/tools/parity/verify_ref.py -- rather than mutating the pre-existing
 ## SECTORS list and touching the `sector` fact line Phase 1-3 already rely
 ## on. 64,39 is the four-co-located-region landmark sacred.gd:389 and
 ## walkable.gd:35-36 already document; 4,37 and 52,51 (near the Task 1
@@ -26,10 +26,10 @@ const SECTORS := [[49, 49], [50, 50], [51, 51], [0, 15], [14, 19], [31, 24], [99
 const WALKABLE_SECTORS := [[64, 39], [4, 37], [52, 51], [0, 15], [14, 19], [31, 24], [99, 99]]
 const TEXTURES := [0, 1, 2, 1000, 5000, 20000]
 ## BAT.GRN, GLADIATOR.GRN, GLAD_SA5_SHOULDER.GRN -- mirrored verbatim in
-## analysis/tools/verify_ref.py's MODELS constant, 03-PATTERNS.md's sample.
+## analysis/tools/parity/verify_ref.py's MODELS constant, 03-PATTERNS.md's sample.
 const MODELS := [1, 589, 203]
 ## One attack, one idle, one run, two bone counts between them -- mirrored
-## verbatim in analysis/tools/verify_ref.py's MOTIONS constant (Plan 05-05
+## verbatim in analysis/tools/parity/verify_ref.py's MOTIONS constant (Plan 05-05
 ## Task 2).
 const MOTIONS := [2847, 2899, 2903]
 
@@ -128,7 +128,7 @@ func _init() -> void:
 	# Tag-walk layer only -- kind, derived length, tag count, triples md5.
 	# Never a hash of decoded mesh data (03-04-PLAN.md, Pitfall 8). The
 	# triples md5 is the simple tag,offset,length format Plan 03 specified
-	# (analysis/tools/grn_tagwalk.py's triples_md5 docstring), not
+	# (analysis/tools/formats/grn_tagwalk.py's triples_md5 docstring), not
 	# grnwalk.gd's own richer _triples_md5 (which also hashes each object's
 	# H1-declared length) -- that richer hash is grnwalk.gd's own diagnostic
 	# tool and is left untouched; this fact line is new code with its own,

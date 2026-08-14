@@ -1668,7 +1668,7 @@ class Models extends RefCounted:
 	# table. BOTH -1s are load-bearing -- dropping either one is the exact
 	# bug that once resolved bone 0 to a light object (findings row 582).
 	# Reimplemented here in GDScript house style from this project's own
-	# analysis/tools/grn_bonenames.py (not from any outside reader; D-21/D-23
+	# analysis/tools/formats/grn_bonenames.py (not from any outside reader; D-21/D-23
 	# reserve that treatment for Iris1/AoM only).
 	## StringTable (0xCA5E0200) inside the SECTION_OFF_MESH node directory --
 	## a different node than the identically-tagged 12-byte fixed leaf
@@ -2475,7 +2475,7 @@ class Models extends RefCounted:
 	##
 	## `desync` displaces each record's computed base offset by that many
 	## bytes before its count fields are read -- the Godot-side twin of
-	## analysis/tools/grn_tagwalk.py's clip_decode(desync=) (Plan 05-05 Task
+	## analysis/tools/formats/grn_tagwalk.py's clip_decode(desync=) (Plan 05-05 Task
 	## 2's --clip-falsify=N counterfactual). 0 (the default) is every
 	## existing caller's behaviour, unchanged.
 	func clip(entry: int, desync: int = 0) -> Dictionary:
