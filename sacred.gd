@@ -69,8 +69,15 @@ const CFG := "user://openheilig.cfg"
 ## line, then user://openheilig.cfg (falling back to the pre-rename
 ## user://opensacred.cfg), then the workspace sibling. Returns "" if none of
 ## them holds a real install.
+##
+## A path given with --install= is remembered, so it is needed once and not on
+## every run. Nothing else writes the config.
 static func find_install() -> String:
-	for candidate in [_cli_install(), _cfg_install(), _sibling_install()]:
+	var cli := _cli_install()
+	if cli != "" and is_install(cli):
+		save_install(cli)
+		return cli
+	for candidate in [_cfg_install(), _sibling_install()]:
 		if candidate != "" and is_install(candidate):
 			return candidate
 	return ""
