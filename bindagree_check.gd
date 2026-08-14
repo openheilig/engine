@@ -1,4 +1,4 @@
-extends SceneTree
+extends "res://check.gd"
 ## 05-10 Task 2: the last unverified premise of the one-shared-skeleton
 ## design (05-06-SUMMARY.md's "Next Phase Readiness"; the plan's own
 ## second halt). Bone names now resolve (05-10 Task 1's bindname chain),
@@ -108,18 +108,23 @@ const PAIRS := [
 	[589, 207],   ## GLAD_SA6_HELM.GRN
 ]
 const CONTROL := [589, 1]      ## BAT.GRN -- unrelated model, not a piece
+## The tolerance the LOCAL pass uses, and the only one in this file. It is the
+## same 0.01 rig_check.gd and Sacred.Rigs use, stated here rather than tuned:
+## real pairs measure 0.79..0.97 of bones inside it, wrong-rig pairs ~0.04.
+const LOCAL_WITHIN := 0.01
 
 
 func _init() -> void:
+	super()
 	var install := Sacred.find_install()
 	if install == "":
 		printerr("bindagree_check: no install found; pass --install=/path/to/install")
-		quit(1)
+		finish(1)
 		return
 	var pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 	if not pak.is_open():
 		printerr("bindagree_check: cannot open models.pak")
-		quit(1)
+		finish(1)
 		return
 	var models := Sacred.Models.new(pak)
 
@@ -128,14 +133,14 @@ func _init() -> void:
 		var r := _pair_check(models, pair[0], pair[1])
 		if r.is_empty():
 			printerr("bindagree_check: pair base=%d piece=%d could not be measured" % [pair[0], pair[1]])
-			quit(1)
+			finish(1)
 			return
 		helmet_results.append(r)
 
 	var control := _pair_check(models, CONTROL[0], CONTROL[1])
 	if control.is_empty():
 		printerr("bindagree_check: control pair base=%d piece=%d could not be measured" % [CONTROL[0], CONTROL[1]])
-		quit(1)
+		finish(1)
 		return
 
 	# The control must discriminate: match STRICTLY FEWER names and diverge
@@ -165,14 +170,14 @@ func _init() -> void:
 		var rn := _pair_check_normalized(models, pair[0], pair[1])
 		if rn.is_empty():
 			printerr("bindagree_check: normalized pair base=%d piece=%d could not be measured (no unique structural root)" % [pair[0], pair[1]])
-			quit(1)
+			finish(1)
 			return
 		helmet_norm.append(rn)
 
 	var control_norm := _pair_check_normalized(models, CONTROL[0], CONTROL[1])
 	if control_norm.is_empty():
 		printerr("bindagree_check: normalized control base=%d piece=%d could not be measured (no unique structural root)" % [CONTROL[0], CONTROL[1]])
-		quit(1)
+		finish(1)
 		return
 
 	var norm_discriminates := true
@@ -185,11 +190,77 @@ func _init() -> void:
 
 	if not norm_discriminates:
 		print("bindagreenorm\tverdict=REFUTED\treason=control-matches-as-well-as-piece")
-		quit(1)
+	else:
+		print("bindagreenorm\tverdict=CONFIRMED")
+
+	# --- LOCAL re-measure, appended, and again NOT a revision of either verdict
+	# above. Both of those compare WORLD bind transforms -- raw, then
+	# root-normalized -- and row 739 measured that this is the wrong QUANTITY
+	# for this question, not a wrong answer to it: composing each file's own
+	# chain accumulates every per-bone difference and bakes in a root chain the
+	# two files do not share. Compared LOCALLY, bone by bone, with the chain
+	# never composed, the SAME two helmet pairs and the SAME control are
+	# measured a third way here.
+	#
+	# This is deliberately the two pairs that produced the original refutation
+	# rather than a broad sample: equip_check.gd already carries the broad local
+	# measurement (301 pieces across 6 families, row 741), and restating it here
+	# would be a second spelling of one rule. What this adds is the local answer
+	# ON THE EXACT CASE that refuted, side by side with the two world-space
+	# answers, so all three are readable in one run.
+	#
+	# The EXIT CODE follows this verdict, because it is the one measuring the
+	# right quantity. The two world-space verdicts keep printing exactly as they
+	# always have -- they are the rows 605/606 record and are not restated,
+	# re-scored or removed.
+	var helmet_local: Array[Dictionary] = []
+	for pair in PAIRS:
+		var rl := _pair_check_local(models, pair[0], pair[1])
+		if rl.is_empty():
+			printerr("bindagree_check: local pair base=%d piece=%d could not be measured" % [pair[0], pair[1]])
+			finish(1)
+			return
+		helmet_local.append(rl)
+
+	var control_local := _pair_check_local(models, CONTROL[0], CONTROL[1])
+	if control_local.is_empty():
+		printerr("bindagree_check: local control base=%d piece=%d could not be measured" % [CONTROL[0], CONTROL[1]])
+		finish(1)
 		return
 
-	print("bindagreenorm\tverdict=CONFIRMED")
-	quit(0)
+	# TWO clauses: the control must match strictly fewer names AND agree
+	# strictly less. `within` is the fraction of matched bones whose LOCAL rest
+	# origins land inside LOCAL_WITHIN; a wrong-rig control scores near zero.
+	#
+	# HUMAN DECISION 2026-08-14, recorded because it changed a rule AFTER that
+	# rule had already returned REFUTED (autoresearch row 755, and row 756 for
+	# the authorization). The first version of this pass carried a third clause
+	# copied mechanically from the world-space passes above -- control must also
+	# have a strictly LARGER max. It failed: the control's maxlocal 39.566605 is
+	# SMALLER than either helmet's 71.689812 / 74.358704, because the control
+	# matches 25 bones where the helmets match 60 and 61 and so has fewer
+	# chances to contain an outlier. `max` reports the worst single bone across
+	# unequal sample sizes, which is not agreement.
+	#
+	# The two-clause form is not an invention to make this pass: it is what
+	# rig_check.gd (within-fraction, 10x ratio) and equip_check.gd (median own
+	# > 0.80 and > 5x cross) already use, neither with a max clause. maxlocal is
+	# still MEASURED and still printed on every fact line above -- it just does
+	# not decide the verdict.
+	var local_discriminates := true
+	for rl in helmet_local:
+		if not (control_local["matched"] < rl["matched"]
+				and control_local["within"] < rl["within"]):
+			local_discriminates = false
+			break
+
+	if not local_discriminates:
+		print("bindagreelocal\tverdict=REFUTED\treason=control-agrees-as-well-as-piece")
+		finish(1)
+		return
+
+	print("bindagreelocal\tverdict=CONFIRMED\tquantity=local-rest-origin\tsee=rows-739-741")
+	finish(0)
 
 
 ## Measures one (base, piece) pair, prints its `bindagree` fact line, and
@@ -369,3 +440,54 @@ func _pair_check_normalized(models: Sacred.Models, base: int, piece: int) -> Dic
 		"matched": matched, "unmatched": unmatched, "unmatched_weighted": unmatched_weighted,
 		"maxorigin": maxorigin, "maxbasis": maxbasis, "worstbone": worstbone,
 	}
+
+## Measures one (base, piece) pair the way row 739 established is the right
+## quantity: each bone's OWN local rest transform, matched by NAME, with
+## neither side's parent chain composed. Prints a `bindagreelocal` fact line
+## and returns {matched, within, maxlocal}. Same refusal posture as
+## _pair_check: an empty Dictionary rather than a guess.
+##
+## Names repeated within either side's own bone list are excluded from matching
+## entirely, exactly as the two world-space passes do -- refuse rather than
+## guess, so all three passes match the same bone set.
+func _pair_check_local(models: Sacred.Models, base: int, piece: int) -> Dictionary:
+	var bb := models.bones(base)
+	var pb := models.bones(piece)
+	if bb.is_empty() or pb.is_empty():
+		return {}
+	var base_local := _unique_local(bb)
+	var piece_local := _unique_local(pb)
+	var matched := 0
+	var within := 0
+	var maxlocal := 0.0
+	for nm: String in piece_local:
+		if not base_local.has(nm):
+			continue
+		matched += 1
+		var d: float = (piece_local[nm] as Vector3).distance_to(base_local[nm])
+		maxlocal = maxf(maxlocal, d)
+		if d <= LOCAL_WITHIN:
+			within += 1
+	if matched == 0:
+		return {}
+	var frac := float(within) / float(matched)
+	print("bindagreelocal\tbase=%d\tpiece=%d\tmatched=%d\twithin=%d (%.4f)\tmaxlocal=%.6f" % [
+		base, piece, matched, within, frac, maxlocal])
+	return {"matched": matched, "within": frac, "maxlocal": maxlocal}
+
+
+## name -> local rest ORIGIN, with any name that occurs more than once in this
+## bone list dropped entirely.
+func _unique_local(bones: Array[Dictionary]) -> Dictionary:
+	var seen: Dictionary[String, int] = {}
+	var out: Dictionary[String, Vector3] = {}
+	for b in bones:
+		var nm: String = (b["name"] as PackedByteArray).get_string_from_utf8()
+		if nm == "":
+			continue
+		seen[nm] = int(seen.get(nm, 0)) + 1
+		out[nm] = (b["rest"] as Transform3D).origin
+	for nm: String in seen:
+		if seen[nm] > 1:
+			out.erase(nm)
+	return out

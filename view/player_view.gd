@@ -56,28 +56,41 @@ var _scale := 1.0
 ## top of whatever the previous update() left behind.
 var _root_bones: PackedInt32Array = PackedInt32Array()
 var _root_rest_origins: Array[Vector3] = []
+var _root_rest_rotations: Array[Quaternion] = []
+## Reference rig height in model units -- see the scale block in setup().
+const REF_HEIGHT := 73.0
+## Preloaded by PATH rather than referenced by class_name -- see the note at
+## the top of rig_placement.gd.
+const RigPlacementScript := preload("res://view/rig_placement.gd")
+## Applies the placement after the animation; null when the rig has no skeleton.
+var _placement: SkeletonModifier3D = null
 
 
 ## Resolves MODEL_NAME through Sacred.Models.index_of (never a hardcoded
 ## entry number) and builds it via ModelView, framing suppressed -- the
 ## streamed world already has its own IsoCamera and does not want a second,
 ## competing Camera3D/DirectionalLight3D. Non-fatal on any failure.
-func _init(models: Sacred.Models) -> void:
-	model_index = models.index_of(MODEL_NAME)
+## `model_name` defaults to the hero, so every existing call site is unchanged.
+## Creatures pass their own mesh, resolved through the spawn chain (creature id
+## -> Items.name_of -> this): the placement, scaling and depth-sort rules above
+## are identical for a wolf and for the hero, and a second class restating them
+## would be a rival spelling of the same invariants.
+func _init(models: Sacred.Models, model_name: String = MODEL_NAME) -> void:
+	model_index = models.index_of(model_name)
 	if model_index < 0:
-		push_warning("PlayerView: %s not found in models.pak -- drawing nothing" % MODEL_NAME)
+		push_warning("PlayerView: %s not found in models.pak -- drawing nothing" % model_name)
 		return
 
 	var mv := ModelView.new()
 	if not mv.setup(models, model_index, false):
-		push_warning("PlayerView: %s failed to build -- drawing nothing" % MODEL_NAME)
+		push_warning("PlayerView: %s failed to build -- drawing nothing" % model_name)
 		mv.free()
 		return
 
 	_skeleton = mv.get_node_or_null("Skeleton")
 	_mesh = mv.get_node_or_null("Skeleton/Mesh") if _skeleton != null else mv.get_node_or_null("Mesh")
 	if _mesh == null or _mesh.mesh == null:
-		push_warning("PlayerView: %s built with no Mesh node -- drawing nothing" % MODEL_NAME)
+		push_warning("PlayerView: %s built with no Mesh node -- drawing nothing" % model_name)
 		mv.free()
 		return
 
@@ -91,9 +104,28 @@ func _init(models: Sacred.Models) -> void:
 	# scale, not the model's own untouched size", and the upgrade path is a
 	# retail capture through the same autopilot.c route that recovered
 	# IsoCamera's ZOOM_SCALES.
-	var natural_height: float = (mv.transform * _mesh.mesh.get_aabb()).size.y
-	if natural_height > 0.0:
-		_scale = SectorView.SORTCUBE_PX / natural_height
+	# ONE GLOBAL SCALE (row 797). This DIVIDED by the rig's own AABB height
+	# until now, which forced every creature to the same drawn height and was
+	# the single root cause of two defects chased separately all session: the
+	# wolf drawn as tall as a humanoid and longer than a bear (it takes the
+	# largest factor precisely because it is the shortest), and the elf, tallest
+	# and slimmest, shrunk hardest into a sliver. Measured against retail
+	# (row 796): the wolf stands at 0.66 of the wood elf's height there, and the
+	# port forced 1.00.
+	#
+	# A single factor preserves each model's own units, which is what retail
+	# evidently does: the wolf/elf ratio then falls straight out of the AABBs at
+	# 40.2/72.1 = 0.56, near the measured 0.66 and nothing like 1.00.
+	#
+	# REF_HEIGHT is the humanoid cluster this corpus measures (SOLDIER 73.4,
+	# BEAR 73.6, WALDELFE_DARK 72.1, NOBLE_FEM 64.9), so humanoids keep roughly
+	# the size the port already drew them at and only RELATIVE sizes change.
+	# ponytail: that is a relative calibration, not an absolute one -- no retail
+	# measurement pins the on-screen size of any single model yet, and the
+	# residual 0.56 against 0.66 is unexplained (reading error, the wolves' idle
+	# crouch, or a real per-species scale). Do NOT tune REF_HEIGHT to close that
+	# gap; re-measure the ratio as a CHECK instead.
+	_scale = SectorView.SORTCUBE_PX / REF_HEIGHT
 
 	# Transparent pass, like the object sprites this is sorted against
 	# (_build_sortcube's constraint 2); depth_draw_mode still writes the
@@ -109,6 +141,20 @@ func _init(models: Sacred.Models) -> void:
 			if _skeleton.get_bone_parent(i) == -1:
 				_root_bones.append(i)
 				_root_rest_origins.append(_skeleton.get_bone_rest(i).origin)
+				_root_rest_rotations.append(
+					_skeleton.get_bone_rest(i).basis.get_rotation_quaternion().normalized())
+		# Placement is applied through a SkeletonModifier3D rather than written
+		# here, so it lands AFTER the AnimationMixer each frame. Writing it
+		# directly worked only while the world posed static skeletons; once a
+		# clip drove the same bones the two writes fought and the mesh came out
+		# splayed (row 758). update() now just feeds this node.
+		_placement = RigPlacementScript.new()
+		_placement.name = "Placement"
+		_placement.root_bones = _root_bones
+		_placement.root_rest_origins = _root_rest_origins
+		_placement.root_rest_rotations = _root_rest_rotations
+		_placement.rig_scale = _scale
+		_skeleton.add_child(_placement)
 
 	node = mv
 
@@ -124,7 +170,7 @@ func update(cell: Vector2) -> void:
 	var ground_z := SectorView.ground_depth(p)
 	_mesh.sorting_offset = ground_z
 
-	if _skeleton == null or _root_bones.is_empty():
+	if _skeleton == null or _root_bones.is_empty() or _placement == null:
 		return
 	# The world-space placement, divided back through the rig's own
 	# coordinate-basis transform (model_view.gd's own idiom in _frame(): work
@@ -132,12 +178,15 @@ func update(cell: Vector2) -> void:
 	# space, so the basis rotation does not carry it off-target) -- never
 	# through the node's position, per the class doc above.
 	var world_offset := Vector3(p.x, p.y, ground_z)
-	var local_offset := node.transform.basis.inverse() * world_offset
-	for k in _root_bones.size():
-		var i: int = _root_bones[k]
-		var rest_origin: Vector3 = _root_rest_origins[k]
-		_skeleton.set_bone_pose_scale(i, Vector3.ONE * _scale)
-		_skeleton.set_bone_pose_position(i, rest_origin * _scale + local_offset)
+	_placement.local_offset = node.transform.basis.inverse() * world_offset
+
+
+## Turns the rig about its own vertical, in radians. Placement is unaffected --
+## see rig_placement.gd's `yaw` for why facing is a bone write and not a node
+## transform. No-op on a rig that failed to build.
+func set_yaw(radians: float) -> void:
+	if _placement != null:
+		_placement.yaw = radians
 
 
 ## Visibility toggle, independent of update()'s placement logic -- a caller

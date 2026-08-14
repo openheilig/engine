@@ -38,7 +38,28 @@ const CAM_MARGIN := 1.15
 const CAM_DIR := Vector3(0.55, 0.35, 1.0)
 ## Key light direction, deliberately off the camera axis so surfaces facing
 ## the viewer still shade and the form reads.
+## Whether a clip's POSITION tracks are bound. FALSE, measured (row 760): a
+## clip's position track is authored against the CLIP's parent chain, and the
+## two files do not share the chain above Bip01 -- a model carries a
+## coordinate-alignment bone there that the clip has no node for (row 609).
+## Applying such a track to the model's Bip01 displaces everything below it,
+## which is what carried a rig bodily out of its own camera framing in the
+## viewer and read as splayed limbs in the streamed world. Rotation tracks are
+## unaffected: a rotation is expressed in the bone's OWN space and does not
+## care what sits above it.
+##
+## THE COST, stated rather than discovered later: any authored TRANSLATION in a
+## clip is now dropped, so a lunge, a hop or a step that moved the body will
+## play in place. Retail's own root motion, if it has any, is not reproduced.
+## The upgrade path is per-model alignment-bone compensation (option (b) of row
+## 760), which needs that bone identified per model rather than only for the
+## one entry row 609 measured.
+const BIND_POSITION_TRACKS := false
+
 const LIGHT_DIR := Vector3(-0.4, -0.8, -0.45)
+## Key light strength, shared with main.gd's streamed-world rig light so a
+## creature standing in the world is lit exactly as --grn= previews it.
+const KEY_ENERGY := 1.5
 
 var vertex_count := 0
 var triangle_count := 0
@@ -82,6 +103,7 @@ var _local_to_bind: Array[PackedInt32Array] = []
 ## resolved a name at all) for every bone build_animation() could not match.
 var _anim_player: AnimationPlayer = null
 var _built_anim: Animation = null
+var _anim_frozen := false
 var anim_bound := 0
 var anim_tracks := 0
 var anim_length := 0.0
@@ -471,7 +493,7 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 		var path := NodePath("%s:%s" % [_skeleton.name, nm])
 		var times_pos: PackedFloat32Array = r["times_pos"]
 		var positions: PackedVector3Array = r["positions"]
-		if times_pos.size() > 0:
+		if times_pos.size() > 0 and BIND_POSITION_TRACKS:
 			var pt := anim.add_track(Animation.TYPE_POSITION_3D)
 			anim.track_set_path(pt, path)
 			for i in times_pos.size():
@@ -482,6 +504,30 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 		if times_rot.size() > 0:
 			var rt := anim.add_track(Animation.TYPE_ROTATION_3D)
 			anim.track_set_path(rt, path)
+			# RETARGET, do not transplant (row 766). A clip's key is expressed
+			# against the CLIP's own rest, and the clip and the model do not
+			# share one: row 739 measured their local rests agreeing on only 47
+			# of 60 bones, worst case 6.74. Writing the key straight onto the
+			# model's bone therefore replaces that bone's rest orientation with a
+			# foreign one, and because a parent's error is inherited by its whole
+			# limb the displacement accumulates outward -- measured at 84.71
+			# units on a rig 110 units wide, AT t=0, where the pose is supposed
+			# to BE the bind pose.
+			#
+			# So take the clip's motion RELATIVE to the clip's own rest and
+			# replay it on the model's rest:
+			#
+			#   pose = model_rest * (clip_rest^-1 * key)
+			#
+			# At t=0 a clip's first key is its rest (measured: 5855 of 5916
+			# unambiguous records), so the delta is the identity and the pose is
+			# exactly the bind pose -- the property that was violated before and
+			# that anim_check.gd now pins.
+			var clip_rest: Quaternion = ((clip_bone_list[bi]["rest"] as Transform3D)
+				.basis.get_rotation_quaternion()).normalized()
+			var model_rest: Quaternion = (_skeleton.get_bone_rest(skel_idx)
+				.basis.get_rotation_quaternion()).normalized()
+			var retarget := model_rest * clip_rest.inverse()
 			for i in times_rot.size():
 				# clip() only checks unit-length to within ANIM_QUAT_EPS
 				# (0.07 -- a decode-validity discriminator, not a precision
@@ -490,7 +536,8 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 				# frame otherwise; normalized() re-scales the SAME
 				# already-accepted rotation rather than changing what was
 				# decoded or loosening what clip() itself checks.
-				anim.rotation_track_insert_key(rt, times_rot[i], (rotations[i] as Quaternion).normalized())
+				anim.rotation_track_insert_key(rt, times_rot[i],
+					(retarget * (rotations[i] as Quaternion).normalized()).normalized())
 			tracks += 1
 
 	return {"animation": anim, "bound": bound, "tracks": tracks, "unbound_names": unbound}
@@ -542,6 +589,13 @@ func play_clip(models: Sacred.Models, clip_entry: int, falsify: String = "") -> 
 func sample_bone_pose(bone_name: String) -> Transform3D:
 	if _skeleton == null:
 		return Transform3D.IDENTITY
+	# THE GUARD (row 784). Reading a pose while the mixer is still advancing
+	# yields whatever frame the clip drifted to, not the pose the caller asked
+	# for -- and it does so silently, which is exactly how four rows of findings
+	# were built on an artefact. freeze_anim() is the sanctioned setup.
+	if _anim_player != null and _anim_player.is_playing() and not anim_frozen:
+		push_error("ModelView.sample_bone_pose: the AnimationPlayer is still advancing. Call freeze_anim(t) first -- a pose read against a running player is a read of some later frame (autoresearch row 784).")
+		return Transform3D.IDENTITY
 	var nm := bone_name.replace(":", "_").replace("/", "_")
 	var idx := _skeleton.find_bone(nm)
 	if idx == -1:
@@ -555,7 +609,40 @@ func sample_bone_pose(bone_name: String) -> Transform3D:
 ## A no-op when play_clip() has not been called yet.
 func seek_anim(t: float) -> void:
 	if _anim_player != null:
+		# NOT a freeze. The player keeps advancing, which is what --creatures
+		# wants (it seeks to desynchronise loops). Anything that then READS the
+		# posed skeleton must use freeze_anim() instead -- see row 784.
+		_anim_frozen = false
 		_anim_player.seek(t, true)
+
+
+## Freezes playback and parks the clip at `t`. THE ONLY sanctioned setup for
+## reading a posed skeleton.
+##
+## WHY THIS EXISTS (autoresearch row 784). play_clip() starts PLAYBACK. A
+## measurement that seeks to 0 and then reads bone poses on the next frame is
+## reading frame 1, because the AnimationMixer advanced ~16ms in between. Four
+## rows of "bind defect" findings -- 43 meshes off bind, a wolf model defect
+## proven across five clips, nine surviving suspects -- were all that artefact,
+## and every one had to be withdrawn. Frozen, the same rig measures 0.0109
+## worst-case where running it measured 0.5259.
+##
+## The pose still lands one frame later (the mixer writes during the frame), so
+## a caller reads on the frame AFTER this call -- but with speed_scale at 0 that
+## frame is still `t`.
+func freeze_anim(t: float) -> void:
+	if _anim_player == null:
+		return
+	_anim_player.speed_scale = 0.0
+	_anim_player.seek(t, true)
+	_anim_frozen = true
+
+
+## True once freeze_anim() has parked the clip and nothing has un-parked it.
+## Read by sample_bone_pose()'s guard and by anim_freeze_check.
+var anim_frozen: bool:
+	get:
+		return _anim_frozen and _anim_player != null and is_equal_approx(_anim_player.speed_scale, 0.0)
 
 
 ## True once the surface exists. There is no streaming here, so this is
@@ -612,7 +699,7 @@ func _frame(box: AABB) -> void:
 
 	var key := DirectionalLight3D.new()
 	key.name = "Key"
-	key.light_energy = 1.5
+	key.light_energy = KEY_ENERGY
 	key.transform = inv * Transform3D(Basis(), centre).looking_at(
 		centre + LIGHT_DIR.normalized(), Vector3.UP)
 	add_child(key)
@@ -625,3 +712,53 @@ func _aspect() -> float:
 	var w := float(ProjectSettings.get_setting("display/window/size/viewport_width", 1152))
 	var h := float(ProjectSettings.get_setting("display/window/size/viewport_height", 648))
 	return maxf(w, 1.0) / maxf(h, 1.0)
+
+## NOT CALLED. Retained as measured data, not as dead code to revive blindly --
+## see row 792 for why neutralising this bone is the wrong lever.
+##
+## The Granny bone index of a COORDINATE-ALIGNMENT bone, or -1.
+##
+## Shape: an intermediate bone sitting between `__Root` and the rig's root
+## `Bip01`, carrying a rotation that no clip drives (no clip has a node for it,
+## row 609). 68 of 124 creature meshes hang Bip01 straight off __Root; 29 have
+## an intermediate, and on BEAR, WOLF, RABBIT and RED_DEER that intermediate is
+## `Root` with an IDENTITY rotation, so it changes nothing and those meshes
+## render correctly. Seven carry `Root` at +90 about Z -- the whole wood/dark
+## elf family, Waldelfe_dark, dryadin_01/02, DARKELVENPC/2, DarkElve2b and
+## DarkElve_slave -- and FLIGHT_LIZARD carries +90 about X.
+##
+## WHY IT IS NEUTRALISED (row 790, and this is a correction of row 771). The
+## rotation IS in the file, and row 771 concluded from that alone that
+## canonical-first meant reproducing it. Retail says otherwise: captured beside
+## its own wolves, retail draws this character as a full-width humanoid facing
+## the camera, while the port drew a thin edge-on sliver -- the peers' chain
+## nets -90 about Z and the elf's nets 0, and that 90 degrees is the entire
+## difference. Reproducing retail's behaviour is the rule; reproducing our own
+## composition of authored data that retail evidently does not compose is not.
+##
+## Deliberately narrow: it fires only for an intermediate whose parent is
+## `__Root` and whose child is the Bip01 root, so StachelalbaufBlutschrecke
+## (Bone01 at -104 under `Haupt-Bone`) is left alone -- that is a different
+## shape and has no oracle behind it yet.
+func _align_bone(bl: Array[Dictionary]) -> int:
+	var names := PackedStringArray()
+	for b in bl:
+		names.append((b["name"] as PackedByteArray).get_string_from_utf8().strip_edges())
+	var bip := -1
+	for i in names.size():
+		if names[i].begins_with("Bip01") and not names[i].contains(" "):
+			bip = i
+			break
+	if bip < 0:
+		return -1
+	var p: int = bl[bip]["parent_effective"]
+	if p < 0 or p >= names.size() or names[p] == "__Root":
+		return -1
+	var gp: int = bl[p]["parent_effective"]
+	if gp < 0 or gp >= names.size() or names[gp] != "__Root":
+		return -1
+	# An identity intermediate needs no correction and reports as none, so the
+	# meshes that already render correctly take exactly the path they took
+	# before this existed.
+	var q := ((bl[p]["rest"] as Transform3D).basis.get_rotation_quaternion()).normalized()
+	return -1 if absf(q.w) > 0.9999 else p

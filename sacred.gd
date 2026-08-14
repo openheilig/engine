@@ -118,6 +118,14 @@ static func inflate(z: PackedByteArray, out_size: int) -> PackedByteArray:
 ## A .pak archive, read on demand. texture.pak is 820 MB -- nothing here ever
 ## slurps the whole file.
 class Pak extends RefCounted:
+	## Magic allowlist (TOOLCHAIN-AUDIT-2026-08-12): only these signatures are
+	## the generic {u32 count @4, 12-byte index @0x100} container. Files with
+	## other magics (tiles ISO, triggers TRG, tmp caches) must use their own
+	## readers; routing them here silently misreads the index.
+	const ALLOWED_MAGIC := {
+		"SND": true, "TEX": true, "MDL": true, "MIX": true, "ITM": true,
+		"OBJ": true, "CIF": true, "WPN": true, "MHP": true, "SPF": true,
+	}
 	var offsets := PackedInt64Array()
 	var sizes := PackedInt64Array()
 	## Index record's first u32 (kind/flags). Added for models.pak, whose 4993
@@ -131,6 +139,13 @@ class Pak extends RefCounted:
 		_f = FileAccess.open(path, FileAccess.READ)
 		if _f == null:
 			push_error("Sacred.Pak: cannot open %s (%s)" % [path, error_string(FileAccess.get_open_error())])
+			return
+		# Fourth byte is the format version (TEX\x03, ITM\x05, ...); compare
+		# only the three-letter signature.
+		var magic := _f.get_buffer(4).get_string_from_ascii().substr(0, 3)
+		if not ALLOWED_MAGIC.has(magic):
+			push_error("Sacred.Pak: %s has non-PAK magic %s -- use the dedicated reader" % [path, magic])
+			_f = null
 			return
 		_f.seek(4)
 		var n := _f.get_32()
@@ -171,17 +186,53 @@ class Pak extends RefCounted:
 
 
 ## tiles.pak: 64-byte records, one per tile id, giving the texture.pak id.
+## ISO magic, NOT a generic PAK container -- read directly from the file
+## rather than routing through Sacred.Pak (TOOLCHAIN-AUDIT-2026-08-12).
 class Tiles extends RefCounted:
+	const RECORD := 64
+
+	## The {flags, offset, size} index triple, 12 bytes per tile, that sits at
+	## INDEX_OFF and runs exactly up to the first record: measured, not assumed,
+	## 0x100 + 90132 * 12 == 1081840 == the first record offset this class
+	## already reads below. Kept so entry_offset()/entry_size() report what the
+	## file SAYS rather than a stride this class assumed.
+	const INDEX_OFF := 0x100
+	const INDEX_REC := 12
+
 	var _rec: PackedByteArray
+	var _idx: PackedByteArray
 	var _n: int
 
-	func _init(pak: Sacred.Pak) -> void:
-		_n = pak.count()
+	func _init(path: String) -> void:
+		var f := FileAccess.open(path, FileAccess.READ)
+		if f == null:
+			push_error("Sacred.Tiles: cannot open %s (%s)" % [path, error_string(FileAccess.get_open_error())])
+			return
+		f.seek(4)
+		_n = f.get_32()
+		# Tile records begin at the offset field of the first index triple
+		# at 0x100 ({flags, offset, size}) -- the same value the original
+		# Sacred.Pak entry_offset(0) exposed.
+		f.seek(INDEX_OFF)
+		_idx = f.get_buffer(_n * INDEX_REC)
+		var start := _idx.decode_u32(4) if _idx.size() >= 12 else 0
+		f.seek(start)
 		# 90132 * 64 B = 5.8 MB -- small enough to keep resident, unlike texture.pak.
-		_rec = pak.read_at(pak.entry_offset(0), _n * 64)
+		_rec = f.get_buffer(_n * RECORD)
 
 	func count() -> int:
 		return _n
+
+	## Byte offset and length of tile `i` AS THE INDEX RECORDS THEM. verify.gd
+	## prints these so the tiles.pak fact line can be diffed against
+	## verify_ref.py, whose pak_index() reads the same triples -- Sacred.Pak
+	## itself refuses this file (ISO magic, dedicated reader), so without these
+	## the Godot side simply could not emit that line.
+	func entry_offset(i: int) -> int:
+		return _idx.decode_u32(i * INDEX_REC + 4) if i >= 0 and i < _n else 0
+
+	func entry_size(i: int) -> int:
+		return _idx.decode_u32(i * INDEX_REC + 8) if i >= 0 and i < _n else 0
 
 	func texture_id(tile_id: int) -> int:
 		return _rec.decode_u32(tile_id * 64 + 0x20)
@@ -285,6 +336,31 @@ class Statics extends RefCounted:
 	func count() -> int:
 		return _pak.count()
 
+	## Offset of nextStaticId inside the 64-byte record. A cell's WldxEntry +0x04
+	## names only the HEAD of a chain of statics placed at that spot; the rest
+	## hang off this field and were invisible to this port until 2026-08-13.
+	## Layout from Resacred-old rs_file.h:322-350 (PakStatic, #pragma pack(1),
+	## static_assert sizeof == 64), whose +0x04 itemTypeId and +0x0e/+0x12
+	## worldX/worldY already match what this class reads.
+	const NEXT_OFF := 0x1f
+
+	## Every static in the chain starting at `i`, head first, as get_object()
+	## dictionaries. Empty if the head is absent. Terminates on a zero/out-of-
+	## range link and on a repeat, so a corrupt file cannot spin here -- the
+	## longest real chain measured at sector 50,39 is 14.
+	func chain(i: int) -> Array[Dictionary]:
+		var out: Array[Dictionary] = []
+		var seen: Dictionary[int, bool] = {}
+		var cur := i
+		while cur > 0 and cur < _pak.count() and not seen.has(cur):
+			seen[cur] = true
+			var o := get_object(cur)
+			if o.is_empty():
+				break
+			out.append(o)
+			cur = _pak.blob(cur).decode_u32(NEXT_OFF)
+		return out
+
 	## {type, flags, pos} for a static index, or an empty Dictionary if absent.
 	func get_object(i: int) -> Dictionary:
 		if i <= 0 or i >= _pak.count():
@@ -380,6 +456,9 @@ class Mixed extends RefCounted:
 ##   0x00 empty 143806   0xd1 wall 82866   0xd0 21064   0xe0 18580
 ##   0xd2 floor  16302   0xda step  2420   0xe2  1802   0xd9 door 566   0xe9 385
 ##
+## 0xd0/0xe0 are NOT empty: they decode to OPEN (see the enum), a building's
+## open interior ground. Only the raw 0x00 byte is EMPTY.
+##
 ## Border cells are 87.3% wall (20305/23250). The door reading was a prediction
 ## made BEFORE measuring: if low-nibble 9 means door then byte 30 attaches to
 ## those classes and nowhere else. It does -- 0xe9 80.3%, 0xd9 30.9%, 0xd1 0.0%
@@ -400,9 +479,28 @@ class Regions extends RefCounted:
 	const REC := 36
 	const TYPE := 6
 
-	## Cell classes. Only the low nibble is interpreted; the high nibble (0xd/0xe)
-	## is an undecoded family split -- see the header.
-	enum { EMPTY = 0, WALL = 1, FLOOR = 2, DOOR = 9, STEP = 0xa }
+	## Cell classes. Only the low nibble is interpreted here.
+	##
+	## The high nibble is NOT the "0xd/0xe family split" this comment used to
+	## claim (row 710). All 16 values occur across the world -- 0xd 0.244,
+	## 0x4 0.165, 0x8 0.133, 0x3 0.131, 0x9 0.077, 0xb 0.081 and so on -- while
+	## the low nibble is essentially only {0,1,2}. Drawn with --classhi it
+	## segments the ground into contiguous areas that track the visible surface:
+	## lawn, cobbled courtyard, building floor and garden each take their own
+	## value. The ground texture predicts it only 0.647 of the time, so it is
+	## authored, not derived. Retail queries it by EQUALITY over a rect
+	## (0x080f1d2a walks a cell range accumulating where the high nibble matches
+	## a target), i.e. it is a per-cell GROUND-TYPE tag with 16 classes.
+	## Which value means which surface is not established; nothing here reads it.
+	##
+	## OPEN is not a nibble value: it is what a NON-ZERO byte whose class nibble
+	## is 0 (0xd0, 0xe0) decodes to, kept apart from a raw 0x00 byte. Measured
+	## 2026-08-13 at the Seraphim start (sector 50,39, KLOSTER_KAPELLE01): the
+	## chapel nave the hero spawns standing in is 0xd0 wall to wall and the
+	## library wing beside it is 0xe0, so these are the buildings' open interior
+	## ground. Collapsing them onto EMPTY made the retail roof-cutaway trigger
+	## unfireable at its own oracle spawn -- the hero's own cell read EMPTY.
+	enum { EMPTY = 0, WALL = 1, FLOOR = 2, DOOR = 9, STEP = 0xa, OPEN = 0x10 }
 
 	var list: Array[Dictionary] = []   ## {cell: Vector2i, size: Vector2i, grid: PackedByteArray}
 
@@ -435,7 +533,10 @@ class Regions extends RefCounted:
 			return EMPTY
 		var grid: PackedByteArray = r["grid"]
 		var b := grid[(cy * size.x + cx) * Sacred.CELL + 31]
-		return 0 if b == 0 else b & 0x0f
+		if b == 0:
+			return EMPTY
+		var nibble := b & 0x0f
+		return OPEN if nibble == 0 else nibble
 
 
 ## Data-layer correspondence between region/navmesh footprints and placed art.
@@ -473,21 +574,22 @@ class Footprints extends RefCounted:
 			push_error("Sacred.Footprints: sector %d,%d stream is too short for its cell grid (%d < %d)" % [
 				gx, gy, stream.size(), entries_end])
 			return out
+		# The whole chain, not just the cell's head static -- same reason
+		# SectorView._build_objects walks it: a stacked placement is a real
+		# placement, and its family vote counts.
 		for i in Sacred.SECT * Sacred.SECT:
-			var o := _statics.get_object(stream.decode_u32(Sacred.NAME + i * Sacred.CELL + 4))
-			if o.is_empty():
-				continue
-			var cell := _object_cell(o["pos"])
-			for ri in regions.list.size():
-				var fp: Dictionary = out[ri]
-				if not Rect2i(fp["anchor"], fp["size"]).has_point(cell):
-					continue
-				var sid: int = o["type"]
-				if _items.levels(sid) != 0:
-					fp["members"].append(sid)
-				else:
-					fp["props"].append(sid)
-				out[ri] = fp
+			for o: Dictionary in _statics.chain(stream.decode_u32(Sacred.NAME + i * Sacred.CELL + 4)):
+				var cell := _object_cell(o["pos"])
+				for ri in regions.list.size():
+					var fp: Dictionary = out[ri]
+					if not Rect2i(fp["anchor"], fp["size"]).has_point(cell):
+						continue
+					var sid: int = o["type"]
+					if _items.levels(sid) != 0:
+						fp["members"].append(sid)
+					else:
+						fp["props"].append(sid)
+					out[ri] = fp
 		for ri in regions.list.size():
 			var fp: Dictionary = out[ri]
 			var votes: Dictionary = {}
@@ -547,14 +649,34 @@ class Items extends RefCounted:
 	const NAME_OFF := 0x37
 	const REC_MIN := 0x40
 
-	var _interior: Dictionary[int, bool] = {}   ## mixed.pak sprite id -> is interior art
-	## mixed.pak sprite id -> bitmask of the building LEVELS this part belongs to.
+	## items.pak RECORD INDEX -> mixed.pak sprite id (the record's +0x10 field).
+	## static.pak +0x04 is an items.pak record index, NOT a mixed.pak index --
+	## Resacred's chain is PakStatic.itemTypeId -> PakItemType.mixedId ->
+	## PakMixedDesc (autoresearch row 659). For most records the two numbers are
+	## equal, which is why drawing mixed.sprite(type) directly looked right; they
+	## diverge for the shared furniture library, where record 9223 "Chair 2"
+	## carries sprite 655. Reading type as a sprite id therefore drew NOTHING for
+	## every chair, table, shelf, crate and bed in the world -- the missing
+	## chapel interior. Every map below is keyed by RECORD INDEX for the same
+	## reason: every caller has a static's type field, never a sprite id.
+	var _sprite: Dictionary[int, int] = {}
+	var _interior: Dictionary[int, bool] = {}   ## items record -> is interior art
+	## items.pak record index -> bitmask of the building LEVELS this part belongs to.
 	## Names run <BUILDING>_<level>_<part>, and the level token is either a digit
 	## or a German "und" pair like 0U1 meaning the piece belongs to levels 0 AND 1
 	## (a stair or a shared wall). Token frequencies over all 17408 named entries:
 	## _1_ 455, _0_ 299, _2_ 249, _3_ 27, _4_ 17, _0U1_ 87, _0U2_ 63, _0U4_ 40.
+	## Two further forms are decoded since 2026-08-13 (the OZELT1 camp tents):
+	##   <B>_<level>_<part><letter>   -- a letter-suffixed part (`_0_00A`), the
+	##     four corner posts of a tent; the letter is part of the part number,
+	##     not a level marker.
+	##   <B>_<level>_<a>U<b>          -- a part RANGE (`_0_11U21` = parts 11..21
+	##     as one continuous strip). The U here binds part numbers, NOT levels;
+	##     the piece still belongs to the single level before the first
+	##     underscore. This is distinct from `_0U1_` where U follows the level
+	##     digit directly and means level 0 AND level 1.
 	var _levels: Dictionary[int, int] = {}
-	## mixed.pak sprite id -> true if this part sits on its BUILDING FAMILY's
+	## items.pak record index -> true if this part sits on its BUILDING FAMILY's
 	## highest level. Verified as the interior on two structurally different
 	## buildings: BLACKSMITH (levels 0,1 -- hiding 0 opens the roof onto the
 	## forge, anvil and barrel) and KLOSTER_KAPELLE01 (levels 0,1,2 -- hiding
@@ -563,25 +685,29 @@ class Items extends RefCounted:
 	var _top: Dictionary[int, bool] = {}
 
 	var _fam_top: Dictionary[String, int] = {}   ## family -> highest level seen
-	var _fam_of: Dictionary[int, String] = {}    ## sprite -> family
-	var _lvl_of: Dictionary[int, int] = {}       ## sprite -> its own level
+	var _fam_of: Dictionary[int, String] = {}    ## items record -> family
+	var _lvl_of: Dictionary[int, int] = {}       ## items record -> its own level
 
-	## mixed.pak sprite id -> an authoring name (RecordStore's name_of()).
-	## HONEST AMBIGUITY: several items.pak records can carry the same +0x10
-	## sprite id, so this stores the LAST one seen in file order, not "the"
-	## name -- there is no guarantee a sprite has only one. The map is also
-	## one-way: sprite -> a name, never name -> sprite.
+	## items.pak record index -> that record's authoring name. Keyed by record,
+	## so it is exact: the older sprite-id keying collapsed every record sharing
+	## a +0x10 value onto whichever came last in file order. Still one-way:
+	## record -> a name, never name -> record.
 	var _name: Dictionary[int, String] = {}
 
 	func _init(pak: Sacred.Pak) -> void:
-		var lv := RegEx.create_from_string("_(\\d)(?:U(\\d))?_\\d+$")
+		# Level-AND form (_0U1_) or single-level form (_1_), then a part number
+		# that may carry a letter suffix (_00A) or a part-range (_11U21). The
+		# part token is `\d+[A-Za-z]?(?:U\d+)?` -- the optional trailing letter
+		# and optional U-range belong to the PART, never to the level.
+		var lv := RegEx.create_from_string("_(\\d)(?:U(\\d))?_(\\d+[A-Za-z]?(?:U\\d+)?)$")
 		for i in pak.count():
 			var r := pak.blob(i)
 			if r.size() < REC_MIN:
 				continue
+			_sprite[i] = r.decode_u32(SPRITE_OFF)
 			var nm := r.slice(NAME_OFF).get_string_from_ascii()
 			if nm != "":
-				_name[r.decode_u32(SPRITE_OFF)] = nm
+				_name[i] = nm
 			var m := lv.search(nm)
 			if m != null:
 				var mask := 1 << int(m.get_string(1))
@@ -589,28 +715,34 @@ class Items extends RefCounted:
 				if m.get_string(2) != "":
 					mask |= 1 << int(m.get_string(2))
 					hi = maxi(hi, int(m.get_string(2)))
-				var sid := r.decode_u32(SPRITE_OFF)
-				_levels[sid] = mask
+				_levels[i] = mask
 				var f := nm.substr(0, m.get_start())
 				_fam_top[f] = maxi(_fam_top.get(f, 0), hi)
-				_fam_of[sid] = f
-				_lvl_of[sid] = hi
+				_fam_of[i] = f
+				_lvl_of[i] = hi
 			# containsn: case-insensitive. The data mixes "innen", "Innenwand" and
 			# separated forms like "innen mitte", so a substring test is the rule --
 			# not a prefix or an exact match.
 			if nm.containsn("innen"):
-				_interior[r.decode_u32(SPRITE_OFF)] = true
+				_interior[i] = true
 
 	func count() -> int:
 		return _interior.size()
 
-	## True if this mixed.pak sprite is building-interior art.
-	func is_interior(sprite_id: int) -> bool:
-		return _interior.has(sprite_id)
+	## The mixed.pak sprite id a static's type field resolves to, or 0 (no art)
+	## when the record is absent or carries no sprite. 0 is the honest answer,
+	## not a fallback to the record index: Mixed.sprite(0) is empty, which is
+	## exactly what an invisible marker placement should draw.
+	func sprite_of(record: int) -> int:
+		return _sprite.get(record, 0)
 
-	## Bitmask of building levels this sprite belongs to, 0 if unnamed/unparsed.
-	func levels(sprite_id: int) -> int:
-		return _levels.get(sprite_id, 0)
+	## True if this items record is building-interior art.
+	func is_interior(record: int) -> bool:
+		return _interior.has(record)
+
+	## Bitmask of building levels this record belongs to, 0 if unnamed/unparsed.
+	func levels(record: int) -> int:
+		return _levels.get(record, 0)
 
 	func level_count() -> int:
 		return _levels.size()
@@ -618,33 +750,30 @@ class Items extends RefCounted:
 	## Building-family name parsed from this sprite's level token, or "" for
 	## an unlevelled/unnamed sprite. Public read accessor for Footprints: the
 	## family table stays owned and populated by Items rather than duplicated.
-	func family_of(sprite_id: int) -> String:
-		return _fam_of.get(sprite_id, "")
+	func family_of(record: int) -> String:
+		return _fam_of.get(record, "")
 
 	## True if this sprite is on its family's TOP level, i.e. the interior set.
 	## Props (fences, flowers, market stalls) carry no level and return false --
 	## correctly, since a fence has no storey, though it also means interior
 	## props like an anvil or barrel are not caught by this and stay visible.
-	func is_top_level(sprite_id: int) -> bool:
-		if not _fam_of.has(sprite_id):
+	func is_top_level(record: int) -> bool:
+		if not _fam_of.has(record):
 			return false
-		return _lvl_of[sprite_id] == _fam_top[_fam_of[sprite_id]]
+		return _lvl_of[record] == _fam_top[_fam_of[record]]
 
-	## An authoring name for this mixed.pak sprite id, or "" if none was seen.
-	## See _name's header for the one-way, last-wins ambiguity this carries.
-	func name_of(sprite_id: int) -> String:
-		return _name.get(sprite_id, "")
+	## The authoring name of this items.pak record, or "" if it has none.
+	func name_of(record: int) -> String:
+		return _name.get(record, "")
 
-	## Prefix census over the one-way, last-wins `_name` table: for each prefix
+	## Prefix census over the `_name` table: for each prefix
 	## string, count how many stored names begin with it (`named`) and how many
 	## of those additionally match the caller-supplied regex (`parseable`).
 	## Returns one Dictionary per prefix {prefix, named, parseable}, in the
 	## caller's prefix order. This is a READER of the same table the swap uses,
 	## so its counts are pipeline truth, not a second parse. It carries the
-	## same caveat the strings-level measurement did, now stated at the
-	## pipeline level: duplicate sprite ids collapse to their last-seen name
-	## (see `_name`'s HONEST AMBIGUITY header), so a sprite counts once, under
-	## its last name.
+	## Counts one entry per items.pak RECORD, so two records sharing a sprite
+	## id are counted twice -- they are two placements' worth of naming.
 	func census(prefixes: Array, rx: RegEx) -> Array[Dictionary]:
 		var out: Array[Dictionary] = []
 		for p in prefixes:
@@ -811,6 +940,11 @@ class Models extends RefCounted:
 
 	func count() -> int:
 		return _pak.count()
+
+	## Byte size of the backing pak, for callers that cache derived data and
+	## need to know the corpus changed underneath them (Sacred.Rigs).
+	func pak_size() -> int:
+		return _pak.file_size()
 
 	## Bounds-checked read of the entry's stored kind (64 mesh, 65 motion).
 	## -1 for an out-of-range index.
@@ -2080,7 +2214,7 @@ class Models extends RefCounted:
 	#
 	# Per-bone record layout (zero-slack reconciled by 05-02 against Sacred's own
 	# bytes on three sampled clips -- 2847/2899/2903, all three 100% unit-quaternion
-	# at ANIM_QUAT_EPS below):
+	# at the degeneracy floor ANIM_QUAT_MIN below):
 	#
 	#   +0   u32     id                (carried through as data, never an index --
 	#                                    05-02's --idjoin REFUTED it as a cross-file
@@ -2151,27 +2285,54 @@ class Models extends RefCounted:
 	const ANIM_OFF_NUM_TRANSLATES := 24
 	const ANIM_OFF_NUM_QUATERNIONS := 28
 	const ANIM_OFF_NUM_UNKNOWNS := 32
-	## Undocumented, measured (05-02), fixed trailer following the documented
-	## payload on every real AnimationTransformTrackKeys record -- constant
-	## across all 200 records 05-02 sampled, regardless of that record's own
-	## nt/nq/nu. See the section header comment above for how folding it into
-	## the header instead was tried and refuted.
-	const ANIM_RECORD_TRAILER := 48
+	## THERE IS NO TRAILER. This constant and its bimodal 48/72 successor were
+	## both wrong, and row 767 says why: the residual they were absorbing is
+	## 24 * numUnknowns, so it is not a fixed block at all. See
+	## ANIM_UNKNOWN_STRIDE.
+	##
+	## The arithmetic hid it twice. 05-02 sampled three clips whose records all
+	## carried nu=2, and 24*2 = 48, which reads exactly like a constant trailer.
+	## Row 764 then found entries with nu=3 (24*3 = 72) and concluded the value
+	## was bimodal -- still a constant, just two of them. Only a clip whose nu
+	## VARIES between records could expose it, and the WOLF family is precisely
+	## that: 46 records spanning 17 apparent widths, which row 764 refused as
+	## "internally inconsistent" when they were the one shape telling the truth.
+	## The lesson is in the sampling, not the algebra: every entry that agreed
+	## was an entry with a constant nu.
+	const ANIM_RECORD_TRAILER := 0
+	## Bytes per "unknown" track element: 4 of time plus 36 of payload. 36 bytes
+	## is a 3x3 matrix, which is what Granny's transform triple carries beside a
+	## translation and a rotation -- scale-shear. Reconciles zero-slack on every
+	## record of every clip that decodes, including all 46 records of
+	## WOLF_ATTACK_BH_A where a constant-trailer model cannot.
+	const ANIM_UNKNOWN_STRIDE := 40
 
-	## Track-quaternion unit-length tolerance. DELIBERATELY NOT BONE_QUAT_EPS:
-	## bind-pose quaternions in bones() are exact static values, but
-	## AnimationTransformTrackKeys quaternions are keyframed data with measured
-	## mid-track quantization drift (05-02-SUMMARY.md: max deviation 0.0611 on
-	## entry 2847, 0.0330 on 2903, 0.00086 on 2899 -- all far above
-	## BONE_QUAT_EPS=0.001). 05-02 exhaustively re-ranked every other
-	## size-reconciled (header, field-offset) candidate by the epsilon IT would
-	## require: the documented layout sits in an isolated cluster at 0.0611,
-	## with a 7x gap to the next candidate (0.4142) and 50x+ to the rest. 0.07
-	## is set above the worst measured value with headroom -- a property of
-	## this being the correct layout for keyframed track data, not a loosened
-	## precision claim. Reusing BONE_QUAT_EPS here would incorrectly refuse
-	## every real clip in the corpus.
-	const ANIM_QUAT_EPS := 0.07
+	## Track-quaternion DEGENERACY floor, and deliberately not a tolerance.
+	##
+	## WHAT THIS USED TO BE (ANIM_QUAT_EPS = 0.07). A unit-length tolerance doing
+	## two jobs at once: validating the record LAYOUT, and gating each entry. It
+	## was good at the first -- 05-02 ranked every rival (header, field-offset)
+	## candidate by the epsilon it would need and found the documented layout
+	## isolated at 0.0611 with a 7x gap to the next at 0.4142. It was bad at the
+	## second, and that cost 643 clips: per-entry worst-case drift is HEAVY
+	## TAILED. Measured across every refused entry, the deviation decays smoothly
+	## from 0.06 to 0.66 with NO gap anywhere -- one population of quantization
+	## drift, not two separable groups. There is therefore no threshold to pick,
+	## and picking one anyway is how 0.07 (set from a three-clip sample whose
+	## worst was 0.0611) came to refuse 491 entries sitting just above it.
+	##
+	## WHY THE LAYOUT JOB IS NO LONGER NEEDED HERE. Row 767 established that a
+	## record reconciles EXACTLY: 52 + 16nt + 20nq + 40nu == span, zero slack, on
+	## every record of every entry. A wrong header or field offset leaves slack,
+	## so size reconciliation is a strictly stronger layout discriminator than the
+	## quaternion norm ever was, and it runs first. This constant is relieved of
+	## that duty.
+	##
+	## WHAT REMAINS. A quaternion is unusable only when it cannot be normalized --
+	## NaN, or a length so near zero that the direction is noise. That is a real
+	## refusal and stays. Everything else is normalized on read, which is what
+	## ModelView already did per key before handing them to Godot.
+	const ANIM_QUAT_MIN := 0.5
 
 	## Generalises _directory() to an arbitrary section offset. _directory()
 	## itself stays hardcoded to SECTION_OFF_MESH (kind=64 geometry only) so
@@ -2339,9 +2500,26 @@ class Models extends RefCounted:
 			push_error("Sacred.Models.clip: entry %d carries no per-bone AnimationTransformTrackKeys records" % entry)
 			return {}
 
+		# VARIANT SELECT, whole-entry and never per record (row 776). Some clips
+		# store uniformly sampled 30fps transforms instead of variable-length
+		# per-channel tracks. Deciding per record would let a coincidence in one
+		# record pick a layout for it that the rest of the entry contradicts, so
+		# the sampled path is taken only when the documented one fails on at
+		# least one record AND the sampled one fits EVERY record.
+		var sampled := _clip_is_sampled(buf, dir, sec, key_nodes)
+
 		var records: Array[Dictionary] = []
 		var max_length := 0.0
 		for ridx in key_nodes.size():
+			if sampled:
+				var srec := _clip_sampled_record(entry, buf, dir, sec, key_nodes[ridx], ridx)
+				if srec.is_empty():
+					return {}
+				records.append(srec)
+				var st: PackedFloat32Array = srec["times_pos"]
+				if st.size() > 0 and st[st.size() - 1] > max_length:
+					max_length = st[st.size() - 1]
+				continue
 			var j: int = key_nodes[ridx]
 			var off := sec + int(dir[j]["rel"]) + desync
 			var span := _span_sec(dir, j, buf.size(), sec)
@@ -2359,7 +2537,7 @@ class Models extends RefCounted:
 				push_error("Sacred.Models.clip: entry %d record %d declares a count above MAX_KEYFRAMES (nt=%d nq=%d nu=%d)" % [
 					entry, ridx, nt, nq, nu])
 				return {}
-			var implied := ANIM_RECORD_HEADER + 16 * nt + 20 * nq + 16 * nu + ANIM_RECORD_TRAILER
+			var implied := ANIM_RECORD_HEADER + 16 * nt + 20 * nq + ANIM_UNKNOWN_STRIDE * nu
 			if implied != span:
 				push_error("Sacred.Models.clip: entry %d record %d implied size %d does not equal its span %d exactly (nt=%d nq=%d nu=%d)" % [
 					entry, ridx, implied, span, nt, nq, nu])
@@ -2394,20 +2572,34 @@ class Models extends RefCounted:
 				var q := Quaternion(buf.decode_float(p + i * 16), buf.decode_float(p + i * 16 + 4),
 					buf.decode_float(p + i * 16 + 8), buf.decode_float(p + i * 16 + 12))
 				var qlen := sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
-				if is_nan(qlen) or absf(qlen - 1.0) > ANIM_QUAT_EPS:
-					push_error("Sacred.Models.clip: entry %d record %d rotation %d is not a unit quaternion (|q|=%f)" % [
+				if is_nan(qlen) or qlen < ANIM_QUAT_MIN:
+					push_error("Sacred.Models.clip: entry %d record %d rotation %d cannot be normalized (|q|=%f)" % [
 						entry, ridx, i, qlen])
 					return {}
-				rotations[i] = q
+				# Stored normalized: the drift is real data, but Godot's own
+				# rotation-track interpolation demands an exact unit quaternion
+				# and logs per sampled frame otherwise.
+				rotations[i] = q / qlen
 			p += nq * 16
 
-			var others := PackedVector3Array()
+			# 36 bytes per key, UNINTERPRETED. The stride is measured (see
+			# ANIM_UNKNOWN_STRIDE); what the bytes MEAN is not. 9 floats is the
+			# shape of Granny's scale-shear 3x3, and that was the working guess,
+			# but read as a matrix the values are degenerate -- WOLF_ATTACK_BH_A
+			# yields determinants near zero and negative, which no scale-shear
+			# has. So they are handed back as raw floats and named for what is
+			# known about them. Nothing consumes them yet.
+			var others: Array[PackedFloat32Array] = []
 			others.resize(nu)
 			for i in nu:
-				others[i] = Vector3(buf.decode_float(p + i * 12), buf.decode_float(p + i * 12 + 4), buf.decode_float(p + i * 12 + 8))
-			p += nu * 12
-			# p + ANIM_RECORD_TRAILER == off + span exactly, by the implied-size
-			# check above -- the trailer itself is never decoded.
+				var o := p + i * 36
+				var f := PackedFloat32Array()
+				f.resize(9)
+				for k in 9:
+					f[k] = buf.decode_float(o + k * 4)
+				others[i] = f
+			p += nu * 36
+			# p == off + span exactly, by the implied-size check above.
 
 			records.append({
 				"id": rid, "times_pos": times_pos, "times_rot": times_rot,
@@ -2419,10 +2611,92 @@ class Models extends RefCounted:
 
 		return {
 			"bones": bone_count, "records": records, "length": max_length,
-			"source": "h=%d,nt=%d,nq=%d,nu=%d,trailer=%d(documented)" % [
+			"source": "h=%d,nt=%d,nq=%d,nu=%d,ustride=%d,notrailer" % [
 				ANIM_RECORD_HEADER, ANIM_OFF_NUM_TRANSLATES, ANIM_OFF_NUM_QUATERNIONS,
-				ANIM_OFF_NUM_UNKNOWNS, ANIM_RECORD_TRAILER],
+				ANIM_OFF_NUM_UNKNOWNS, ANIM_UNKNOWN_STRIDE],
 		}
+
+
+	## Bytes of fixed header on a SAMPLED record, and the size of one sampled
+	## key: 17 f32 = time(1), translation(3), rotation quaternion(4, x,y,z,w),
+	## scale-shear 3x3(9). Granny's transform triple, one sample per frame.
+	## Measured on HORS_DYING_A (row 776): times run 0, 1/30, 2/30, ... and the
+	## model reconciles (span - 12) % 68 == 0 on all 2989 records of all 26
+	## entries that carry this variant, with every time track ascending from 0.
+	const ANIM_SAMPLED_HEADER := 12
+	const ANIM_SAMPLED_KEY := 68
+
+	## True iff this entry is the sampled variant: the documented
+	## variable-length model fails somewhere AND every record fits 12 + 68N.
+	## Both halves are required -- "fits 12+68N" alone is not decisive, since a
+	## variable-length record can land on that size by coincidence.
+	func _clip_is_sampled(buf: PackedByteArray, dir: Array[Dictionary], sec: int,
+			key_nodes: Array[int]) -> bool:
+		var documented_ok := true
+		for j in key_nodes:
+			var off := sec + int(dir[j]["rel"])
+			var span := _span_sec(dir, j, buf.size(), sec)
+			if span < ANIM_SAMPLED_HEADER or (span - ANIM_SAMPLED_HEADER) % ANIM_SAMPLED_KEY != 0:
+				return false
+			if off < 0 or off + ANIM_OFF_NUM_UNKNOWNS + 4 > buf.size():
+				return false
+			var nt := buf.decode_u32(off + ANIM_OFF_NUM_TRANSLATES)
+			var nq := buf.decode_u32(off + ANIM_OFF_NUM_QUATERNIONS)
+			var nu := buf.decode_u32(off + ANIM_OFF_NUM_UNKNOWNS)
+			if nt > MAX_KEYFRAMES or nq > MAX_KEYFRAMES or nu > MAX_KEYFRAMES \
+					or ANIM_RECORD_HEADER + 16 * nt + 20 * nq + ANIM_UNKNOWN_STRIDE * nu != span:
+				documented_ok = false
+		return not documented_ok
+
+	## One sampled record, in the SAME shape the variable-length path returns so
+	## no caller needs to know which variant it came from. Every channel shares
+	## one time array here, because every channel is sampled on the same frames.
+	func _clip_sampled_record(entry: int, buf: PackedByteArray, dir: Array[Dictionary],
+			sec: int, j: int, ridx: int) -> Dictionary:
+		var off := sec + int(dir[j]["rel"])
+		var span := _span_sec(dir, j, buf.size(), sec)
+		if off < 0 or off + span > buf.size():
+			push_error("Sacred.Models.clip: entry %d sampled record %d runs past the entry" % [entry, ridx])
+			return {}
+		var n := (span - ANIM_SAMPLED_HEADER) / ANIM_SAMPLED_KEY
+		if n <= 0 or n > MAX_KEYFRAMES:
+			push_error("Sacred.Models.clip: entry %d sampled record %d implies %d keys" % [entry, ridx, n])
+			return {}
+		var times := PackedFloat32Array()
+		var positions := PackedVector3Array()
+		var rotations: Array[Quaternion] = []
+		var others: Array[PackedFloat32Array] = []
+		times.resize(n)
+		positions.resize(n)
+		rotations.resize(n)
+		others.resize(n)
+		var prev := -INF
+		for i in n:
+			var o := off + ANIM_SAMPLED_HEADER + i * ANIM_SAMPLED_KEY
+			var t := buf.decode_float(o)
+			if is_nan(t) or t < prev:
+				push_error("Sacred.Models.clip: entry %d sampled record %d time %d is %f, not ascending" % [
+					entry, ridx, i, t])
+				return {}
+			prev = t
+			times[i] = t
+			positions[i] = Vector3(buf.decode_float(o + 4), buf.decode_float(o + 8), buf.decode_float(o + 12))
+			var q := Quaternion(buf.decode_float(o + 16), buf.decode_float(o + 20),
+				buf.decode_float(o + 24), buf.decode_float(o + 28))
+			var ql := sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+			if is_nan(ql) or ql < ANIM_QUAT_MIN:
+				push_error("Sacred.Models.clip: entry %d sampled record %d rotation %d cannot be normalized (|q|=%f)" % [
+					entry, ridx, i, ql])
+				return {}
+			rotations[i] = q / ql
+			var f := PackedFloat32Array()
+			f.resize(9)
+			for k in 9:
+				f[k] = buf.decode_float(o + 32 + k * 4)
+			others[i] = f
+		return {"id": buf.decode_u32(off), "times_pos": times, "times_rot": times,
+			"times_other": times, "positions": positions, "rotations": rotations,
+			"others": others}
 
 	## The rule 05-02 measured: the maximum, across all records, of that
 	## record's last translate-track time. 0.0 for a non-clip or any malformed
@@ -2865,3 +3139,693 @@ class Pax extends RefCounted:
 			push_error("Sacred.Pax: section 0x%X inflated to %d, expected %d" % [type_id, out.size(), usz])
 			return PackedByteArray()
 		return out
+
+
+## bin/TYPE_NPC_*/funkcode.bin -- the script bytecode's SPAWN TABLES.
+##
+## Framing (autoresearch row 711, confirmed against the interpreter's own
+## `movsx eax, WORD PTR [ebx+0x2]` at 0x0826af24): u16 opcode, u16 length
+## counting those four bytes, then a tagged argument list. Walking by the
+## length field needs no tag table at all, so this reader only decodes the
+## tags the three spawn opcodes actually use and REFUSES the rest -- an
+## unknown tag inside one of those records is a parse error, not a shrug.
+##
+## What the three opcodes are (rows 728-730):
+##   115  declares a spawn group: 1..20 creature ids and three (id, percent)
+##        pairs. Every id is a creature.pak id -- 184 of 184 distinct.
+##   100  three small numbers the engine writes into the object at the
+##        CURRENT SECTOR; the first is always 50.
+##    51  the roll. Header tag 0x36 goes into creature field +0x255, the
+##        group-alert enable, and its two values split the file by
+##        POPULATION: 100 = wildlife (rabbit, crow, deer, bat, cow),
+##        310 = hostiles. Body is a repeated (creature id, percent, flag)
+##        triple whose percents sum to 100 in 3906 of 5309 records.
+##
+## ponytail: no placement. WHERE a group spawns is not in these records --
+## opcode 100 reads the engine's current-sector globals, and all 39,569 spawn
+## records sit under a single script label, so the geography comes from script
+## EXECUTION, which nothing here emulates. Upgrade path: interpret the
+## Region%dInit / Sector%d%3.3dInit entry points named in startcode.bin.
+class Funk extends RefCounted:
+	const OP_ROLL := 51
+	const OP_SECTOR := 100
+	const OP_GROUP := 115
+	const WILDLIFE := 100      ## tag 0x36 value: ambient fauna
+	const HOSTILE := 310       ## tag 0x36 value: monsters and hostile NPCs
+
+	const STR := -1            ## payload is a NUL-terminated string, not a fixed width
+
+	## Tag -> payload width in bytes, for the tags the spawn opcodes use only.
+	## Opcode 115 is the one that needs the long tail: besides its id list
+	## (0x02) and three pairs (0x87/0x88/0x89) it also carries 0x8b, 0x1d and
+	## the string tags 0x67 and 0x1e. Leaving any of them out shifts the cursor
+	## and the ids stop being creature ids -- which is exactly what
+	## spawn_check.gd is there to catch.
+	const WIDTH := {
+		0x02: 4, 0x0b: 4, 0x19: 12, 0x1d: 4, 0x1e: STR, 0x33: 8, 0x34: 8,
+		0x35: 12, 0x36: 4, 0x67: STR, 0x87: 8, 0x88: 8, 0x89: 8, 0x8b: 1,
+	}
+
+	## vectoren.bin's record: a 64-byte name field then five i32, of which the
+	## first two are a BYTE OFFSET into funkcode.bin and a LENGTH. Consecutive
+	## entries tile the file (entry 0 is offset 0 length 410, entry 1 is offset
+	## 410), which is what identifies the pair. So vectoren.bin is the script's
+	## PROCEDURE TABLE, and it is what turns the spawn records from a flat list
+	## into placement.
+	const VEC_HDR := 88        ## u32 count, then padding to the first record
+	const VEC_REC := 84
+	const VEC_NAME := 64
+
+	## One per opcode-51 record: {sector:Vector2i, kind, count_min, count_max,
+	## flags, has_pairs, pair34, pair33, entries:Array[Vector3i] of
+	## (creature id, percent, flag)}.
+	var rolls: Array[Dictionary] = []
+	## One per opcode-115 record: {sector:Vector2i, ids:PackedInt32Array,
+	## pairs:Array[Vector2i]}.
+	var groups: Array[Dictionary] = []
+	## One per opcode-100 record: {sector:Vector2i, values:PackedInt32Array}.
+	var sector_params: Array[Dictionary] = []
+	## Sector (gx, gy) -> indices into `rolls`.
+	var by_sector: Dictionary[Vector2i, PackedInt32Array] = {}
+
+	var _procs: Array = []       ## sorted [offset, end, sector, name]
+	var _cursor := 0
+	var _sector := Vector2i(-1, -1)
+
+	## `dir` is one bin/TYPE_NPC_* directory: it holds both funkcode.bin and the
+	## vectoren.bin that indexes it.
+	func _init(dir: String) -> void:
+		_read_procs(dir.path_join("vectoren.bin"))
+		var b := FileAccess.get_file_as_bytes(dir.path_join("funkcode.bin"))
+		if b.is_empty():
+			push_error("Sacred.Funk: cannot read funkcode.bin in %s" % dir)
+			return
+		var off := 0
+		while off + 4 <= b.size():
+			var opcode := b.decode_u16(off)
+			var length := b.decode_u16(off + 2)
+			if length < 4 or off + length > b.size():
+				push_error("Sacred.Funk: bad record length %d at %d" % [length, off])
+				return
+			match opcode:
+				OP_ROLL, OP_GROUP, OP_SECTOR:
+					# Records are walked in increasing offset order and the
+					# procedures tile the file, so a moving cursor beats a
+					# binary search per record.
+					_sector = Vector2i(-1, -1)
+					while _cursor < _procs.size() and _procs[_cursor][1] <= off:
+						_cursor += 1
+					if _cursor < _procs.size() and off >= _procs[_cursor][0]:
+						_sector = _procs[_cursor][2]
+			match opcode:
+				OP_ROLL: _read_roll(b, off + 4, off + length)
+				OP_GROUP: _read_group(b, off + 4, off + length)
+				OP_SECTOR: _read_sector(b, off + 4, off + length)
+			off += length
+
+	## Procedure names the engine builds with sprintf("Sector%d%3.3d%s", x, y,
+	## phase) at 0x082a087a -- and the two arguments are written straight into
+	## the globals 0x879a080 / 0x879a084 on the next two instructions, which are
+	## the same pair opcode 100's handler shifts left by 6 to make a world
+	## position. So the FIRST field is gx and the trailing THREE digits are gy.
+	## Measured confirmation, since the format alone leaves the order open:
+	## reading it this way puts 5659 of 5684 script sectors inside the world's
+	## real 6050-sector set; swapping gx and gy drops that to 4013.
+	##
+	## THERE IS A SECOND, ID-KEYED FORM. The engine also carries
+	## "Sector%dInit/Enter/Exit" (0x086eb1b1), formatted elsewhere entirely
+	## (0x081c5c3b, alongside Region%dInit) from a single number -- the dungeon
+	## path. 48 procedures use it and they are NOT world sectors: %3.3d always
+	## emits three digits and %d at least one, so a grid name never has fewer
+	## than four, and every one of these has exactly two. They are kept with
+	## sector.x == -1 and the id in sector.y rather than being force-fitted onto
+	## the grid. Reading a two-digit name as a grid name is exactly the bug this
+	## comment exists to prevent: it invents sector (0, 84) or (84, 84)
+	## depending on which end you pad.
+	func _read_procs(path: String) -> void:
+		var v := FileAccess.get_file_as_bytes(path)
+		if v.size() < VEC_HDR:
+			push_error("Sacred.Funk: cannot read %s" % path)
+			return
+		var n := v.decode_u32(0)
+		var rx := RegEx.create_from_string("^Sector(\\d+)(Init|Enter|Exit)$")
+		for i in n:
+			var o := VEC_HDR + i * VEC_REC
+			if o + VEC_REC > v.size():
+				break
+			var name := v.slice(o, o + VEC_NAME).get_string_from_ascii()
+			var m := rx.search(name)
+			if m == null:
+				continue
+			var digits := m.get_string(1)
+			var sector := Vector2i(-1, int(digits))          # id-keyed dungeon form
+			if digits.length() >= 4:
+				sector = Vector2i(int(digits.substr(0, digits.length() - 3)),
+					int(digits.right(3)))
+			var start := v.decode_s32(o + VEC_NAME)
+			_procs.append([start, start + v.decode_s32(o + VEC_NAME + 4), sector, name])
+		_procs.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+
+	## (tag, value) pairs of one record body. Eight-byte tags yield the two
+	## halves as one Vector2i, twelve-byte tags as a Vector3i, so a caller
+	## never has to re-split them.
+	func _fields(b: PackedByteArray, from: int, to: int) -> Array:
+		var out: Array = []
+		var p := from
+		while p < to:
+			var tag := b[p]
+			p += 1
+			if not WIDTH.has(tag):
+				push_error("Sacred.Funk: tag 0x%02x in a spawn record at %d" % [tag, p - 1])
+				return []
+			var w: int = WIDTH[tag]
+			if w == STR:
+				var end := p
+				while end < to and b[end] != 0:
+					end += 1
+				out.append([tag, b.slice(p, end).get_string_from_ascii()])
+				p = end + 1
+				continue
+			if p + w > to:
+				break            # payload overruns: the engine reads on, the loop then ends
+			match w:
+				1: out.append([tag, b[p]])
+				4: out.append([tag, b.decode_u32(p)])
+				8: out.append([tag, Vector2i(b.decode_u32(p), b.decode_u32(p + 4))])
+				12: out.append([tag, Vector3i(b.decode_u32(p), b.decode_u32(p + 4), b.decode_u32(p + 8))])
+			p += w
+		return out
+
+	func _read_roll(b: PackedByteArray, from: int, to: int) -> void:
+		# `has_pairs` records the PRESENCE of 0x34/0x33, not their value: both
+		# halves are legitimately zero in some records, so presence is the only
+		# reliable discriminator between the two populations.
+		var rec := {"sector": _sector, "kind": 0, "count_min": 0, "count_max": 0,
+			"flags": 0, "has_pairs": false, "pair34": Vector2i.ZERO,
+			"pair33": Vector2i.ZERO, "entries": [] as Array[Vector3i]}
+		for f in _fields(b, from, to):
+			match f[0]:
+				0x36: rec["kind"] = f[1]
+				0x34:
+					rec["pair34"] = f[1]
+					rec["has_pairs"] = true
+				0x33: rec["pair33"] = f[1]
+				# The engine swaps these two if the first is larger (0x0827b44a),
+				# so they are an ordered range; the third component is a flag.
+				0x35:
+					rec["count_min"] = mini(f[1].x, f[1].y)
+					rec["count_max"] = maxi(f[1].x, f[1].y)
+					rec["flags"] = f[1].z
+				0x19: rec["entries"].append(f[1])
+		if _sector.x >= 0:
+			if not by_sector.has(_sector):
+				by_sector[_sector] = PackedInt32Array()
+			by_sector[_sector].append(rolls.size())
+		rolls.append(rec)
+
+	func _read_group(b: PackedByteArray, from: int, to: int) -> void:
+		var ids := PackedInt32Array()
+		var pairs: Array[Vector2i] = []
+		for f in _fields(b, from, to):
+			match f[0]:
+				0x02: ids.append(f[1])
+				0x87, 0x88, 0x89: pairs.append(f[1])
+		groups.append({"sector": _sector, "ids": ids, "pairs": pairs})
+
+	func _read_sector(b: PackedByteArray, from: int, to: int) -> void:
+		var v := PackedInt32Array()
+		for f in _fields(b, from, to):
+			if f[0] == 0x0b:
+				v.append(f[1])
+		sector_params.append({"sector": _sector, "values": v})
+
+	## Every opcode-51 roll that applies in sector (gx, gy). Empty for a sector
+	## the scripts never spawn in -- 5709 of the world's 6050 sectors carry
+	## spawn records, and a town sector like the Silver Creek chapel (50, 39)
+	## legitimately carries none.
+	func rolls_for(gx: int, gy: int) -> Array[Dictionary]:
+		var out: Array[Dictionary] = []
+		for i in by_sector.get(Vector2i(gx, gy), PackedInt32Array()):
+			out.append(rolls[i])
+		return out
+
+	## Weighted pick from one roll record: returns a creature.pak id, or -1 if
+	## the record is empty. The percents are a weight table -- they sum to 100
+	## in 74% of records and to 200/300/400 in most of the rest, so the roll is
+	## against the ACTUAL total, not against a hardcoded 100.
+	func pick(roll: Dictionary, rng: RandomNumberGenerator) -> int:
+		var entries: Array[Vector3i] = roll["entries"]
+		if entries.is_empty():
+			return -1
+		var total := 0
+		for e in entries:
+			total += e.y
+		if total <= 0:
+			return entries[0].x
+		var r := rng.randi_range(0, total - 1)
+		for e in entries:
+			r -= e.y
+			if r < 0:
+				return e.x
+		return entries[-1].x
+
+
+## The creature-class friend/foe matrix, 16x16 bytes (autoresearch row 735).
+##
+## It lives in the ENGINE BINARY, not in a data file: 256 bytes of .rodata that
+## the engine memcpys into .data at startup and indexes as
+## `matrix[16 * A.class + B.class]`, class being the creature's field at +0x1f0
+## and the same 1..15 enum creature.pak uses (1 Held, 2 Monster, 3 NPC,
+## 4 Pferd, 5 Untoter, 6 Tier, 7 Soeldner, 8 Goblinoide, 9 Daemon, 10 Drache,
+## 11 Energiewesen, 12 Elf, 13 Feind, 14 Mensch, 15 Dryade). 1 means friendly,
+## 0 hostile.
+##
+## It is FOUND BY ITS OWN SHAPE, not by a hardcoded offset: the retail builds do
+## not agree on where it sits (0x6b04e0 in install/sacred, 0x6b7180 in
+## sacred_orig), and a wrong offset would silently yield a plausible-looking
+## table of zeros and ones. The search below matches exactly one window in each
+## of the three binaries tested.
+##
+## ponytail: read-only, and nothing consumes it yet -- creatures cannot be drawn
+## until GRN animation is solved. It is here so the rule lives in one place when
+## they can.
+class Factions extends RefCounted:
+	const N := 16
+	const FEIND := 13          ## the enum's unused class: hostile to everything
+	const CLASS_NAMES := ["", "Held", "Monster", "NPC", "Pferd", "Untoter",
+		"Tier", "Soeldner", "Goblinoide", "Daemon", "Drache", "Energiewesen",
+		"Elf", "Feind", "Mensch", "Dryade"]
+	## Binaries to look in, in order. The install ships the patched `sacred`;
+	## `sacred_orig` is this project's pristine copy and is tried second.
+	const BINARIES := ["sacred", "sacred_orig"]
+
+	var found := false
+	var source := ""           ## which binary it came from
+	var offset := -1           ## byte offset within that binary
+	var _m := PackedByteArray()
+
+	func _init(install: String) -> void:
+		for name in BINARIES:
+			var path := install.path_join(name)
+			if not FileAccess.file_exists(path):
+				continue
+			var b := FileAccess.get_file_as_bytes(path)
+			var off := _scan(b)
+			if off >= 0:
+				_m = b.slice(off, off + N * N)
+				found = true
+				source = name
+				offset = off
+				return
+
+	## The identifying shape, cheapest test first: a 16-byte-aligned window of
+	## nothing but 0 and 1, whose class-13 row is entirely zero (including its
+	## own diagonal cell) while every other diagonal cell is 1. One window in
+	## the whole binary satisfies it.
+	func _scan(b: PackedByteArray) -> int:
+		var off := 0
+		var last := b.size() - N * N
+		while off <= last:
+			if b[off] == 1 and b[off + FEIND * N + FEIND] == 0:
+				var ok := true
+				for i in N:
+					if i != FEIND and b[off + i * N + i] != 1:
+						ok = false
+						break
+					if b[off + FEIND * N + i] != 0:
+						ok = false
+						break
+				if ok:
+					for i in N * N:
+						if b[off + i] > 1:
+							ok = false
+							break
+				if ok:
+					return off
+			off += 16
+		return -1
+
+	## True when a creature of class `a` treats one of class `b` as an enemy.
+	## Not symmetric, and deliberately so: nine of the eleven asymmetric pairs
+	## involve Pferd, because enemies ignore the horse and attack its rider.
+	func hostile(a: int, b: int) -> bool:
+		if not found or a < 0 or b < 0 or a >= N or b >= N:
+			return false
+		return _m[a * N + b] == 0
+
+	func row(a: int) -> PackedByteArray:
+		return _m.slice(a * N, a * N + N) if found else PackedByteArray()
+
+
+## pak/creature.pak -- the creature type table (autoresearch row 693).
+##
+## A FLAT CIF table, not a Sacred.Pak container: the magic passes but the bytes
+## at 0x100 are header, not an index, so reading it through Pak silently
+## misreads it. 474 records of 86 bytes from offset 256, and
+## 256 + 474*86 == 41020 == the file length is what fixes the stride.
+##
+## Only two fields are exposed, because only two are needed to join the spawn
+## tables to the faction matrix: the id at +0x00 -- which IS the items.pak
+## record index naming the creature's Granny model, so appearance needs no
+## field at all -- and the class at +0x04, the 1..15 enum Sacred.Factions
+## indexes by.
+class Creatures extends RefCounted:
+	const DATA := 256
+	const REC := 86
+	const ID_OFF := 0
+	const CLASS_OFF := 4
+
+	var _class: Dictionary[int, int] = {}
+
+	func _init(pak_dir: String) -> void:
+		var b := FileAccess.get_file_as_bytes(pak_dir.path_join("creature.pak"))
+		if b.size() < DATA or (b.size() - DATA) % REC != 0:
+			push_error("Sacred.Creatures: creature.pak missing or stride broken")
+			return
+		for i in (b.size() - DATA) / REC:
+			var o := DATA + i * REC
+			_class[b.decode_u32(o + ID_OFF)] = b.decode_u16(o + CLASS_OFF)
+
+	func count() -> int:
+		return _class.size()
+
+	func has(id: int) -> bool:
+		return _class.has(id)
+
+	## The creature's class, or 0 for an id the table does not carry. Feed it
+	## straight to Sacred.Factions.hostile().
+	func class_of(id: int) -> int:
+		return _class.get(id, 0)
+
+
+## Which animation clip belongs to which mesh, decided by BONE GEOMETRY rather
+## than by name -- because the names do not line up. A clip is called
+## `UPI1_WALK_BH.GRN` while its mesh is `UPIRATE_01.GRN`; `DDRU_IDLE_BH.GRN`
+## belongs to `DRYADDRUID.GRN`; `HORS_DYING_A.GRN` belongs with `BRIDLE_01.GRN`.
+## A four-letter prefix rule resolves 41 of the 124 meshes the spawn tables
+## name; this class resolves them by measurement instead.
+##
+## THE MEASUREMENT, and the finding it rests on. A clip entry and a mesh entry
+## that describe the same character carry the same bones, and each bone's LOCAL
+## rest transform agrees to within 0.01 on ~80% of shared bones -- against ~4%
+## for a clip belonging to a different character. Matching is by exact bone
+## NAME, and the comparison is strictly LOCAL: composing either side's own
+## parent chain into world space destroys the signal, because the two files do
+## not share the chain above `Bip01` (a mesh carries a 90-degree-Z alignment
+## bone there that a clip has no node for at all). That is why three earlier
+## world-space attempts at this question came back REFUTED -- they measured a
+## real quantity that happens not to be this one.
+##
+## Do NOT "improve" this by composing world transforms. rig_check.gd exists to
+## fail when someone does.
+##
+## COST. Deciding anything requires decoding every clip's bone list once, about
+## 7 seconds for the 3397 shipped clips, so the result is cached under `user://`
+## keyed by the models.pak byte size. Nothing is bundled and nothing is written
+## next to the retail data.
+class Rigs extends RefCounted:
+	const WITHIN := 0.01
+	## Below this many shared bone names the fraction is noise -- an unfiltered
+	## search finds spurious 1.000 agreements on two-bone overlaps.
+	const MIN_MATCHED := 20
+	## Refuse a match this weak rather than animate a creature with another
+	## creature's skeleton. Measured spread: real pairs 0.79..0.97, wrong-
+	## character pairs 0.04.
+	const MIN_SCORE := 0.5
+	const CACHE := "user://rigmap.tsv"
+
+	var _clip: Dictionary[int, int] = {}
+	var _score: Dictionary[int, float] = {}
+	var _pak_size := 0
+	var resolved := 0
+	var computed := 0
+
+	## Resolves every entry in `wanted` (mesh entry indices), reading whatever
+	## the cache already knows and computing the rest in ONE pass over the clip
+	## corpus. `wanted` may contain duplicates and non-mesh entries; both are
+	## ignored.
+	func _init(models: Sacred.Models, wanted: PackedInt32Array) -> void:
+		_pak_size = models.pak_size()
+		_load_cache()
+		var todo := PackedInt32Array()
+		for e in wanted:
+			if e >= 0 and not _clip.has(e) and not todo.has(e):
+				todo.append(e)
+		if not todo.is_empty():
+			_compute(models, todo)
+			_save_cache()
+		for e in wanted:
+			if _clip.get(e, -1) >= 0:
+				resolved += 1
+
+	## The best-agreeing clip entry for `model_entry`, or -1 when none cleared
+	## MIN_SCORE. A caller that gets -1 must draw the mesh unanimated rather
+	## than fall back to some other character's clip.
+	func clip_for(model_entry: int) -> int:
+		return _clip.get(model_entry, -1)
+
+	## The agreement fraction behind clip_for(), 0.0 when unresolved -- exposed
+	## so a caller can report how well its own picks did instead of trusting
+	## them silently.
+	func score_for(model_entry: int) -> float:
+		return _score.get(model_entry, 0.0)
+
+	func _compute(models: Sacred.Models, todo: PackedInt32Array) -> void:
+		# Mesh side first: name -> local rest ORIGIN, the only field compared.
+		var mesh_local: Array[Dictionary] = []
+		for e in todo:
+			var d: Dictionary = {}
+			for b in models.bones(e):
+				var nm: String = (b["name"] as PackedByteArray).get_string_from_utf8()
+				if nm != "" and not d.has(nm):
+					d[nm] = (b["rest"] as Transform3D).origin
+			mesh_local.append(d)
+		var best := PackedInt32Array()
+		var best_score := PackedFloat32Array()
+		best.resize(todo.size())
+		best_score.resize(todo.size())
+		for i in todo.size():
+			best[i] = -1
+			best_score[i] = -1.0
+		# One pass over the clip corpus, scoring every wanted mesh against each
+		# clip as it is decoded -- decoding is the expensive half, so it happens
+		# exactly once no matter how many meshes are wanted.
+		for ci in models.count():
+			if models.kind_of(ci) != Sacred.Models.KIND_MOTION or not models.is_animation(ci):
+				continue
+			var cn := models.clip_bone_names(ci)
+			if cn.size() < MIN_MATCHED:
+				continue
+			var cb := models.clip_bones(ci)
+			if cb.size() != cn.size():
+				continue
+			for i in todo.size():
+				var d: Dictionary = mesh_local[i]
+				if d.size() < MIN_MATCHED:
+					continue
+				var matched := 0
+				var within := 0
+				for j in cn.size():
+					var o: Variant = d.get(cn[j])
+					if o == null:
+						continue
+					matched += 1
+					if (cb[j]["rest"] as Transform3D).origin.distance_to(o) <= WITHIN:
+						within += 1
+				if matched < MIN_MATCHED:
+					continue
+				var f := float(within) / float(matched)
+				if f > best_score[i]:
+					best_score[i] = f
+					best[i] = ci
+		for i in todo.size():
+			computed += 1
+			if best_score[i] >= MIN_SCORE:
+				_clip[todo[i]] = best[i]
+				_score[todo[i]] = best_score[i]
+			else:
+				# Cached as a NEGATIVE result, so a mesh with no usable clip
+				# does not pay the 7-second pass again on every launch.
+				_clip[todo[i]] = -1
+				_score[todo[i]] = maxf(0.0, best_score[i])
+
+	func _load_cache() -> void:
+		var f := FileAccess.open(CACHE, FileAccess.READ)
+		if f == null:
+			return
+		# The header pins the cache to one models.pak. A different install, or
+		# a patched one, invalidates the whole file rather than mixing entries
+		# from two corpora whose entry numbers do not mean the same thing.
+		if f.get_line() != "models.pak\t%d" % _pak_size:
+			return
+		while not f.eof_reached():
+			var parts := f.get_line().split("\t")
+			if parts.size() != 3:
+				continue
+			_clip[int(parts[0])] = int(parts[1])
+			_score[int(parts[0])] = float(parts[2])
+
+	func _save_cache() -> void:
+		var f := FileAccess.open(CACHE, FileAccess.WRITE)
+		if f == null:
+			push_warning("Rigs: cannot write %s -- recomputing on every launch" % CACHE)
+			return
+		f.store_line("models.pak\t%d" % _pak_size)
+		for e: int in _clip:
+			f.store_line("%d\t%d\t%f" % [e, _clip[e], _score.get(e, 0.0)])
+
+
+## bin/rust.bin -- which mesh an armour becomes when a DIFFERENT character wears
+## it. Compiled by retail from scripts/Rustungenswitch.txt, which retail does
+## not ship; the name is the specification: it is a SWITCH, not an index.
+##
+## LAYOUT, fixed by exact arithmetic (autoresearch row 743): u32 count = 85,
+## then 85 groups, each a u32 n followed by n pairs of u32 (wearer, mesh). Both
+## are items.pak RECORD indices, and an items.pak record's +0x37 name is a .GRN
+## filename -- the same "the id IS the model" chain Sacred.Creatures uses. The
+## parse consumes 1098 of 1098 u32s and 506 of 506 pairs name a mesh on BOTH
+## sides; anything less and this class refuses to report found.
+##
+## HOW IT IS KEYED, and why there is no index to look for (row 744): the ARMOUR
+## MESH is the key. 503 distinct meshes across 506 pairs, only 3 in more than
+## one group, and distinct (wearer, mesh) pairs == distinct meshes -- so the
+## wearer is a function of the mesh and the left column only declares whose
+## version a mesh is. A group is one armour, listed once per character that has
+## it. No file carries a 0..84 ordinal; items.pak has no such column and is not
+## an item catalogue at all.
+##
+## Everything here is by NAME, because that is what a caller holding a
+## models.pak entry has, and because the two paks spell the same file with
+## different case (items.pak stores "Seraphim_leather_04.grn").
+class Armour extends RefCounted:
+	## Meshes ambiguous BY items.pak RECORD -- the real key. Measured: 3.
+	var ambiguous_records := 0
+	## Meshes ambiguous BY FILENAME, which is the only key a caller holding a
+	## models.pak entry can offer. Measured: 109 of 284 distinct names, and for
+	## 74 of those the group choice CHANGES the answer for some wearer. This is
+	## why the name API below reports rather than decides.
+	var ambiguous_names := 0
+	var distinct_names := 0
+	## Groups whose wearer column repeats, so one (group, wearer) lookup yields
+	## more than one mesh. Measured: 8 of 85.
+	var duplicate_wearer_groups := 0
+	var groups := 0
+	var pairs := 0
+	var found := false
+
+	## items.pak record -> group index.
+	var _group_of_record: Dictionary[int, int] = {}
+	## UPPER filename -> every group any record of that name belongs to.
+	var _groups_of_name: Dictionary[String, PackedInt32Array] = {}
+	## group -> Array of [UPPER wearer name, mesh name as items.pak spells it].
+	var _members: Array[Array] = []
+
+	func _init(install: String) -> void:
+		var items := Sacred.Items.new(Sacred.Pak.new(install.path_join("pak/items.pak")))
+		var raw := FileAccess.get_file_as_bytes(install.path_join("bin/rust.bin"))
+		if raw.size() < 4 or raw.size() % 4 != 0:
+			push_warning("Armour: bin/rust.bin missing or not u32-aligned under %s" % install)
+			return
+		var n := raw.decode_u32(0)
+		var p := 4
+		var rec_first: Dictionary[int, int] = {}
+		var rec_amb: Dictionary[int, bool] = {}
+		var name_amb: Dictionary[String, bool] = {}
+		for g in n:
+			if p + 4 > raw.size():
+				push_warning("Armour: rust.bin group %d runs past the file" % g)
+				return
+			var c := raw.decode_u32(p)
+			p += 4
+			if p + c * 8 > raw.size():
+				push_warning("Armour: rust.bin group %d declares %d pairs it cannot hold" % [g, c])
+				return
+			var members: Array = []
+			var wearers: Dictionary[String, int] = {}
+			for k in c:
+				var wrec := raw.decode_u32(p + k * 8)
+				var mrec := raw.decode_u32(p + k * 8 + 4)
+				var wname := items.name_of(wrec).to_upper()
+				var mname := items.name_of(mrec)
+				if wname == "" or mname == "":
+					# Both sides naming a mesh is what fixes the layout; one that
+					# does not means this is not rust.bin.
+					push_warning("Armour: rust.bin group %d pair %d does not name a mesh" % [g, k])
+					return
+				members.append([wname, mname])
+				wearers[wname] = int(wearers.get(wname, 0)) + 1
+				if rec_first.has(mrec):
+					if rec_first[mrec] != g:
+						rec_amb[mrec] = true
+				else:
+					rec_first[mrec] = g
+					_group_of_record[mrec] = g
+				var key := mname.to_upper()
+				var gl: PackedInt32Array = _groups_of_name.get(key, PackedInt32Array())
+				if not gl.has(g):
+					if not gl.is_empty():
+						name_amb[key] = true
+					gl.append(g)
+					_groups_of_name[key] = gl
+				pairs += 1
+			for w: String in wearers:
+				if wearers[w] > 1:
+					duplicate_wearer_groups += 1
+					break
+			_members.append(members)
+			p += c * 8
+		if p != raw.size():
+			push_warning("Armour: rust.bin left %d trailing bytes -- layout rejected" % (raw.size() - p))
+			return
+		ambiguous_records = rec_amb.size()
+		ambiguous_names = name_amb.size()
+		distinct_names = _groups_of_name.size()
+		groups = _members.size()
+		found = groups > 0
+
+	## EXACT lookup: the wearer's version(s) of the armour held as items.pak
+	## record `mesh_record`. This is the form the engine itself can use, because
+	## an item names a RECORD, and two records spelling the same .GRN are
+	## different armours that merely look alike.
+	func variants_for_record(mesh_record: int, wearer_name: String) -> PackedStringArray:
+		return _read(_group_of_record.get(mesh_record, -1), wearer_name)
+
+	## BEST-EFFORT lookup by filename, for a caller holding a models.pak entry
+	## and no item. Returns the UNION over every group any record of that name
+	## belongs to, so nothing is silently dropped -- but check is_ambiguous()
+	## before trusting it, because 109 of 284 names span several groups and 74
+	## of those disagree about the answer.
+	func variants_for(mesh_name: String, wearer_name: String) -> PackedStringArray:
+		var out := PackedStringArray()
+		for g in _groups_of_name.get(_key(mesh_name), PackedInt32Array()):
+			for v in _read(g, wearer_name):
+				if not out.has(v):
+					out.append(v)
+		return out
+
+	## True when this FILENAME maps to more than one armour group, i.e. the
+	## name is not enough to identify the armour and variants_for() is a union
+	## of several possible answers rather than the answer.
+	func is_ambiguous(mesh_name: String) -> bool:
+		return _groups_of_name.get(_key(mesh_name), PackedInt32Array()).size() > 1
+
+	## How many groups any record of this filename belongs to; 0 means the name
+	## is not armour at all, which is a different answer from "no variant".
+	func group_count(mesh_name: String) -> int:
+		return _groups_of_name.get(_key(mesh_name), PackedInt32Array()).size()
+
+	func _read(g: int, wearer_name: String) -> PackedStringArray:
+		var out := PackedStringArray()
+		if g < 0 or g >= _members.size():
+			return out
+		var want := _key(wearer_name)
+		for m: Array in _members[g]:
+			if m[0] == want:
+				out.append(m[1])
+		return out
+
+	## items.pak and models.pak disagree about case, and a caller may hand over
+	## a name with or without the extension.
+	func _key(name: String) -> String:
+		var t := name.strip_edges().to_upper()
+		return t if t.ends_with(".GRN") else t + ".GRN"

@@ -1,4 +1,4 @@
-extends SceneTree
+extends "res://check.gd"
 ## Parity harness: prints the same facts analysis/tools/verify_ref.py prints,
 ## so the Godot readers can be diffed against the Python decode byte-for-byte.
 ##
@@ -43,22 +43,34 @@ const LAYER_RULES := {
 }
 
 func _init() -> void:
+	super()
 	var install := Sacred.find_install()
 	if install == "":
 		printerr("no install found; pass --install=/path/to/install")
-		quit(1)
+		finish(1)
 		return
 	print("install\t%s" % install)
 
-	var tiles_pak := Sacred.Pak.new(install.path_join("pak/tiles.pak"))
+	var tiles_path := install.path_join("pak/tiles.pak")
+	# tiles.pak is opened TWICE on purpose: once as a Sacred.Pak for the `pak`
+	# fact line below, and once as a Sacred.Tiles further down for the `tiles`
+	# line. verify_ref.py prints both from one handle; this harness has two
+	# readers for the two jobs, and dropping either one breaks the byte-for-byte
+	# diff AGENTS.md documents as the layer-1 gate.
 	var tex_pak := Sacred.Pak.new(install.path_join("pak/texture.pak"))
 	var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 	var world := Sacred.World.new(install.path_join("world"))
-	if not (tiles_pak.is_open() and tex_pak.is_open() and models_pak.is_open() and world.is_open()):
-		quit(1)
+	if not (FileAccess.file_exists(tiles_path) and tex_pak.is_open() and models_pak.is_open() and world.is_open()):
+		finish(1)
 		return
 
-	_pak_facts("tiles.pak", tiles_pak)
+	# Order matches verify_ref.py's own loop -- tiles, texture, models -- because
+	# the gate is a line-for-line diff, not a set comparison.
+	var tiles_index := Sacred.Tiles.new(tiles_path)
+	print("pak\ttiles.pak\tcount=%d\tfirst=%d,%d\tlast=%d,%d" % [
+		tiles_index.count(), tiles_index.entry_offset(0), tiles_index.entry_size(0),
+		tiles_index.entry_offset(tiles_index.count() - 1),
+		tiles_index.entry_size(tiles_index.count() - 1)])
 	_pak_facts("texture.pak", tex_pak)
 	_pak_facts("models.pak", models_pak)
 	print("world\tcount=%d\tgrid=%dx%d" % [world.count(), world.size.x, world.size.y])
@@ -99,7 +111,7 @@ func _init() -> void:
 		print("walkable\t%d,%d\tregions=%d\tcells=%d\topen=%d\tmd5=%s" % [
 			s[0], s[1], regions.list.size(), cells, open_cells, _md5(text.to_utf8_buffer())])
 
-	var tiles := Sacred.Tiles.new(tiles_pak)
+	var tiles := Sacred.Tiles.new(tiles_path)
 	print("tiles\tcount=%d\ttex0=%d\ttexlast=%d" % [
 		tiles.count(), tiles.texture_id(0), tiles.texture_id(tiles.count() - 1)])
 
@@ -216,7 +228,7 @@ func _init() -> void:
 			_md5(models.clip_bytes(idx))])
 
 	_layer_check()
-	quit(0)
+	finish(0)
 
 
 func _pak_facts(label: String, p: Sacred.Pak) -> void:

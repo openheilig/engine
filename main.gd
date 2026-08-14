@@ -23,6 +23,7 @@ const SECT: int = Sacred.SECT
 
 var _cam: IsoCamera
 var _view: SectorView
+var _world: Sacred.World
 
 ## Actor world layer (world/actor_registry.gd, world/sim.gd). Constructed
 ## once in _ready(), never added to the scene tree -- see
@@ -59,7 +60,63 @@ const RECORD_FRAME_BUDGET := 20000        ## generous upper bound; --autoplay=60
 # replay run is in progress -- every other mode is untouched.
 var _path_window: PathWindow = null
 var _goal_cell := PathWindow.NO_GOAL      ## BFS-derived once per record/replay run; NO_GOAL if none could be derived
+var _supported_route := false             ## --walk-route=supported-in-out; test-only measured-cell route
 const GOAL_REQUEST_TICK := 250            ## the one scripted tick that requests a path (well after spawn, well before autoplay ends)
+## Measured 06-02 OZELT1 footprint in sector 53,28: the direct-cell route is
+## explicitly a deterministic harness fallback because 06-03 measured 0/20
+## walkable-into tents under the current FLOOR/DOOR/STEP allowlist.
+const SUPPORTED_ROUTE_INTERIOR_TICK := 30
+const SUPPORTED_ROUTE_EXTERIOR_TICK := 60
+## The route walks a REAL path, both ways, through OZELT3 at region 53,28,0 --
+## the tent next door to the OZELT1 one this gate used to use. OZELT1 is a
+## CLOSED POCKET under the production navmesh (row 752: 86 reachable cells, all
+## inside its own rect, zero walkable neighbours outside it), so no route
+## through it could ever be walked in from the outside. A world scan (row 753)
+## found the navmesh admits tents per FAMILY rather than not at all -- OZELT3
+## 5 of 5, TENT6 6 of 6, TENT2 3 of 3 escape, while OZELT1 0 of 7 and OZELT2
+## 0 of 5 do not -- and 53,28,0 is an OZELT3 in the SAME camp and the same
+## sector, so the gate keeps its streaming and its scenery and gains a route
+## that is walked end to end.
+const SUPPORTED_ROUTE_REGION := Vector3i(53, 28, 0)       ## measured OZELT3 key
+## Interior floor -> DOOR 3425,1829 -> STEP 3425,1830 -> outside, 20 cells,
+## every consecutive pair 4-adjacent and every cell open under Walkable,
+## derived by breadth-first search and verified before use. Walked forwards to
+## leave and backwards to enter; there is no teleport anywhere in this route.
+const SUPPORTED_ROUTE_PATH: Array[Vector2i] = [
+	Vector2i(3427, 1818), Vector2i(3427, 1819), Vector2i(3427, 1820),
+	Vector2i(3427, 1821), Vector2i(3426, 1821), Vector2i(3426, 1822),
+	Vector2i(3425, 1822), Vector2i(3425, 1823), Vector2i(3425, 1824),
+	Vector2i(3425, 1825), Vector2i(3425, 1826), Vector2i(3425, 1827),
+	Vector2i(3425, 1828), Vector2i(3425, 1829), Vector2i(3425, 1830),
+	Vector2i(3426, 1830), Vector2i(3426, 1831), Vector2i(3426, 1832),
+	Vector2i(3426, 1833), Vector2i(3426, 1834),
+]
+## Index 13 is the DOOR: arriving there from outside is what flips INTERIOR.
+## Index 14 is the STEP: arriving there from inside is what flips EXTERIOR.
+## Both are measured positions in the path above, not tuning knobs -- they are
+## what pins the two swaps to SUPPORTED_ROUTE_INTERIOR_TICK and
+## SUPPORTED_ROUTE_EXTERIOR_TICK while the legs either side are walked.
+const SUPPORTED_ROUTE_DOOR_INDEX := 13
+const SUPPORTED_ROUTE_STEP_INDEX := 14
+const SUPPORTED_ROUTE_OUTSIDE := Vector2i(3426, 1834)
+const SUPPORTED_ROUTE_INTERIOR := Vector2i(3427, 1818)  ## measured interior FLOOR
+const SUPPORTED_ROUTE_DOOR := Vector2i(3425, 1829)
+const SUPPORTED_ROUTE_STEP := Vector2i(3425, 1830)## WHY THE OUTSIDE LEGS ARE STILL TELEPORTS, measured rather than assumed. A
+## BFS over open cells from the interior floor reaches 86 cells, bounded to
+## 3413,1833..3423,1845 -- entirely inside the region rect 3410,1829..3425,1847
+## -- and the number of walkable cells OUTSIDE that rect adjacent to the
+## reachable set is ZERO. The door and the step are both reachable; nothing
+## beyond them is. The tent is a closed pocket under the production navmesh,
+## which is row 632's "no camp tent is walkable-into" reproduced from the
+## inside out. So the in-tent leg below is a real walk and the two outside legs
+## cannot be; making them walkable needs a navmesh that admits the tent, not a
+## different cell list.
+## Door-crossing geometry (retail moveDoorPosition equivalent, generalized).
+## The port navmesh cannot walk door cells from either side (06-03: 0/20
+## walkable-into), so clicking a footprint DOOR/STEP cell teleports the actor
+## across the doorway instead of requesting an unreachable A* goal.
+const DOOR_EXTERIOR_STEP := 2   ## cells past the region edge for the exterior side
+const DOOR_TRIGGER_RADIUS := 1  ## Chebyshev radius around the doorway within which a click crosses (2026-08-13)
 
 ## Task 3's origin perturbation: a plain number, sourced here at the
 ## composition root, never inside godot-port/world/ -- large enough
@@ -72,6 +129,13 @@ const ORIGIN_PERTURB_OFFSET := Vector2i(PathWindow.WINDOW_EDGE, PathWindow.WINDO
 # default streaming branch runs -- fixed-region, single-model, window-probe
 # and record/replay modes are all unaffected.
 var _player_view: PlayerView = null
+## --creatures: the spawn tables, drawn. One built rig per rolled creature in
+## the player's own sector, each playing the clip Sacred.Rigs picked for its
+## mesh by bone geometry. Held so _process can keep them placed and so the
+## tree frees them on quit exactly like the player's rig.
+var _show_creatures := false
+var _creature_views: Array[PlayerView] = []
+var _creature_cells: Array[Vector2] = []
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
 ## --hideplayer: build the player view and keep the camera following it
 ## exactly like the ordinary case, but never make its mesh visible. A
@@ -98,10 +162,11 @@ func _ready() -> void:
 			+ "or write install_path into user://opensacred.cfg.")
 		return
 
-	var tiles_pak := Sacred.Pak.new(install.path_join("pak/tiles.pak"))
+	var tiles_path := install.path_join("pak/tiles.pak")
 	var tex_pak := Sacred.Pak.new(install.path_join("pak/texture.pak"))
-	var world := Sacred.World.new(install.path_join("world"))
-	if not (tiles_pak.is_open() and tex_pak.is_open() and world.is_open()):
+	_world = Sacred.World.new(install.path_join("world"))
+	var world := _world
+	if not (FileAccess.file_exists(tiles_path) and tex_pak.is_open() and world.is_open()):
 		return
 	# Sacred's own pointer, straight from texture.pak. Cosmetic and non-fatal --
 	# a failure warns and leaves the platform cursor. Skipped under --headless,
@@ -109,7 +174,7 @@ func _ready() -> void:
 	if DisplayServer.get_name() != "headless":
 		RetailCursor.apply(tex_pak)
 
-	var tiles := Sacred.Tiles.new(tiles_pak)
+	var tiles := Sacred.Tiles.new(tiles_path)
 	var statics: Sacred.Statics
 	var static_pak := Sacred.Pak.new(install.path_join("world/static.pak"))
 	if static_pak.is_open():
@@ -123,14 +188,41 @@ func _ready() -> void:
 	if items_pak.is_open():
 		items = Sacred.Items.new(items_pak)
 	_records = RecordStore.new(items, mixed)
+	# The per-cell OVERLAY TILE layer (row 695). 188 MB, so it is read by
+	# handle and never bulk-loaded; a missing or unreadable file just means the
+	# terrain draws without its overlays, exactly as it did before.
+	var floor_pak := Sacred.Pak.new(install.path_join("world/floor.pak"))
+	if not floor_pak.is_open():
+		floor_pak = null
+	var footprints: Sacred.Footprints = null
+	if statics != null and items != null:
+		footprints = Sacred.Footprints.new(statics, items)
 	var argv := OS.get_cmdline_user_args() + OS.get_cmdline_args()
 	var stats := "--stats" in argv
 	var markers := "--markers" in argv
 	var objects := not ("--noobjects" in argv)
 	_show_player = not ("--noplayer" in argv)
 	_hide_player_mesh = "--hideplayer" in argv
-	var interiors := "--interiors" in argv
+	var force_interior := "--force-interior" in argv
+	for a in argv:
+		if a.begins_with("--walk-route="):
+			var route_name := a.trim_prefix("--walk-route=")
+			if route_name == "supported-in-out":
+				_supported_route = true
+			else:
+				printerr("walk-route\tunsupported=%s" % route_name)
+				get_tree().quit(1)
+				return
+	var inverse_locality_probe := "--inverse-locality-probe" in argv
 	var show_regions := "--regions" in argv
+	# --flags1e: paint WldxEntry +0x1e as an overlay (row 708). Debug only.
+	var show_flags1e := "--flags1e" in argv
+	var show_classhi := "--classhi" in argv
+	# --spawns: tint each sector by what its script spawn tables roll there
+	# (rows 728-737). Built here rather than in SectorView so the view keeps
+	# taking plain data and never opens a file of its own.
+	var show_spawns := "--spawns" in argv
+	_show_creatures = "--creatures" in argv
 	var exterior := "--exterior" in argv
 	var hide_levels := 0
 	for a in argv:
@@ -200,10 +292,31 @@ func _ready() -> void:
 	# 05-12 Task 2: measures whether a clip's skeleton and the model's
 	# skeleton are the SAME rig -- matched by exact bone NAME only, never by
 	# index, never by parent_effective shape, never by the record's id.
+	# --equip=PREFIX[,PREFIX...] draws every mesh whose name begins with any of
+	# the prefixes on ONE shared pose -- the R1.4 demonstration (row 741). The
+	# set is explicit rather than inferred: "GLAD" alone names 80 meshes, every
+	# armour variant the Gladiator has, and overlaying all of them at once is
+	# not an outfit. `--equip=GLADIATOR.GRN,GLAD_SA5` is a body plus one set.
+	var equip_spec := ""
+	for a in argv:
+		if a.begins_with("--equip="):
+			equip_spec = a.trim_prefix("--equip=")
+
 	var anim_rigcheck := ""
 	for a in argv:
 		if a.begins_with("--anim-rigcheck="):
 			anim_rigcheck = a.trim_prefix("--anim-rigcheck=")
+	# --anim-riganchor=NAME runs the SAME measurement re-anchored at ANIM_ANCHOR.
+	# It does not revise --anim-rigcheck=, whose REFUTED verdict (row 609) stands
+	# as measured for file-root anchoring; it tests row 609's own named structural
+	# explanation for that refutation -- an extra coordinate-alignment bone above
+	# Bip01 present in the mesh file and absent from the clip file -- by removing
+	# the differing root chain from both sides instead of the threshold from the
+	# test. Same epsilon, same control, same verdict rule.
+	for a in argv:
+		if a.begins_with("--anim-riganchor="):
+			anim_rigcheck = a.trim_prefix("--anim-riganchor=")
+			_anim_rig_anchor = ANIM_ANCHOR
 	for a in argv:
 		if a.begins_with("--tickhz="):
 			_tick_hz = clampi(int(a.trim_prefix("--tickhz=")), 1, 240)
@@ -250,6 +363,10 @@ func _ready() -> void:
 		_tick_hz, Sim.R_SIM, Sim.R_RENDER, Sim.R_LOAD,
 		Sim.R_SIM < Sim.R_RENDER and Sim.R_RENDER < Sim.R_LOAD])
 
+	if equip_spec != "":
+		await _show_equip(install, equip_spec, anim_name)
+		return
+
 	if grn_name != "":
 		await _show_model(install, grn_name, anim_name, anim_falsify, anim_key_report, anim_rigcheck)
 		return
@@ -282,12 +399,16 @@ func _ready() -> void:
 		_family_scan(world, statics, items, family_scan.split(",", false))
 		return
 
+	if inverse_locality_probe:
+		await _inverse_locality_probe(install, tex_pak, tiles, world, statics, mixed, items, footprints)
+		return
+
 	if _has_crowd:
 		await _run_crowd(install, world, tex_pak, tiles, statics, mixed, items)
 		return
 
 	if _record_path != "" or _replay_path != "":
-		await _run_record_or_replay(world, install, tex_pak, tiles, statics, mixed, items)
+		await _run_record_or_replay(world, install, tex_pak, tiles, statics, mixed, items, footprints)
 		return
 
 	_cam = IsoCamera.new()
@@ -297,10 +418,12 @@ func _ready() -> void:
 	_view = SectorView.new()
 	_view.name = "SectorView"
 	_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {
-		"stats": stats, "markers": markers, "objects": objects, "interiors": interiors,
-		"regions": show_regions, "exterior": exterior, "hide_levels": hide_levels,
+		"stats": stats, "markers": markers, "objects": objects,
+		"force_interior": force_interior, "regions": show_regions, "flags1e": show_flags1e, "classhi": show_classhi, "exterior": exterior, "hide_levels": hide_levels,
+		"spawns": _spawn_tiers(install) if show_spawns else {},
 		"only_flag": only_flag, "band_count": band_count, "sortcube": sortcube,
-	})
+		"floor_pak": floor_pak,
+	}, footprints)
 	add_child(_view)
 
 	var region := _region_arg()
@@ -333,8 +456,11 @@ func _ready() -> void:
 			_player_id = _registry.spawn(_first_real_record_id(), player_cell, 100, 100)
 			_sim.walk = walk
 			_sim.focus_actor_id = _player_id
-			if statics != null and items != null:
-				_sim.interior = Interior.new(world, walk, Sacred.Footprints.new(statics, items))
+			_path_window = PathWindow.new(walk)
+			_sim.path_window = _path_window
+			_cam.move_click.connect(_on_move_click)
+			if footprints != null:
+				_sim.interior = Interior.new(world, walk, footprints)
 			print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
 				player_cell.x, player_cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
 			if _show_player:
@@ -348,6 +474,9 @@ func _ready() -> void:
 						print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
 							PlayerView.MODEL_NAME, _player_view.model_index,
 							_player_view.vertex_count, _player_view.triangle_count])
+				_ensure_rig_light()
+				if _show_creatures and models_pak.is_open():
+					_build_creatures(install, Sacred.Models.new(models_pak), player_cell)
 
 	if region != Vector3i.ZERO:
 		_view.load_region(region.x, region.y, region.z)
@@ -424,11 +553,15 @@ func _advance_sim(dt: float, focus: Vector2) -> int:
 	var pre_dropped := _sim.dropped
 	var intent := Vector2.ZERO
 	var recording := _recorder != null and _recorder.is_open()
+	var route_cell := PathWindow.NO_GOAL
 	if recording and _player_id != ActorRegistry.INVALID_ID:
-		intent = _scripted_intent(pre_tick)
+		intent = Vector2.ZERO if _supported_route else _scripted_intent(pre_tick)
 		var p := _registry.get_actor(_player_id)
 		if p != null:
 			p.heading = intent
+			if _supported_route:
+				route_cell = _supported_route_cell(pre_tick + 1)
+				p.cell = Vector2(route_cell) + Vector2(0.5, 0.5)
 	# Plan 04-02: the one scripted goal request, threaded into the LIVE sim
 	# exactly like a real caller would. The request names the TICK it is for and
 	# Sim fires it when its own counter reaches that number.
@@ -450,13 +583,181 @@ func _advance_sim(dt: float, focus: Vector2) -> int:
 		_sim.pending_goal = _goal_cell
 		_sim.pending_goal_tick = GOAL_REQUEST_TICK
 	var ran := _sim.advance(dt, _registry, focus)
+	if _view != null and _sim.interior != null:
+		_view.apply_swap(_sim.interior.current_with_families())
 	if recording:
+		# The route cell the live run ACTUALLY applied for this whole advance --
+		# chosen once from pre_tick + 1 above and held for every tick the burst
+		# runs, because the actor cell is set before advance(), not per tick.
+		# Recording _supported_route_cell(t) per tick instead would describe an
+		# idealised schedule the live run never followed, and replay would then
+		# diverge whenever a leg boundary landed mid-burst: measured, at tick 33
+		# the recorder said INTERIOR while the live run was still on the DOOR.
+		# The two-value schedule this route used before never straddled a burst,
+		# which is the only reason the divergence had not surfaced.
+		var applied_route_cell := _supported_route_cell(pre_tick + 1) if _supported_route else PathWindow.NO_GOAL
 		for t in range(pre_tick + 1, pre_tick + ran + 1):
 			var goal := _goal_cell if t == GOAL_REQUEST_TICK else PathWindow.NO_GOAL
-			_recorder.write_input(t, intent, goal)
+			_recorder.write_input(t, intent, goal, applied_route_cell)
 		if _sim.dropped > pre_dropped:
 			_recorder.write_gap(_sim.tick, _sim.dropped - pre_dropped)
 	return ran
+
+
+func _on_move_click(goal: Vector2i) -> void:
+	if _player_id == ActorRegistry.INVALID_ID or _sim == null or _sim.path_window == null:
+		return
+	if goal.x < 0 or goal.y < 0 or goal.x >= int(_cam.cell_limit.x) or goal.y >= int(_cam.cell_limit.y):
+		return
+	if _door_transition(goal):
+		return
+	_sim.pending_goal_actor_id = _player_id
+	_sim.pending_goal = goal
+	_sim.pending_goal_tick = -1
+	print("click_goal\tcell=%d,%d\tactor=%d" % [goal.x, goal.y, _player_id])
+
+
+## Door-object transition (retail moveDoorPosition equivalent, generalized).
+## Returns true if `goal` is a DOOR/STEP cell inside a footprint region and
+## the actor was moved across the doorway; false leaves the normal A* goal in
+## place. The interior destination is the nearest FLOOR cell inside the
+## region; the exterior destination is `DOOR_EXTERIOR_STEP` cells past the
+## region edge on the door's outward side. The swap state follows from the
+## existing Interior derive on the actor's new cell.
+func _door_transition(goal: Vector2i) -> bool:
+	if _sim.interior == null:
+		return false
+	var actor := _registry.get_actor(_player_id)
+	if actor == null:
+		return false
+	var hit := _footprint_containing(goal)
+	if hit.is_empty():
+		return false
+	var footprint: Dictionary = hit["footprint"]
+	var region_key: int = hit["key"]
+	var door := _nearest_door_cell(footprint, goal)
+	if door == Vector2i(-1, -1):
+		return false
+	# Gate: only clicks ON or immediately beside the doorway may cross. A click
+	# anywhere else in the footprint rect is the player walking around inside
+	# the building -- before this gate, every interior click teleported the
+	# actor across the door (in/out/in/out flip-flop, observed 2026-08-13).
+	if maxi(absi(goal.x - door.x), absi(goal.y - door.y)) > DOOR_TRIGGER_RADIUS:
+		return false
+	var inside := _interior_current(region_key)
+	var destination := _interior_destination(footprint, door) if not inside \
+		else _exterior_destination(footprint, door, region_key)
+	if destination == Vector2i(-1, -1):
+		return false
+	actor.cell = Vector2(destination) + Vector2(0.5, 0.5)
+	print("door_transition\tcell=%d,%d\tfrom=%s\tto=%d,%d" % [
+		goal.x, goal.y, Interior.state_name(Interior.State.INTERIOR if inside else Interior.State.EXTERIOR),
+		destination.x, destination.y])
+	return true
+
+
+## First footprint whose region rect contains `cell`, with its packed region
+## key, or {} if none. The key is needed for an exact Interior state lookup.
+func _footprint_containing(cell: Vector2i) -> Dictionary:
+	if _world == null or _sim.interior == null:
+		return {}
+	var sx := int(floor(float(cell.x) / float(Sacred.SECT)))
+	var sy := int(floor(float(cell.y) / float(Sacred.SECT)))
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			var gx := sx + dx
+			var gy := sy + dy
+			if gx < 0 or gy < 0 or gx >= 100 or gy >= 100:
+				continue
+			if not _world.has_sector(gx, gy):
+				continue
+			var resolved: Variant = _sim.interior._footprints_for(gx, gy)
+			if resolved == null:
+				continue
+			for index: int in resolved:
+				var fp: Dictionary = resolved[index]
+				if Rect2i(fp["anchor"], fp["size"]).has_point(cell):
+					return {
+						"footprint": fp,
+						"key": gx * 1000000 + gy * 1000 + index,
+					}
+	return {}
+
+
+## Nearest DOOR/STEP cell in the footprint region to `cell`, or (-1,-1).
+func _nearest_door_cell(fp: Dictionary, cell: Vector2i) -> Vector2i:
+	var source: Dictionary = fp["region"]
+	var anchor: Vector2i = fp["anchor"]
+	var size: Vector2i = fp["size"]
+	var best := Vector2i(-1, -1)
+	var best_dist := 1 << 30
+	for y in size.y:
+		for x in size.x:
+			var cls := Sacred.Regions.cell_class(source, x, y)
+			if cls != Sacred.Regions.DOOR and cls != Sacred.Regions.STEP:
+				continue
+			var d := Vector2i(x + anchor.x, y + anchor.y).distance_squared_to(cell)
+			if d < best_dist:
+				best_dist = d
+				best = Vector2i(x + anchor.x, y + anchor.y)
+	return best
+
+
+## True if the interior sim currently holds this packed region key INTERIOR.
+func _interior_current(region_key: int) -> bool:
+	if _sim.interior == null:
+		return false
+	return _sim.interior.current().get(region_key, Interior.State.EXTERIOR) == Interior.State.INTERIOR
+
+
+## Nearest FLOOR cell inside the footprint region to `door`, or (-1,-1).
+func _interior_destination(fp: Dictionary, door: Vector2i) -> Vector2i:
+	var source: Dictionary = fp["region"]
+	var anchor: Vector2i = fp["anchor"]
+	var size: Vector2i = fp["size"]
+	var best := Vector2i(-1, -1)
+	var best_dist := 1 << 30
+	for y in size.y:
+		for x in size.x:
+			var cls := Sacred.Regions.cell_class(source, x, y)
+			if cls != Sacred.Regions.FLOOR:
+				continue
+			var c := Vector2i(x + anchor.x, y + anchor.y)
+			var d := c.distance_squared_to(door)
+			if d < best_dist:
+				best_dist = d
+				best = c
+	return best
+
+
+## Find the first cell outside the footprint and past the measured trigger
+## approach corridor along the door's outward ray.
+func _exterior_destination(fp: Dictionary, door: Vector2i, region_key: int) -> Vector2i:
+	var anchor: Vector2i = fp["anchor"]
+	var size: Vector2i = fp["size"]
+	var centre := Vector2(anchor) + Vector2(size) * 0.5
+	var outward := (Vector2(door) + Vector2(0.5, 0.5) - centre)
+	if outward == Vector2.ZERO:
+		return Vector2i(-1, -1)
+	outward = outward.normalized()
+	var max_distance := maxi(size.x, size.y) + DOOR_EXTERIOR_STEP + Interior.APPROACH_CELLS
+	var best := Vector2i(-1, -1)
+	var best_distance := 1 << 30
+	for dy in range(-max_distance, max_distance + 1):
+		for dx in range(-max_distance, max_distance + 1):
+			var candidate := door + Vector2i(dx, dy)
+			if Rect2i(anchor, size).has_point(candidate):
+				continue
+			var delta := Vector2(candidate - door)
+			if delta.dot(outward) <= 0.0:
+				continue
+			if _sim.interior._triggered(candidate, region_key, fp):
+				continue
+			var distance := dx * dx + dy * dy
+			if distance < best_distance:
+				best_distance = distance
+				best = candidate
+	return best
 
 
 func _focus_cell() -> Vector2:
@@ -879,6 +1180,96 @@ func _follow_probe() -> void:
 	get_tree().quit(1 if mismatch else 0)
 
 
+## Capture-only inverse locality probe for Phase 6 Plan 05. This is deliberately
+## outside normal streaming/replay paths: it creates the real SectorView, settles
+## the blacksmith framing, snapshots only sector 32,54's existing run metadata,
+## applies a current_with_families()-shaped artificial TENT state, and compares
+## BLACKSMITH runs before/after. It never invents arena/cellar families.
+func _inverse_locality_probe(install: String, tex_pak: Sacred.Pak, tiles: Sacred.Tiles,
+		world: Sacred.World, statics: Sacred.Statics, mixed: Sacred.Mixed, items: Sacred.Items,
+		footprints: Sacred.Footprints) -> void:
+	if statics == null or mixed == null or items == null or footprints == null:
+		printerr("inverse-locality\tFAIL missing static/mixed/items/footprints readers")
+		get_tree().quit(1)
+		return
+	_cam = IsoCamera.new()
+	_cam.cell_limit = Vector2(world.size) * SECT
+	add_child(_cam)
+	_view = SectorView.new()
+	_view.name = "SectorView_inverse_locality_probe"
+	_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {}, footprints)
+	add_child(_view)
+	_cam.set_zoom_index(2)
+	_cam.look_at_cell(Vector2(2096.0, 3493.0))
+	for _i in 600:
+		await get_tree().process_frame
+		if not is_instance_valid(self):
+			return
+		if _view._run_nodes.has(32 * 100 + 54):
+			break
+	var target_key := 54 * 100 + 32
+	var before: Array = _view._run_nodes.get(target_key, [])
+	# Establish the normal exterior baseline through the same visibility-only
+	# path before injecting the unrelated TENT state.
+	_view.apply_swap({})
+	var blacksmith_before := _run_visibility_snapshot(before, "BLACKSMITH")
+	var tent_family := _probe_tent_family(footprints, world)
+	var artificial: Dictionary = {}
+	if tent_family != "":
+		artificial[1] = {"state": Interior.State.INTERIOR, "family": tent_family}
+	_view.apply_swap(artificial)
+	var after: Array = _view._run_nodes.get(target_key, [])
+	var blacksmith_after := _run_visibility_snapshot(after, "BLACKSMITH")
+	var tent_before := _run_visibility_snapshot(before, tent_family)
+	var tent_after := _run_visibility_snapshot(after, tent_family)
+	var blacksmith_same := blacksmith_before == blacksmith_after
+	var run_metadata_same := _run_metadata_snapshot(before) == _run_metadata_snapshot(after)
+	var target_ready := not before.is_empty() and tent_family != ""
+	var verdict := "PASS" if target_ready and blacksmith_same and run_metadata_same else "FAIL"
+	print("inverse-locality\\tframe=2096,3493\\tsector=32,54\\ttent_family=%s\\tblacksmith_before=%s\\tblacksmith_after=%s\\ttent_before=%s\\ttent_after=%s\\trun_metadata_same=%s\\tverdict=%s" % [
+		tent_family, blacksmith_before, blacksmith_after, tent_before, tent_after,
+		run_metadata_same, verdict])
+	get_tree().quit(0 if verdict == "PASS" else 1)
+
+
+func _probe_tent_family(footprints: Sacred.Footprints, world: Sacred.World) -> String:
+	for sector: Vector2i in [Vector2i(52, 51), Vector2i(53, 51), Vector2i(53, 52)]:
+		var resolved := footprints.resolve(world.sector(sector.x, sector.y), sector.x, sector.y)
+		for index: int in resolved:
+			var family := str(resolved[index].get("family", ""))
+			if family.begins_with("TENT"):
+				return family
+	return ""
+
+
+func _run_visibility_snapshot(runs: Array, family: String) -> String:
+	var visible := 0
+	var hidden := 0
+	var matching := 0
+	var classes: Dictionary[String, int] = {}
+	for run_meta: Dictionary in runs:
+		if str(run_meta.get("family", "")) != family:
+			continue
+		matching += 1
+		var run_class := str(run_meta.get("class", ""))
+		classes[run_class] = int(classes.get(run_class, 0)) + 1
+		if bool(run_meta["node"].visible):
+			visible += 1
+		else:
+			hidden += 1
+	return "family=%s matching=%d visible=%d hidden=%d classes=%s" % [family, matching, visible, hidden, classes]
+
+
+func _run_metadata_snapshot(runs: Array) -> Array[String]:
+	var out: Array[String] = []
+	for run_meta: Dictionary in runs:
+		out.append("%d:%d:%s:%s:%d:%s" % [
+			int(run_meta["source_start"]), int(run_meta["source_end"]),
+			str(run_meta["class"]), str(run_meta["family"]), int(run_meta["band"]),
+			str(run_meta["material_key"])])
+	return out
+
+
 ## Builds the Walkable navmesh, derives (or takes the override for) the
 ## spawn cell, spawns the player, and dispatches into a record run or a
 ## replay run. Normally builds no camera or SectorView at all --
@@ -895,7 +1286,8 @@ func _follow_probe() -> void:
 ## reach the dump; the only way to prove that is to make the two runs differ
 ## in nearly everything BUT the simulation, which is what this gives Gate 2.
 func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred.Pak,
-		tiles: Sacred.Tiles, statics: Sacred.Statics, mixed: Sacred.Mixed, items: Sacred.Items) -> void:
+		tiles: Sacred.Tiles, statics: Sacred.Statics, mixed: Sacred.Mixed, items: Sacred.Items,
+		footprints: Sacred.Footprints) -> void:
 	var argv := OS.get_cmdline_user_args() + OS.get_cmdline_args()
 	var live_view := "--liveview" in argv
 	var walk := Walkable.new(world)
@@ -912,7 +1304,6 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 	_player_id = _registry.spawn(rec_id, cell, 100, 100)
 	_sim.walk = walk
 	_sim.focus_actor_id = _player_id
-	var footprints := Sacred.Footprints.new(statics, items)
 	var interior := Interior.new(world, walk, footprints)
 	_sim.interior = interior
 
@@ -922,7 +1313,7 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 		add_child(_cam)
 		_view = SectorView.new()
 		_view.name = "SectorView"
-		_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {})
+		_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {}, footprints)
 		add_child(_view)
 		_cam.set_zoom_index(1)
 		_cam.look_at_cell(cell)
@@ -942,7 +1333,17 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 	_sim.path_window = _path_window
 	var bbox: Rect2i = spawn.get("bbox", Rect2i())
 	_goal_cell = _goal_from_component(walk, cell, bbox)
-	print("goal\tcell=%d,%d" % [_goal_cell.x, _goal_cell.y])
+	if _supported_route:
+		_goal_cell = PathWindow.NO_GOAL
+		print("supported-route\tname=supported-in-out\toutside=%d,%d\tdoor=%d,%d\tinterior=%d,%d\tstep=%d,%d\tregion=%d,%d,%d\tinterior_tick=%d\texterior_tick=%d\twalked_cells=%d\tcontrol=default-zero-swap" % [
+			SUPPORTED_ROUTE_OUTSIDE.x, SUPPORTED_ROUTE_OUTSIDE.y,
+			SUPPORTED_ROUTE_DOOR.x, SUPPORTED_ROUTE_DOOR.y,
+			SUPPORTED_ROUTE_INTERIOR.x, SUPPORTED_ROUTE_INTERIOR.y,
+			SUPPORTED_ROUTE_STEP.x, SUPPORTED_ROUTE_STEP.y,
+			SUPPORTED_ROUTE_REGION.x, SUPPORTED_ROUTE_REGION.y, SUPPORTED_ROUTE_REGION.z,
+			SUPPORTED_ROUTE_INTERIOR_TICK, SUPPORTED_ROUTE_EXTERIOR_TICK, SUPPORTED_ROUTE_PATH.size()])
+	else:
+		print("goal\tcell=%d,%d" % [_goal_cell.x, _goal_cell.y])
 
 	if _dump_path != "":
 		_dumper = Replay.Dumper.new(_dump_path)
@@ -1681,11 +2082,20 @@ func _compose_world(bl: Array[Dictionary]) -> Array[Transform3D]:
 ## before this task ran.
 const ANIM_RIGCHECK_CONTROL := "BATX_ATTACK_BH_A.GRN"
 const ANIM_RIGCHECK_WITHIN := 0.01
+## The real skeleton root of the Biped rig, below the file-structural __Root
+## and below model 589's extra alignment bone. Anchoring here is the whole of
+## what --anim-riganchor= changes.
+const ANIM_ANCHOR := "Bip01"
+var _anim_rig_anchor := ""
 
 ## One rig-agreement measurement, matching bones by exact NAME only (never
 ## index, never parent_effective shape, never the record's dword id) between
 ## `clip_idx`'s composed world bind transforms and `model_idx`'s. Empty
 ## Dictionary on an undecodable side.
+func _anchor_label() -> String:
+	return _anim_rig_anchor if _anim_rig_anchor != "" else "file-root"
+
+
 func _rigcheck_one(models: Sacred.Models, model_idx: int, clip_idx: int) -> Dictionary:
 	var model_bones := models.bones(model_idx)
 	var model_world := models.bind_poses(model_idx)
@@ -1704,6 +2114,27 @@ func _rigcheck_one(models: Sacred.Models, model_idx: int, clip_idx: int) -> Dict
 	if clip_names.is_empty() or clip_world.is_empty():
 		printerr("animrig\tclip entry %d has no decodable bones" % clip_idx)
 		return {}
+
+	# Re-anchor BOTH sides at their own copy of _anim_rig_anchor, so the chain
+	# above it -- the only place the two files are known to differ structurally
+	# -- stops contributing. A side missing the anchor is a hard failure, not a
+	# silent fall back to file-root anchoring: that would report an anchored
+	# verdict for an unanchored measurement.
+	var clip_index_by_name := {}
+	for i in clip_names.size():
+		if clip_names[i] != "" and not clip_index_by_name.has(clip_names[i]):
+			clip_index_by_name[clip_names[i]] = i
+	if _anim_rig_anchor != "":
+		if not model_by_name.has(_anim_rig_anchor) or not clip_index_by_name.has(_anim_rig_anchor):
+			printerr("animrig\tanchor %s is missing from model %d or clip %d" % [
+				_anim_rig_anchor, model_idx, clip_idx])
+			return {}
+		var minv: Transform3D = (model_by_name[_anim_rig_anchor] as Transform3D).affine_inverse()
+		for nm2: String in model_by_name:
+			model_by_name[nm2] = minv * (model_by_name[nm2] as Transform3D)
+		var cinv := clip_world[clip_index_by_name[_anim_rig_anchor]].affine_inverse()
+		for i in clip_world.size():
+			clip_world[i] = cinv * clip_world[i]
 
 	var matched := 0
 	var maxorigin := 0.0
@@ -1727,9 +2158,50 @@ func _rigcheck_one(models: Sacred.Models, model_idx: int, clip_idx: int) -> Dict
 		maxbasis = maxf(maxbasis, bd)
 		if od <= ANIM_RIGCHECK_WITHIN:
 			within += 1
+	# TEST 2 (topology) and TEST 3 (local rest), both pre-specified before this
+	# ran. They ask a different question from the bind-pose agreement above: a
+	# clip's stored rest need NOT equal the mesh's bind pose for the clip to be
+	# correct for that rig, but its bone TOPOLOGY must match, and a local-only
+	# comparison separates "wrong chain" from "genuinely different pose".
+	var model_parent_name := {}
+	for i in model_bones.size():
+		var nm3: String = (model_bones[i]["name"] as PackedByteArray).get_string_from_utf8()
+		var pe: int = model_bones[i]["parent_effective"]
+		var pn := ""
+		if pe >= 0 and pe < model_bones.size():
+			pn = (model_bones[pe]["name"] as PackedByteArray).get_string_from_utf8()
+		if nm3 != "" and not model_parent_name.has(nm3):
+			model_parent_name[nm3] = pn
+	var model_local := {}
+	for i in model_bones.size():
+		var nm4: String = (model_bones[i]["name"] as PackedByteArray).get_string_from_utf8()
+		if nm4 != "" and not model_local.has(nm4):
+			model_local[nm4] = model_bones[i]["rest"]
+	var topo_ok := 0
+	var topo_n := 0
+	var local_within := 0
+	var local_max := 0.0
+	for i in clip_names.size():
+		var nm5: String = clip_names[i]
+		if nm5 == "" or not model_parent_name.has(nm5):
+			continue
+		topo_n += 1
+		var cpe: int = clip_bones[i]["parent_effective"]
+		var cpn := ""
+		if cpe >= 0 and cpe < clip_names.size():
+			cpn = clip_names[cpe]
+		if cpn == model_parent_name[nm5]:
+			topo_ok += 1
+		var la: Transform3D = clip_bones[i]["rest"]
+		var lb: Transform3D = model_local[nm5]
+		var ld := la.origin.distance_to(lb.origin)
+		local_max = maxf(local_max, ld)
+		if ld <= ANIM_RIGCHECK_WITHIN:
+			local_within += 1
 	return {
 		"matched": matched, "total": clip_names.size(), "unmatched": clip_names.size() - matched,
 		"maxorigin": maxorigin, "maxbasis": maxbasis, "within": within, "worstbone": worstbone,
+		"topo_ok": topo_ok, "topo_n": topo_n, "local_within": local_within, "local_max": local_max,
 	}
 
 
@@ -1752,8 +2224,8 @@ func _anim_rigcheck(models: Sacred.Models, model_idx: int, clip_name: String) ->
 	var r := _rigcheck_one(models, model_idx, clip_idx)
 	if r.is_empty():
 		return false
-	print("animrig\tclip=%d\tmodel=%d\tmatched=%d/%d\tunmatched=%d\tmaxorigin=%.6f\tmaxbasis=%.6f\twithin=%d\tworstbone=%s" % [
-		clip_idx, model_idx, r.matched, r.total, r.unmatched, r.maxorigin, r.maxbasis, r.within, r.worstbone])
+	print("animrig\tanchor=%s\tclip=%d\tmodel=%d\tmatched=%d/%d\tunmatched=%d\tmaxorigin=%.6f\tmaxbasis=%.6f\twithin=%d\tworstbone=%s\ttopo=%d/%d\tlocalwithin=%d\tlocalmax=%.6f" % [
+		_anchor_label(), clip_idx, model_idx, r.matched, r.total, r.unmatched, r.maxorigin, r.maxbasis, r.within, r.worstbone, r.topo_ok, r.topo_n, r.local_within, r.local_max])
 
 	var control_idx := models.clip_index_of(ANIM_RIGCHECK_CONTROL)
 	if control_idx < 0 or control_idx == clip_idx:
@@ -1762,8 +2234,18 @@ func _anim_rigcheck(models: Sacred.Models, model_idx: int, clip_name: String) ->
 	if cr.is_empty():
 		printerr("animrig\tcontrol entry %s unavailable for comparison" % ANIM_RIGCHECK_CONTROL)
 		return true
-	print("animrig\tclip=%d\tmodel=%d\tmatched=%d/%d\tunmatched=%d\tmaxorigin=%.6f\tmaxbasis=%.6f\twithin=%d\tworstbone=%s\tcontrol=true" % [
-		control_idx, model_idx, cr.matched, cr.total, cr.unmatched, cr.maxorigin, cr.maxbasis, cr.within, cr.worstbone])
+	print("animrig\tanchor=%s\tclip=%d\tmodel=%d\tmatched=%d/%d\tunmatched=%d\tmaxorigin=%.6f\tmaxbasis=%.6f\twithin=%d\tworstbone=%s\ttopo=%d/%d\tlocalwithin=%d\tlocalmax=%.6f\tcontrol=true" % [
+		_anchor_label(), control_idx, model_idx, cr.matched, cr.total, cr.unmatched, cr.maxorigin, cr.maxbasis, cr.within, cr.worstbone, cr.topo_ok, cr.topo_n, cr.local_within, cr.local_max])
+
+	# TEST 2's own verdict, stated before running and independent of the
+	# bind-pose verdict below: CONFIRMED iff the clip's parent-name agreement
+	# beats the control's AND clears 0.9.
+	var topo_clip := float(r.topo_ok) / maxf(1.0, float(r.topo_n))
+	var topo_ctrl := float(cr.topo_ok) / maxf(1.0, float(cr.topo_n))
+	if topo_clip > topo_ctrl and topo_clip >= 0.9:
+		print("animrig\ttopology_verdict=CONFIRMED\tclip=%.4f\tcontrol=%.4f" % [topo_clip, topo_ctrl])
+	else:
+		print("animrig\ttopology_verdict=REFUTED\tclip=%.4f\tcontrol=%.4f" % [topo_clip, topo_ctrl])
 
 	var clip_agreement := float(r.within) / maxf(1.0, float(r.total))
 	var control_agreement := float(cr.within) / maxf(1.0, float(cr.total))
@@ -1862,6 +2344,18 @@ func _maybe_screenshot() -> void:
 		return
 	if not await _await_settled():
 		return
+	# --shot-delay=SECONDS holds the settled scene for a while before capturing,
+	# so two runs at different delays differ only by whatever MOVED between
+	# them. Without it every capture lands on the same settled frame and an
+	# animation is indistinguishable from a static pose.
+	var delay := 0.0
+	for arg2 in argv:
+		if arg2.begins_with("--shot-delay="):
+			delay = clampf(float(arg2.trim_prefix("--shot-delay=")), 0.0, 30.0)
+	if delay > 0.0:
+		await get_tree().create_timer(delay).timeout
+		if not is_instance_valid(self):
+			return
 	if want_drawcalls:
 		var draw_calls := RenderingServer.get_rendering_info(
 			RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
@@ -1870,3 +2364,396 @@ func _maybe_screenshot() -> void:
 		var err := get_viewport().get_texture().get_image().save_png(shot_path)
 		print("shot\t%s\t%s" % [shot_path, error_string(err)])
 	get_tree().quit()
+
+
+## --spawns support: sector -> tier, where the tier is what the sector's own
+## opcode-51 rolls would put on the map.
+##
+##   1  wildlife only            green
+##   2  a hostile roll, but nothing in it the hero fights   amber
+##   3  a hostile roll the hero fights                      red
+##
+## A sector with spawn records but no rolls at all (only the group and
+## per-sector opcodes) is left out, so "no tint" means "nothing rolls here".
+## The join is the one from spawn_factions_check.gd: Funk says what a sector
+## rolls, Creatures turns each id into a class, Factions says whether the hero
+## fights that class.
+func _spawn_tiers(install: String) -> Dictionary:
+	const HELD := 1
+	var funk := Sacred.Funk.new(install.path_join("bin/type_npc_seraphim"))
+	var creatures := Sacred.Creatures.new(install.path_join("pak"))
+	var factions := Sacred.Factions.new(install)
+	var out: Dictionary[Vector2i, int] = {}
+	for s: Vector2i in funk.by_sector:
+		var tier := 0
+		for roll in funk.rolls_for(s.x, s.y):
+			if roll["kind"] == Sacred.Funk.WILDLIFE:
+				tier = maxi(tier, 1)
+				continue
+			tier = maxi(tier, 2)
+			for e: Vector3i in roll["entries"]:
+				if factions.hostile(HELD, creatures.class_of(e.x)):
+					tier = 3
+					break
+		if tier > 0:
+			out[s] = tier
+	print("spawns\tsectors=%d\tmatrix=%s" % [out.size(), factions.source])
+	return out
+
+
+## --creatures: draws what the spawn tables say lives in the player's own
+## sector, animated. Every step is an existing decoded reader, joined:
+##
+##   Sacred.Funk       which creatures this sector rolls, and how often
+##   Sacred.Items      creature id -> its Granny mesh name (row 693: the id IS
+##                     the model, via the items.pak record's +0x37 name)
+##   Sacred.Rigs       mesh -> the clip whose bones agree with it
+##   PlayerView        build, scale, place and depth-sort the rig
+##   ModelView         play the clip
+##
+## The roll is honoured rather than flattened: a creature is drawn once per
+## weighted entry it wins, so a sector whose table is 70% wolf shows mostly
+## wolves. Placement is a deterministic scatter inside the sector, NOT retail
+## placement -- retail rolls spawn points at runtime from data this port does
+## not read yet, so a fixed seed is the honest stand-in and the ceiling is
+## named here rather than implied by the picture.
+## ponytail: no wandering, no AI, no despawn -- they stand and animate. Add
+## movement when the sim owns creature actors, which it does not yet.
+const CREATURE_SEED := 20260814
+const CREATURE_MAX := 24
+const CREATURE_SPREAD := 4.0
+
+
+func _build_creatures(install: String, models: Sacred.Models, player_cell: Vector2) -> void:
+	var funk := Sacred.Funk.new(install.path_join("bin/type_npc_seraphim"))
+	var items := Sacred.Items.new(Sacred.Pak.new(install.path_join("pak/items.pak")))
+	var gx := int(player_cell.x) / SECT
+	var gy := int(player_cell.y) / SECT
+	# --creatures-only=PREFIX keeps only the rolled creatures whose mesh name
+	# starts with PREFIX, and spawns that mesh even where the sector rolls
+	# nothing at all. WHY IT EXISTS (row 765): the residual streak is a per-MESH
+	# question, and a sector roll is a lottery -- a capture pair that does not
+	# reliably contain the suspect cannot answer it. The rig, placement, clip
+	# choice and seeding are otherwise untouched, so --creatures-only composes
+	# with --creatures-noanim to give a one-variable pair on a chosen creature.
+	# Parsed BEFORE the empty-sector return on purpose: the flag names a mesh to
+	# draw, and a town sector must not silently answer "nothing here".
+	var only := ""
+	var forced_yaw := false
+	var yaw_forced := 0.0
+	for a in OS.get_cmdline_user_args() + OS.get_cmdline_args():
+		if a.begins_with("--creatures-only="):
+			only = a.substr("--creatures-only=".length()).to_upper()
+		elif a.begins_with("--creature-yaw="):
+			forced_yaw = true
+			yaw_forced = float(a.substr("--creature-yaw=".length()))
+	var rolls := funk.rolls_for(gx, gy)
+	if rolls.is_empty() and only == "":
+		print("creatures\tsector=%d,%d\trolls=0\t(a town or interior sector spawns nothing)" % [gx, gy])
+		return
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = CREATURE_SEED
+	# Resolve the meshes first, so Rigs decodes the clip corpus ONCE for all of
+	# them (its whole cost is that pass; asking per creature would pay it N
+	# times on a cold cache).
+	var picks: Array[Dictionary] = []
+	var wanted := PackedInt32Array()
+	for roll in rolls:
+		if picks.size() >= CREATURE_MAX:
+			break
+		var id := funk.pick(roll, rng)
+		var nm := items.name_of(id)
+		if nm == "":
+			continue
+		if only != "" and not nm.to_upper().begins_with(only):
+			continue
+		var mi := models.index_of(nm)
+		if mi < 0:
+			continue
+		picks.append({"id": id, "name": nm, "mesh": mi, "kind": roll["kind"]})
+		if not wanted.has(mi):
+			wanted.append(mi)
+	if only != "" and picks.is_empty():
+		# The sector does not roll it. Draw it regardless -- the point of the
+		# flag is to put a NAMED mesh in front of the camera, and reporting
+		# "resolved=0" here would just hide the creature under discussion.
+		for i in models.count():
+			if models.kind_of(i) == Sacred.Models.KIND_MOTION \
+					or not models.entry_name(i).to_upper().begins_with(only):
+				continue
+			picks.append({"id": -1, "name": models.entry_name(i), "mesh": i, "kind": 0})
+			wanted.append(i)
+			break
+	if picks.is_empty():
+		print("creatures\tsector=%d,%d\trolls=%d\tresolved=0" % [gx, gy, rolls.size()])
+		return
+
+	var t0 := Time.get_ticks_msec()
+	var rigs := Sacred.Rigs.new(models, wanted)
+	var rig_ms := Time.get_ticks_msec() - t0
+
+	var built := 0
+	var animated := 0
+	var kinds := {}
+	for pick in picks:
+		var pv := PlayerView.new(models, pick["name"])
+		if pv.node == null:
+			continue
+		add_child(pv.node)
+		# Scatter around the player, deterministic under CREATURE_SEED.
+		var cell := player_cell + Vector2(
+			rng.randf_range(-CREATURE_SPREAD, CREATURE_SPREAD),
+			rng.randf_range(-CREATURE_SPREAD, CREATURE_SPREAD))
+		pv.update(cell)
+		# FACING (row 793). Deterministic under CREATURE_SEED like the scatter,
+		# so a capture pair stays comparable. --creature-yaw=DEG forces one yaw
+		# on every creature instead, which is what makes the elf question
+		# answerable: sweep it and see whether ANY facing reproduces retail's
+		# full-width silhouette.
+		# Default is 0, i.e. exactly the orientation every creature had before
+		# facing existed. A random yaw was tried here and removed: nothing in the
+		# data says which way a spawned creature faces, so scattering them would
+		# be invention dressed as behaviour. --creature-yaw stays a diagnostic
+		# until a real facing source is decoded.
+		pv.set_yaw(deg_to_rad(yaw_forced) if forced_yaw else 0.0)
+		_creature_views.append(pv)
+		_creature_cells.append(cell)
+		built += 1
+		# --creatures-noanim builds the identical rig and SKIPS play_clip, so a
+		# capture pair differs in exactly one variable: whether an animation is
+		# driving the skeleton PlayerView also poses for placement (row 757's
+		# open suspect).
+		var ci: int = -1 if "--creatures-noanim" in OS.get_cmdline_user_args() + OS.get_cmdline_args() \
+			else rigs.clip_for(pick["mesh"])
+		var mv := pv.node as ModelView
+		if mv != null and ci >= 0 and mv.play_clip(models, ci):
+			animated += 1
+			# Desynchronise the loops, or every wolf in the sector breathes in
+			# lockstep -- which reads as one animation on many meshes.
+			mv.seek_anim(rng.randf() * maxf(0.001, mv.anim_length))
+		kinds[pick["name"]] = int(kinds.get(pick["name"], 0)) + 1
+	print("creatures\tsector=%d,%d\trolls=%d\tbuilt=%d\tanimated=%d\tmeshes=%d\trigs=%d ms" % [
+		gx, gy, rolls.size(), built, animated, wanted.size(), rig_ms])
+	var listed := PackedStringArray()
+	for k: String in kinds:
+		listed.append("%s x%d" % [k, kinds[k]])
+	print("creatures\t%s" % ", ".join(listed))
+
+
+## --equip=PREFIX[,PREFIX...] -- the R1.4 demonstration (autoresearch row 741):
+## a character's equipment meshes share that character's skeleton, so a body and
+## its armour can be drawn as separate meshes driven by ONE pose.
+##
+## What makes this a demonstration rather than a trick: there is NO retargeting
+## step here, and no per-piece binding code. Each mesh is built by the same
+## unmodified ModelView.setup() and handed the SAME clip through the same
+## unmodified play_clip(), then every rig is seeked to the SAME time. If the
+## pieces did not genuinely share the base's skeleton -- same bone names, same
+## topology, same local rests -- they would animate independently and slide off
+## the body, which is exactly what a failure looks like on screen.
+##
+## The clip is chosen by Sacred.Rigs (bone geometry, not name) unless --anim=
+## names one, so this also exercises the picker end to end.
+##
+## ponytail: no equipped-item -> mesh mapping exists, because that mapping is
+## unread (row 741's own stated limit). The caller names the set. Upgrade path
+## is whatever table retail uses to decide which pieces an equipped item shows.
+const EQUIP_MAX := 16
+## Mid-clip rather than t=0: at rest every piece sits in its bind pose and a
+## still frame cannot tell a shared skeleton from a coincidence. Posed, a piece
+## bound to the wrong rig is obvious.
+const EQUIP_SEEK := 0.35
+
+
+func _show_equip(install: String, spec: String, anim_name: String = "") -> void:
+	var pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
+	if not pak.is_open():
+		printerr("equip\tcannot open pak/models.pak under %s" % install)
+		get_tree().quit(1)
+		return
+	var models := Sacred.Models.new(pak)
+
+	var prefixes := PackedStringArray()
+	for raw in spec.split(","):
+		var t := raw.strip_edges().to_upper()
+		if t != "":
+			prefixes.append(t)
+	if prefixes.is_empty():
+		printerr("equip\t--equip= needs at least one name prefix")
+		get_tree().quit(1)
+		return
+
+	# Collected in PREFIX order, not pak order, so the first named prefix owns
+	# the camera framing below -- a caller naming the body first gets the body
+	# framed rather than whichever piece happens to sit lowest in the pak.
+	var entries := PackedInt32Array()
+	for pre in prefixes:
+		for i in models.count():
+			if models.kind_of(i) == Sacred.Models.KIND_MOTION:
+				continue
+			if entries.size() >= EQUIP_MAX:
+				break
+			if models.entry_name(i).to_upper().begins_with(pre) and not entries.has(i):
+				entries.append(i)
+	if entries.is_empty():
+		printerr("equip\tno mesh in pak/models.pak begins with any of %s" % ", ".join(prefixes))
+		get_tree().quit(1)
+		return
+
+	# THE SWITCH (rows 743/744). The FIRST prefix names the wearer; every other
+	# mesh is asked what it becomes on that wearer, so a Gladiator armour set
+	# can be pointed at a Seraphim and comes back as Seraphim armour. Applying
+	# it unconditionally is safe because a wearer's own mesh switches to itself
+	# (armour_check.gd pins that); a mesh the table does not know -- the body
+	# itself, a creature, a numbered set piece -- is left exactly as it was.
+	var armour := Sacred.Armour.new(install)
+	var wearer := models.entry_name(entries[0])
+	var switched := 0
+	var multi := PackedStringArray()
+	if armour.found:
+		for k in range(1, entries.size()):
+			var have := models.entry_name(entries[k])
+			var v := armour.variants_for(have, wearer)
+			if v.is_empty():
+				continue
+			if v.size() > 1 or armour.is_ambiguous(have):
+				# Two reasons a caller must be told rather than quietly served:
+				# retail lists this wearer twice in the group, or this FILENAME
+				# is several armour records in different groups and only an item
+				# (which --equip does not have) could say which. First taken.
+				multi.append("%s->%s%s" % [have, ",".join(v),
+					" [name spans %d groups]" % armour.group_count(have) if armour.is_ambiguous(have) else ""])
+			var mi := models.index_of(v[0])
+			if mi >= 0 and mi != entries[k]:
+				entries[k] = mi
+				switched += 1
+	else:
+		printerr("equip\tbin/rust.bin did not decode -- drawing the named meshes unswitched")
+
+	var clip := -1
+	if anim_name != "":
+		clip = models.clip_index_of(anim_name)
+		if clip < 0:
+			printerr("equip\tno clip named %s" % anim_name)
+			get_tree().quit(1)
+			return
+	else:
+		# The picker under test, asked about the FIRST mesh only: every piece
+		# then gets that one clip, which is the point being demonstrated.
+		var want := PackedInt32Array()
+		want.append(entries[0])
+		clip = Sacred.Rigs.new(models, want).clip_for(entries[0])
+
+	var built := 0
+	var played := 0
+	var verts := 0
+	var tris := 0
+	var names := PackedStringArray()
+	# The camera goes on the first mesh that BUILDS, not on entry 0. Framing on
+	# index 0 unconditionally means one undecodable mesh at the head of the list
+	# leaves the whole scene unframed and captures a blank grey frame -- which
+	# is exactly what it did the first time this ran, on a set whose base mesh
+	# does not decode.
+	var framed := false
+	for k in entries.size():
+		var e: int = entries[k]
+		var mv := ModelView.new()
+		mv.name = "Equip%d" % k
+		# Only ONE rig builds a camera and light; the rest would each add a
+		# competing Camera3D, exactly as PlayerView's frame_camera=false
+		# comment describes.
+		if not mv.setup(models, e, not framed):
+			printerr("equip\t%s has no decodable mesh -- skipped" % models.entry_name(e))
+			mv.free()
+			continue
+		framed = true
+		add_child(mv)
+		built += 1
+		verts += mv.vertex_count
+		tris += mv.triangle_count
+		names.append(models.entry_name(e))
+		if clip >= 0 and mv.play_clip(models, clip):
+			# Same time on every rig. Nothing synchronises them afterwards --
+			# they stay together only because they are the same skeleton.
+			mv.seek_anim(EQUIP_SEEK)
+			played += 1
+	print("equip\tprefixes=%s\tmeshes=%d\tbuilt=%d\tanimated=%d\tclip=%s\tverts=%d\ttris=%d\twearer=%s\tswitched=%d" % [
+		",".join(prefixes), entries.size(), built, played,
+		models.entry_name(clip) if clip >= 0 else "none", verts, tris, wearer, switched])
+	if not multi.is_empty():
+		print("equip\tambiguous (retail lists this wearer twice, first taken): %s" % ", ".join(multi))
+	print("equip\t%s" % ", ".join(names))
+	if built == 0:
+		printerr("equip\tnothing built -- refusing to exit 0 on an empty render")
+		get_tree().quit(1)
+		return
+	# Same settle-and-capture path --grn= uses; without it this mode never
+	# quits under --shot= and a capture run hangs instead of failing.
+	await _maybe_screenshot()
+
+
+## The one definition of where the scripted route puts the actor at tick `t`.
+## Both the live path and the recorder's write loop call THIS -- they used to
+## carry the same conditional twice, and two spellings of one rule is how a
+## record/replay divergence starts.
+##
+## The actor WALKS in through the door and WALKS back out over the step. No leg
+## of this route is a teleport -- every tick moves to a 4-adjacent open cell:
+##   t < entry_start     standing on the outside end of the path
+##   entry_start ..      the path REVERSED, one cell per tick, arriving on the
+##                       DOOR exactly at INTERIOR_TICK -- which is the tick the
+##                       INTERIOR swap fires -- then continuing to the floor
+##   .. exit_start       standing on the interior floor
+##   exit_start ..       the path FORWARDS, arriving on the STEP exactly at
+##                       EXTERIOR_TICK, which fires the EXTERIOR swap back
+##   after               standing on the outside end again, already EXTERIOR
+##
+## Exactly two swaps survive this: the steps are crossed on the way in while
+## the state is already EXTERIOR, and the door is crossed on the way out while
+## it is already INTERIOR, so neither adds a third line.
+func _supported_route_cell(t: int) -> Vector2i:
+	var n := SUPPORTED_ROUTE_PATH.size()
+	# Walking IN is the path reversed, timed so the DOOR lands on the interior
+	# tick; walking OUT is the path forwards, timed so the STEP lands on the
+	# exterior tick. Crossing the steps on the way IN changes nothing (the
+	# state is already EXTERIOR) and crossing the door on the way OUT changes
+	# nothing (already INTERIOR), so the run still emits exactly two swaps.
+	var entry_start := SUPPORTED_ROUTE_INTERIOR_TICK - (n - 1 - SUPPORTED_ROUTE_DOOR_INDEX)
+	var exit_start := SUPPORTED_ROUTE_EXTERIOR_TICK - SUPPORTED_ROUTE_STEP_INDEX
+	if t < entry_start:
+		return SUPPORTED_ROUTE_PATH[n - 1]
+	if t < entry_start + n:
+		return SUPPORTED_ROUTE_PATH[n - 1 - (t - entry_start)]
+	if t < exit_start:
+		return SUPPORTED_ROUTE_PATH[0]
+	if t < exit_start + n:
+		return SUPPORTED_ROUTE_PATH[t - exit_start]
+	return SUPPORTED_ROUTE_PATH[n - 1]
+
+
+## One key light for the streamed world, added ONLY when a rig is actually
+## built. Everything SectorView draws is SHADING_MODE_UNSHADED -- the retail
+## art is already lit, so terrain, objects and markers ignore this light
+## entirely and their pixels do not move. ModelView's meshes are the one lit
+## material in the scene, and in the world path ModelView is built with
+## frame_camera=false, so before this the rigs were lit surfaces with NO light
+## at all: they rendered as near-black silhouettes. That is why --creatures
+## produced figures a pixel diff could find but an eye could not.
+##
+## Deliberately a light and NOT an Environment: ambient would need a
+## WorldEnvironment, whose background mode repaints the area outside the map,
+## and several gates assert frame md5s. A key alone cannot touch a pixel that
+## no lit material covers. The unlit side of a rig therefore stays dark, which
+## is ModelView's own documented trade-off when it has no fill.
+func _ensure_rig_light() -> void:
+	if has_node("RigKey"):
+		return
+	var key := DirectionalLight3D.new()
+	key.name = "RigKey"
+	key.light_energy = ModelView.KEY_ENERGY
+	# Same direction ModelView frames its own previews with, so a creature in
+	# the world is lit the way --grn= shows it rather than from some new angle.
+	key.transform = Transform3D(Basis(), Vector3.ZERO).looking_at(
+		ModelView.LIGHT_DIR.normalized(), Vector3.UP)
+	add_child(key)
