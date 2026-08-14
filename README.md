@@ -68,7 +68,8 @@ The format documentation these implement lives in the
 
 ## Licence
 
-Not yet chosen — see the top-level `../README.md`.
+MIT — see [LICENSE](LICENSE). Covers this source only; it grants no rights in
+Sacred or Sacred Gold.
 
 ## Legal
 

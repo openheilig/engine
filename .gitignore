@@ -16,6 +16,7 @@
 
 # 2. Allow hand-written engine source and project files only.
 !.gitignore
+!LICENSE
 !*.gd
 !*.gdshader
 !*.uid
