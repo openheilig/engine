@@ -44,7 +44,8 @@ single model, and so on).
 | Path | What |
 |---|---|
 | `main.gd`, `main.tscn` | Composition root and entry scene. |
-| `sacred.gd` | Runtime readers for the retail formats (pak, world, static, mixed, items). |
+| `sacred.gd` | The `Sacred` namespace: install discovery, and a facade re-exporting everything in `formats/`. Decodes nothing itself. |
+| `formats/` | [The runtime readers](formats/), one file per retail format — pak, world, texture, regions, models, saves, script bytecode. |
 | `iso_camera.gd` | The isometric camera. Not in `view/` — it owns a `_process`, which `view/` forbids. |
 | `world/` | Simulation: `sim.gd` fixed-tick loop, actor registry and state, movement, path windows, walkability, interiors, record/replay. |
 | `view/` | Rendering: `sector_view.gd` world streaming, `model_view.gd` Granny renderer, player and cursor views, rig placement. |
