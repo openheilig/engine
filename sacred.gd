@@ -892,7 +892,7 @@ static func _argb4444_to_rgba8(px: PackedByteArray, n: int) -> PackedByteArray:
 ## length. Measured directly against install/pak/models.pak, not read from
 ## Iris1 (GPL) or the statically-linked Granny runtime -- every offset and
 ## chunk size below is byte evidence recorded in
-## .planning/phases/03-granny-grn-tag-walk-then-posed-mesh/03-RESEARCH.md.
+## the phase-03 research notes.
 ##
 ## This class emits (tag, offset, length) triples only -- no field
 ## interpretation. Mesh/skeleton decode is a later plan's job.
@@ -904,7 +904,7 @@ class Models extends RefCounted:
 	const KIND_MOTION := 65
 	## kind==64 (mesh) ONLY. Do not generalise -- kind==65 (motion, R1.5) puts
 	## the root tag at MAGIC_OFF_MOTION instead, confirmed on the full corpus
-	## for kind==64 and a 25-entry sample for kind==65 (03-RESEARCH.md
+	## for kind==64 and a 25-entry sample for kind==65 (the phase-03 research notes
 	## "Magic offset is kind-dependent").
 	const MAGIC_OFF_MESH := 0x4EA
 	const MAGIC_OFF_MOTION := 0x140   ## not used this phase; recorded so R1.5 doesn't re-derive it.
@@ -913,7 +913,7 @@ class Models extends RefCounted:
 	## chain only, for now -- Plan 01 Task 2 and Plan 02 extend this with the
 	## fixed 12-byte leaf families research documented.
 	##
-	## object and final are 20/36, NOT the 16/32 03-RESEARCH.md prose states --
+	## object and final are 20/36, NOT the 16/32 the phase-03 research notes prose states --
 	## corrected against a direct hex census of GLADIATOR.GRN (pak index 589):
 	## root@1258 (32) -> copyright@1290 (20) -> object@1310 (20, ends 1330,
 	## not 1326) -> final@1330 (36, ends 1366 where the first leaf tag
@@ -926,7 +926,7 @@ class Models extends RefCounted:
 		0xCA5E0103: 20,     # object
 		0xCA5E0101: 36,     # final
 		# Fixed 12-byte leaf families (4-byte tag + 8-byte payload), confirmed
-		# by hex walk (03-RESEARCH.md "Chunk stream structure"): delta to the
+		# by hex walk (the phase-03 research notes "Chunk stream structure"): delta to the
 		# next tag is exactly 12 for every one of these, no exceptions seen.
 		0xCA5E0200: 12,
 		0xCA5E1000: 12,
@@ -948,8 +948,8 @@ class Models extends RefCounted:
 	## a well-formed entry's walk is cut short.
 	const WALK_BUDGET := 4096
 	## Byte offset, from an object's 0xCA5E0000 root chunk start, of the H1
-	## candidate object-byte-length field. 03-RESEARCH.md's prose calls this
-	## field "+0x14"; a raw census (03-01-SUMMARY.md, this task) found it one
+	## candidate object-byte-length field. the phase-03 research notes's prose calls this
+	## field "+0x14"; a raw census (the 03-01 write-up, this task) found it one
 	## u32 word earlier, at +0x10 -- root_off + 0x14 reads 0 in every sample
 	## checked, while root_off + 0x10 exactly equals true_length(entry) -
 	## magic_offset(entry) for BAT.GRN, GLAD_SA5_SHOULDER.GRN and GLADIATOR.GRN.
@@ -987,7 +987,7 @@ class Models extends RefCounted:
 
 	## True on-disk length, derived from the gap to the next entry's offset
 	## (or to end of file, for the last entry). NEVER _pak.sizes[entry]: index
-	## field 3 averages 1.95x the true gap for kind==64 (03-RESEARCH.md
+	## field 3 averages 1.95x the true gap for kind==64 (the phase-03 research notes
 	## "Index field 3 is not a byte length for kind=64, and IS one for
 	## kind=65") -- this method does not even branch on kind, because the
 	## rule ("derive from offsets, not from the index") is uniform; only the
@@ -1027,7 +1027,7 @@ class Models extends RefCounted:
 	## entry has no kind-scoped magic offset, is too short to reach it, or
 	## the u32 there is not MAGIC. INVALID_MODEL (index 0) and INVALID_MOTION
 	## (index 1572) are rejected by this same check, not by an index list or
-	## a size cutoff (03-RESEARCH.md Pitfall 9 -- the exclusion set must fall
+	## a size cutoff (the phase-03 research notes Pitfall 9 -- the exclusion set must fall
 	## out of the walker's own logic, never be hardcoded).
 	func magic_ok(entry: int) -> bool:
 		var off := magic_offset(entry)
@@ -1047,7 +1047,7 @@ class Models extends RefCounted:
 	## holds each object's own H1-declared byte length, in emission order --
 	## the per-model-varying declared fact grnwalk.gd folds into the triples
 	## md5 so entries with an identical tag-structure prefix still hash
-	## differently (03-01-SUMMARY.md, Task 2, discrimination requirement).
+	## differently (the 03-01 write-up, Task 2, discrimination requirement).
 	## Single-threaded use only -- Models carries no concurrency contract, so
 	## do not call walk() for two entries concurrently and expect both
 	## results to be held at once.
@@ -1063,11 +1063,11 @@ class Models extends RefCounted:
 	## stop_reason=unknown-tag with stop_tag/stop_off), on a read that would
 	## pass the buffer end, or on WALK_BUDGET.
 	##
-	## H1 (stated before measuring, 03-01-PLAN.md Task 2): the u32 at +0x14
+	## H1 (stated before measuring, plan 03-01 Task 2): the u32 at +0x14
 	## inside an object's 0xCA5E0000 root chunk is that object's byte length,
 	## measured from the root chunk's own start.
-	## [Corrected during Task 2 execution] 03-RESEARCH.md's "+0x14" is one u32
-	## word off: a raw census of the root chunk's own bytes (see 03-01-SUMMARY.md)
+	## [Corrected during Task 2 execution] the phase-03 research notes's "+0x14" is one u32
+	## word off: a raw census of the root chunk's own bytes (see the 03-01 write-up)
 	## found the size-like field at root_off + 0x10, not root_off + 0x14 (which
 	## reads 0 in every sample). Confirmed against three independent entries by
 	## checking true_length(entry) - magic_offset(entry): BAT.GRN 35220, GLAD_SA5_
@@ -1328,7 +1328,7 @@ class Models extends RefCounted:
 	## and this phase exists to be able to see wrongness.
 	##
 	## uvs is currently always empty: the per-vertex texture coordinates have
-	## not been located in the file yet (see 03-05-SUMMARY.md "Known Stubs").
+	## not been located in the file yet (see the 03-05 write-up "Known Stubs").
 	## Returning an empty array is deliberate -- inventing a UV layout that
 	## merely looked plausible would defeat the oracle check.
 	## Per-mesh UV entry byte offsets, from every MeshField in the mesh subtree
@@ -1661,7 +1661,7 @@ class Models extends RefCounted:
 	# ---------------------------------------------------------------------
 	# Bone-name chain (05-10, R1.4/R1.5, discharging 05-04's halt). 05-09
 	# independently reconfirmed this two-hop chain CONFIRMED on the mesh
-	# entry (05-09-SUMMARY.md, findings row 603): FormBoneChannels[bone_i] -
+	# entry (the 05-09 write-up, findings row 603): FormBoneChannels[bone_i] -
 	# 1 selects a TransformChannel node; that node's FIRST direct child, if
 	# a DataExtensionReference, carries a 1-based DataExtensionIndex; that
 	# DataExtension's __ObjectName property resolves through the string
@@ -1727,7 +1727,7 @@ class Models extends RefCounted:
 	##
 	## This is what the `bones` parity fact line hashes. It is a byte-range read
 	## on both sides of the harness, so the Python side needs no second matrix
-	## decoder to agree with the Godot one (03-04-PLAN.md, Pitfall 8).
+	## decoder to agree with the Godot one (plan 03-04, Pitfall 8).
 	func bone_bytes(entry: int) -> PackedByteArray:
 		var empty := PackedByteArray()
 		var length := true_length(entry)
@@ -2218,12 +2218,12 @@ class Models extends RefCounted:
 	# ---------------------------------------------------------------------
 	# Animation clip decode (Plan 05-05, R1.5). kind=65 entries.
 	#
-	# CORRECTION: 05-RESEARCH.md records 0xCA5E1204 (AnimationTransformTrackKeys)
+	# CORRECTION: the phase-05 research notes records 0xCA5E1204 (AnimationTransformTrackKeys)
 	# as "genuinely absent" from Sacred's motion bytes. That was measured against
 	# entry 2845, GLADIATOR.GRN's kind=65 counterpart -- which is a MODEL (five
 	# Mesh nodes, no per-bone animation records), not a clip. A clip such as
 	# entry 2847 (GLAD_ATTACK_1H_A.GRN) carries exactly one 0xCA5E1204 record per
-	# bone. 05-02-SUMMARY.md corrected this in the findings log (row 589); this
+	# bone. the 05-02 write-up corrected this in the findings log (row 589); this
 	# section must not re-inherit the "absent" claim.
 	#
 	# The animation node tree, reached through _directory()/_direct_children()
@@ -2281,7 +2281,7 @@ class Models extends RefCounted:
 	const TAG_DATA_EXTENSION := 0xCA5E0F00
 
 	## `section_offset(kind) = magic_offset(kind) + 376`, confirmed corpus-wide
-	## (4991/4993 walkable entries, 05-02-SUMMARY.md) and shown falsifiable (a
+	## (4991/4993 walkable entries, the 05-02 write-up) and shown falsifiable (a
 	## real 1- or 4-byte desync collapses every directory read to baddir). For
 	## kind=64 this reconciles the pre-existing SECTION_OFF_MESH=1634
 	## (1258+376); for kind=65 it resolves to 320+376=696. -1 when the entry has

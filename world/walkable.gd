@@ -10,7 +10,7 @@ extends RefCounted
 ## walkability a function of streaming order, which is exactly what replay
 ## exists to be independent of.
 ##
-## ALLOWLIST, not a blocklist (D-08, D-09, ROADMAP.md/04-CONTEXT.md): only
+## ALLOWLIST, not a blocklist (decisions D-08 and D-09): only
 ## Sacred.Regions.FLOOR, .DOOR, .STEP and .OPEN are open ground. Everything
 ## else -- Sacred.Regions.EMPTY, Sacred.Regions.WALL, every other undecoded
 ## 0xd_/0xe_ class, and every cell no region covers -- blocks. A wrong ALLOWLIST fails

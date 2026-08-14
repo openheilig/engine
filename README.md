@@ -45,23 +45,38 @@ single model, and so on).
 |---|---|
 | `main.gd`, `main.tscn` | Composition root and entry scene. |
 | `sacred.gd` | Runtime readers for the retail formats (pak, world, static, mixed, items). |
+| `iso_camera.gd` | The isometric camera. Not in `view/` — it owns a `_process`, which `view/` forbids. |
 | `world/` | Simulation: `sim.gd` fixed-tick loop, actor registry and state, movement, path windows, walkability, interiors, record/replay. |
 | `view/` | Rendering: `sector_view.gd` world streaming, `model_view.gd` Granny renderer, player and cursor views, rig placement. |
-| `*_check.gd`, `verify.gd` | Parity harnesses. See below. |
-| `*.gdshader` | Terrain and object shaders. |
+| `parity/` | [`verify.gd` and `grnwalk.gd`](parity/) — the two scripts the Python side diffs against. |
+| `checks/` | [Single-purpose gates](checks/), all sharing `check.gd`. Each answers one question against the retail data. |
+| `probes/` | [One-shot investigations](probes/). How the facts in `research/` were found; kept for reproduction, not run in normal work. |
+| `shaders/` | Terrain and object shaders. |
+
+`world/` and `view/` are a checked boundary, not a convention: `parity/verify.gd`
+holds a `LAYER_RULES` table and fails if `world/` touches the scene tree or
+threads, or if `view/` names a simulation type or defines its own per-frame
+entry point.
 
 ## How correctness is established
 
 Nothing here is inferred from how it looks on screen. Every reader is checked
 against an independent decode:
 
-- `verify.gd` prints the same facts as the Python `verify_ref.py` in the
+- `parity/verify.gd` prints the same facts as the Python `verify_ref.py` in the
   [tools](../tools) repo, so the two implementations can be diffed byte for
   byte. Two independent decoders agreeing is the evidence; one decoder looking
   plausible is not.
-- The `*_check.gd` scripts (all sharing `check.gd`) are single-purpose gates,
-  each answering one question against the retail data.
+- `checks/` holds single-purpose gates, each answering one question against the
+  retail data.
 - The replay harness gates simulation changes on identical output.
+
+Every check and probe runs headless and states its own command line in its
+header comment:
+
+```
+godot --headless --path . --script res://checks/floor_check.gd
+```
 
 The format documentation these implement lives in the
 [research](../research) repo.

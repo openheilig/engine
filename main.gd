@@ -444,7 +444,7 @@ func _ready() -> void:
 	# PROBE_FOCUS's own sector and change _actor_probe's band COUNTS, which
 	# are geometric (in_radius().size()), not id-keyed. "The fixed region
 	# mode, the single-model mode, the probe -- the camera keeps behaving
-	# exactly as it does today" (04-03-PLAN.md Task 2) states this as the
+	# exactly as it does today" (plan 04-03 Task 2) states this as the
 	# intended shape for those modes.
 	if region == Vector3i.ZERO and _probe_ticks <= 0:
 		var walk := Walkable.new(world)
@@ -1420,7 +1420,7 @@ func _pump_until_settled(budget: int) -> void:
 		# process_frame, not RenderingServer.frame_post_draw: under plain
 		# --headless there is no draw pass, so frame_post_draw never fires and
 		# this coroutine would park forever (observed directly -- see the
-		# deviation note in 01-01-SUMMARY.md). process_frame fires once per
+		# deviation note in the 01-01 write-up). process_frame fires once per
 		# main-loop iteration regardless of whether anything is drawn.
 		await get_tree().process_frame
 		if not is_instance_valid(self):
@@ -1432,13 +1432,13 @@ func _pump_until_settled(budget: int) -> void:
 ## Plan 05-08: --crowd=N. Opt-in only, never runs without the flag.
 ##
 ## CURRENT SCOPE (05-14; set by reading the FIRST PARAGRAPHS of
-## 05-11-SUMMARY.md, 05-12-SUMMARY.md and 05-13-SUMMARY.md before touching
-## this code, per 05-14-PLAN.md's halt_contract -- the one-landed/
+## the 05-11 write-up, the 05-12 write-up and the 05-13 write-up before touching
+## this code, per plan 05-14's halt_contract -- the one-landed/
 ## one-halted branch, so this route measures exactly what exists and every
 ## printed line names what is absent):
 ##
 ##   composition=ABSENT. 05-11 HALTED: "There is NO composed multi-piece
-##     rig anywhere in godot-port/" (05-11-SUMMARY.md first paragraph,
+##     rig anywhere in godot-port/" (the 05-11 write-up first paragraph,
 ##     findings row 607); the one-shared-skeleton design is REFUTED by
 ##     measurement, twice, by two independent tests (05-10, rows 605/606).
 ##     ModelView.setup_composed()/swap_slot() and a PlayerView equipment
@@ -1641,17 +1641,17 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 	var anim_word := "present" if anim_rigs == rigs.size() else "absent"
 	var scope_reason := ""
 	if anim_word == "present":
-		scope_reason = ("composition absent per 05-11-SUMMARY.md (no composed "
+		scope_reason = ("composition absent per the 05-11 write-up (no composed "
 			+ "multi-piece rig exists anywhere in godot-port/; bind-agreement REFUTED "
 			+ "twice, rows 605-607); animation present at the reader level only, via "
 			+ "ModelView.play_clip (05-12 Task 1, commit 5c3ddbc) -- the PlayerView/"
-			+ "live-game-world wiring does not exist per 05-12-SUMMARY.md (Task 3 did "
+			+ "live-game-world wiring does not exist per the 05-12 write-up (Task 3 did "
 			+ "not run; rig-agreement REFUTED, row 609) -- this measures N single-mesh "
 			+ "rigs each playing one named clip at the reader level while the world "
 			+ "streams, excluding composition cost and any live-world animation "
 			+ "wiring; it is not a full phase-5 crowd-budget number")
 	else:
-		scope_reason = ("composition absent per 05-11-SUMMARY.md; animation ALSO "
+		scope_reason = ("composition absent per the 05-11 write-up; animation ALSO "
 			+ "absent this run -- %s resolved to clip index %d and playback started "
 			+ "on %d of %d rigs (expected all, via ModelView.play_clip, 05-12 Task 1) "
 			+ "-- investigate before quoting any number from this run"
@@ -1683,7 +1683,7 @@ func _first_real_record_id() -> int:
 ## actor set, ticks it by exact count through the real Sim.advance, then
 ## walks a real streaming route that queue_free's and rebuilds sector 50,50
 ## -- printing facts that let the survival and route-independence checks in
-## 01-01-PLAN.md's acceptance criteria be asserted with plain grep/diff.
+## plan 01-01's acceptance criteria be asserted with plain grep/diff.
 ## "Exactly n ticks" holds at ANY --tickhz=: the loop below drives advance()
 ## with _sim.tick_dt() (the instance's own configured delta), not the class
 ## constant, so tick=n regardless of the tick rate in effect.
@@ -1995,7 +1995,7 @@ func _anim_key_report(models: Sacred.Models, name: String) -> void:
 	# extra fact: entries clip() itself refuses outright (a decode-level
 	# failure, before an id-pattern classification is even possible) are
 	# NEITHER decodable nor classifiable as perm1/perm0/other under this
-	# census. See the findings row and 05-12-SUMMARY.md for which entries
+	# census. See the findings row and the 05-12 write-up for which entries
 	# these are and why -- Task 1 already surfaced the same refusal on this
 	# corpus's two named exceptions.
 	if undecodable > 0:

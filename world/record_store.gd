@@ -7,7 +7,7 @@ extends RefCounted
 ## reintroduce per-actor state for data that is supposed to be shared.
 ##
 ## THE ID SPACE (decided at Plan 02's Task 1 blocking checkpoint, recorded in
-## .planning/PROJECT.md "Record Id Space Decision" -- option-b selected):
+## the project decision record (kept off this repo) "Record Id Space Decision" -- option-b selected):
 ##   record_id = (kind << RECORD_KIND_SHIFT) | source_index
 ## KIND_STATIC_ART is the only kind this phase defines, resolving through
 ## pak/mixed.pak (art) and pak/items.pak (name/interior/level predicates).

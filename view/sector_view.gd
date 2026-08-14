@@ -80,9 +80,9 @@ const IMAGE_CACHE_EVICT := 192   ## a quarter, dropped oldest-first
 
 ## preload, not load: _build_sector runs per streamed sector, which is a hot
 ## path, and load() would hit ResourceLoader every time.
-const TERRAIN_SHADER: Shader = preload("res://terrain.gdshader")
-const TERRAIN_MASK_SHADER: Shader = preload("res://terrain_mask.gdshader")
-const OBJECT_SHADER: Shader = preload("res://object.gdshader")
+const TERRAIN_SHADER: Shader = preload("res://shaders/terrain.gdshader")
+const TERRAIN_MASK_SHADER: Shader = preload("res://shaders/terrain_mask.gdshader")
+const OBJECT_SHADER: Shader = preload("res://shaders/object.gdshader")
 
 @export var load_margin := 64.0                    ## cells loaded beyond the viewport
 @export var loads_per_frame := 1

@@ -3,9 +3,9 @@ extends RefCounted
 ## Draws the real posed player-character mesh in the streamed world, sorted
 ## against the painted object quads by the same rule Phase 2/3 established
 ## (SectorView.ground_depth / SectorView.SORTCUBE_PX) -- no capsule
-## placeholder (04-CONTEXT.md's allowance for one has expired).
+## placeholder (the allowance for one has expired).
 ##
-## RefCounted, following cursor.gd's shape (04-03-PLAN.md Task 1): it lives in
+## RefCounted, following cursor.gd's shape (plan 04-03 Task 1): it lives in
 ## view/, may hold engine handles, and does not need to be a Node itself. It
 ## owns exactly one built rig -- a ModelView, which IS a Node3D main.gd
 ## parents into the tree via the `node` field below. Must not name a
@@ -99,7 +99,7 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME) -> void:
 
 	# Scale so the rig's bounding box height equals SectorView's existing
 	# character-proxy constant (SORTCUBE_PX) -- borrowed, not restated, per
-	# 04-03-PLAN.md Task 1. ponytail: no retail capture has measured an
+	# plan 04-03 Task 1. ponytail: no retail capture has measured an
 	# actual character height yet; the ceiling is "reads at marker-cube
 	# scale, not the model's own untouched size", and the upgrade path is a
 	# retail capture through the same autopilot.c route that recovered

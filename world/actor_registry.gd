@@ -3,7 +3,7 @@ extends RefCounted
 ## Owns every living actor's ActorState, keyed by a process-lifetime int id.
 ##
 ## ACTOR HANDLE DECISION (Phase 1, Plan 01, Task 1 -- full rationale and
-## rejected alternatives in .planning/PROJECT.md, "Actor Handle Decision"):
+## rejected alternatives in the project decision record (kept off this repo), "Actor Handle Decision"):
 ## the actor id is a MONOTONIC int allocated by spawn(), NEVER reused by
 ## despawn(). A stale handle therefore resolves to null forever -- it can
 ## never alias a different, later actor. Ids are already totally ordered, so

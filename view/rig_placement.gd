@@ -5,7 +5,7 @@ extends SkeletonModifier3D
 ## `Identifier "RigPlacement" not declared in the current scope` -- which
 ## silently cascaded into a capture that never settled. player_view.gd
 ## preloads this by PATH instead, the same way the check scripts extend
-## "res://check.gd".
+## "res://checks/check.gd".
 ## Re-applies a rig's world placement AFTER the AnimationMixer has written its
 ## bone poses for the frame.
 ##
