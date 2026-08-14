@@ -1,4 +1,4 @@
-# OpenHeilig
+# OpenHeilig — engine
 
 An open reimplementation of the *Sacred Gold* engine on Godot 4.7.
 
@@ -26,6 +26,19 @@ core**, not a playable game. What runs today:
 Not implemented: combat, items, inventory, skills, quests, dialogue, UI,
 sound, multiplayer, save/load. Do not expect to play anything.
 
+## Start here
+
+| I want… | Read |
+|---|---|
+| to run it | [Running it](#running-it), below |
+| to read a retail format | [formats/](formats/) |
+| the simulation — actors, movement, replay | [world/](world/) |
+| the rendering — streaming, models, cursor | [view/](view/) |
+| to prove a decoder is right | [parity/](parity/) |
+| a gate that answers one question | [checks/](checks/) |
+| how a fact was originally found | [probes/](probes/) |
+| **why any of this is trusted** | [How correctness is established](#how-correctness-is-established), below |
+
 ## Running it
 
 You need Godot 4.7 (Forward Plus) and a Sacred Gold install.
@@ -40,6 +53,19 @@ builds the readers, and dispatches on the CLI flags (`--grn=NAME` renders a
 single model, and so on).
 
 ## Layout
+
+```
+main.gd        composition root and CLI dispatch; main.tscn is the entry scene
+sacred.gd      the Sacred namespace: install discovery + a facade over formats/
+iso_camera.gd  the isometric camera (owns a _process, so not a view/ file)
+formats/       the runtime readers, one file per retail format
+world/         the fixed-tick simulation: actors, movement, walkability, replay
+view/          rendering: sector streaming, Granny models, player, cursor
+parity/        verify.gd and grnwalk.gd -- what the Python side is diffed against
+checks/        single-purpose gates, all sharing check.gd
+probes/        one-shot investigations, kept for reproduction
+shaders/       terrain, terrain mask and object shaders
+```
 
 | Path | What |
 |---|---|
@@ -79,8 +105,14 @@ header comment:
 godot --headless --path . --script res://checks/floor_check.gd
 ```
 
-The format documentation these implement lives in the
-[research](../research) repo.
+## Related
+
+This is one of three repositories:
+
+- [research](../research) — what the formats are, and how each finding was
+  established.
+- [tools](../tools) — the analysis and extraction tools, and the Python half
+  of every parity gate.
 
 ## Licence
 
