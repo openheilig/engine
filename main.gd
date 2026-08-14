@@ -1,5 +1,5 @@
 extends Node3D
-## OpenSacred composition root: resolves the retail install, constructs the
+## OpenHeilig composition root: resolves the retail install, constructs the
 ## shared readers (pak/world/static/mixed/items), parses every CLI flag,
 ## prints the startup banner, and owns the actor world layer (registry,
 ## record store, sim) and the camera.
@@ -158,8 +158,8 @@ var _crowd_arg := ""
 func _ready() -> void:
 	var install := Sacred.find_install()
 	if install == "":
-		push_error("OpenSacred: no retail install found. Pass --install=/path/to/install, "
-			+ "or write install_path into user://opensacred.cfg.")
+		push_error("OpenHeilig: no retail install found. Pass --install=/path/to/install, "
+			+ "or write install_path into user://openheilig.cfg.")
 		return
 
 	var tiles_path := install.path_join("pak/tiles.pak")
@@ -351,7 +351,7 @@ func _ready() -> void:
 
 	# Streaming mode otherwise prints nothing at all, so a successful run and a
 	# silently-failed one look identical from the terminal.
-	print("OpenSacred\t%s" % install)
+	print("OpenHeilig\t%s" % install)
 	print("  world\t%d of %d sectors present, %dx%d grid" % [
 		world.count(), world.size.x * world.size.y, world.size.x, world.size.y])
 	print("  tiles\t%d records -> %d textures" % [tiles.count(), tex_pak.count()])
@@ -1017,7 +1017,7 @@ const CENSUS_RX_ORDER := ["current", "trailing-letter", "control"]
 
 func _level_census(items: Sacred.Items) -> void:
 	if items == null:
-		push_error("OpenSacred: --level-census needs items.pak")
+		push_error("OpenHeilig: --level-census needs items.pak")
 		return
 	var results := {}
 	for rxname in CENSUS_RX_ORDER:
@@ -1055,7 +1055,7 @@ func _level_census(items: Sacred.Items) -> void:
 func _family_scan(world: Sacred.World, statics: Sacred.Statics,
 		items: Sacred.Items, prefixes: PackedStringArray) -> void:
 	if statics == null or items == null:
-		push_error("OpenSacred: --family-scan needs static.pak and items.pak")
+		push_error("OpenHeilig: --family-scan needs static.pak and items.pak")
 		return
 	var by_sector := {}   # prefix -> {Vector2i: count}
 	for p in prefixes:

@@ -1,4 +1,4 @@
-# OpenSacred
+# OpenHeilig
 
 An open reimplementation of the *Sacred Gold* engine on Godot 4.7.
 
@@ -34,7 +34,7 @@ You need Godot 4.7 (Forward Plus) and a Sacred Gold install.
 godot --path . -- --install=/path/to/sacred
 ```
 
-The path is remembered in `user://opensacred.cfg` as `install_path`, so later
+The path is remembered in `user://openheilig.cfg` as `install_path`, so later
 runs need no flag. `main.gd` is the composition root: it resolves the install,
 builds the readers, and dispatches on the CLI flags (`--grn=NAME` renders a
 single model, and so on).

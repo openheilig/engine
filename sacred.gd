@@ -63,7 +63,7 @@ const KEY_DSIZE := 264    ## u32 decompressed size
 
 
 ## Resolves the retail install directory. Order: --install=PATH on the command
-## line, then user://opensacred.cfg, then the workspace sibling. Returns "" if
+## line, then user://openheilig.cfg, then the workspace sibling. Returns "" if
 ## none of them holds a real install.
 static func find_install() -> String:
 	for candidate in [_cli_install(), _cfg_install(), _sibling_install()]:
@@ -81,7 +81,7 @@ static func is_install(path: String) -> bool:
 static func save_install(path: String) -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("game", "install_path", path)
-	cfg.save("user://opensacred.cfg")
+	cfg.save("user://openheilig.cfg")
 
 
 static func _cli_install() -> String:
@@ -93,7 +93,7 @@ static func _cli_install() -> String:
 
 static func _cfg_install() -> String:
 	var cfg := ConfigFile.new()
-	if cfg.load("user://opensacred.cfg") != OK:
+	if cfg.load("user://openheilig.cfg") != OK:
 		return ""
 	return str(cfg.get_value("game", "install_path", ""))
 
