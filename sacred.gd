@@ -62,9 +62,13 @@ const KEY_CSIZE := 240    ## u32 compressed size
 const KEY_DSIZE := 264    ## u32 decompressed size
 
 
+const CFG := "user://openheilig.cfg"
+
+
 ## Resolves the retail install directory. Order: --install=PATH on the command
-## line, then user://openheilig.cfg, then the workspace sibling. Returns "" if
-## none of them holds a real install.
+## line, then user://openheilig.cfg (falling back to the pre-rename
+## user://opensacred.cfg), then the workspace sibling. Returns "" if none of
+## them holds a real install.
 static func find_install() -> String:
 	for candidate in [_cli_install(), _cfg_install(), _sibling_install()]:
 		if candidate != "" and is_install(candidate):
@@ -81,7 +85,7 @@ static func is_install(path: String) -> bool:
 static func save_install(path: String) -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("game", "install_path", path)
-	cfg.save("user://openheilig.cfg")
+	cfg.save(CFG)
 
 
 static func _cli_install() -> String:
@@ -92,10 +96,21 @@ static func _cli_install() -> String:
 
 
 static func _cfg_install() -> String:
-	var cfg := ConfigFile.new()
-	if cfg.load("user://openheilig.cfg") != OK:
-		return ""
-	return str(cfg.get_value("game", "install_path", ""))
+	# The 2026-08-14 OpenSacred -> OpenHeilig rename changed config/name, which
+	# moves user:// to a different app_userdata directory. So the pre-rename
+	# config is not at user://opensacred.cfg — it is in the sibling directory.
+	# ponytail: read-only, never written back. Drop it once nobody is still
+	# carrying a config from before the rename.
+	var old := ProjectSettings.globalize_path("user://") \
+		.path_join("../OpenSacred/opensacred.cfg").simplify_path()
+	for name in [CFG, old]:
+		var cfg := ConfigFile.new()
+		if cfg.load(name) != OK:
+			continue
+		var path := str(cfg.get_value("game", "install_path", ""))
+		if path != "":
+			return path
+	return ""
 
 
 static func _sibling_install() -> String:
