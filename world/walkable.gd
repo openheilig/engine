@@ -11,9 +11,9 @@ extends RefCounted
 ## exists to be independent of.
 ##
 ## ALLOWLIST, not a blocklist (D-08, D-09, ROADMAP.md/04-CONTEXT.md): only
-## Sacred.Regions.FLOOR, .DOOR and .STEP are open ground. Everything else --
-## Sacred.Regions.EMPTY, Sacred.Regions.WALL, every undecoded 0xd_/0xe_
-## class, and every cell no region covers -- blocks. A wrong ALLOWLIST fails
+## Sacred.Regions.FLOOR, .DOOR, .STEP and .OPEN are open ground. Everything
+## else -- Sacred.Regions.EMPTY, Sacred.Regions.WALL, every other undecoded
+## 0xd_/0xe_ class, and every cell no region covers -- blocks. A wrong ALLOWLIST fails
 ## visibly: the player is stranded against an invisible wall, obvious on
 ## sight. A wrong BLOCKLIST fails silently: a mis-decoded class lets the
 ## player walk through geometry, which looks plausible on screen. This
@@ -21,7 +21,14 @@ extends RefCounted
 ## same stance sacred.gd:1038-1040 takes on out-of-range mesh indices), so
 ## an allowlist is the only choice consistent with it.
 ##
-## Class 0x00 is explicitly UNDECODED, not open ground (D-10): 143,806 of
+## Sacred.Regions.OPEN (the 0xd0/0xe0 bytes, 39,644 cells) IS open ground,
+## measured 2026-08-13: the retail Seraphim start stands the hero on a 0xd0
+## cell inside KLOSTER_KAPELLE01 with the roof cut away, and 0xd0/0xe0 tile
+## that chapel's nave and its library wing wall to wall. Before that date
+## Regions.cell_class collapsed them onto EMPTY, so this allowlist never got
+## to see them and every building interior was unwalkable.
+##
+## The raw 0x00 byte is still explicitly UNDECODED, not open ground (D-10): 143,806 of
 ## it is the single most common region-cell code in the world, and calling
 ## it walkable would encode a guess as fact. The upgrade path is a retail
 ## capture through install/shim/autopilot.c; until one exists, adding 0x00
@@ -51,6 +58,9 @@ const _UNCOVERED := 0
 
 var _world: Sacred.World
 var _region_cache: Dictionary = {}   ## sector key (gy*100+gx) -> Sacred.Regions or null (a cached miss)
+## sector key -> PackedByteArray of the sector's 64x64 WldxEntry byte-26 values
+## (terrain walkability per the retail canWalk rule), or null for an absent sector.
+var _terrain_cache: Dictionary = {}
 
 
 func _init(world: Sacred.World) -> void:
@@ -98,7 +108,7 @@ func class_at(cx: int, cy: int) -> int:
 
 ## The allowlist itself, over a class rather than a cell -- exposed
 ## separately so a caller can test a class it already has without a second
-## lookup. Written as three separate returns, one open class per line, so
+## lookup. Written as four separate returns, one open class per line, so
 ## the allowlist is exactly as wide as it looks on a `grep -c` audit of this
 ## file -- one collapsed boolean expression would hide behind a single
 ## matched line.
@@ -107,13 +117,66 @@ static func class_is_open(cls: int) -> bool:
 		return true
 	if cls == Sacred.Regions.DOOR:
 		return true
+	if cls == Sacred.Regions.OPEN:
+		return true
 	return cls == Sacred.Regions.STEP
 
 
 ## One lookup per axis inside Movement.sweep(): class_at() plus the
 ## allowlist, over a WORLD cell.
+##
+## The region grids are the building-footprint layer: where a region covers
+## the cell, its class decides (D-08 allowlist). Cells NO region covers are
+## outdoor ground, which retail walkability decides by WldxEntry byte 26
+## (Armalion canWalk sub_4B0220: `byte26 != 1 && byte26 != 4 && tile >= 0`).
+## Before 2026-08-13 the port returned blocked for every uncovered cell,
+## which made ALL outdoor ground unwalkable and trapped actors inside
+## buildings -- the D-10 "0x00 might be outdoor terrain" case, resolved by
+## this byte being decoded from the retail binary rather than guessed.
+##
+## The coverage test must be separate from the class test: a region-covered
+## cell whose class byte is 0x00 (EMPTY, the most common code, D-10) returns
+## EMPTY from class_at() -- numerically equal to _UNCOVERED -- so an
+## `if cls != _UNCOVERED` gate would fall through to the terrain fallback and
+## open EMPTY cells INSIDE building footprints (2026-08-13: walking "outside"
+## through a building, door corridors flipping state). _region_class_at()
+## returns null for uncovered cells, which is what the gate keys on.
 func is_open(cx: int, cy: int) -> bool:
-	return class_is_open(class_at(cx, cy))
+	var cls := _region_class_at(cx, cy)
+	if cls != _NO_REGION:
+		return class_is_open(cls)
+	return _terrain_open(cx, cy)
+
+
+## The region class of one WORLD cell, or -1 if NO region grid covers it.
+## Same scan order as class_at() (ascending sector key, then Regions.list),
+## but returns -1 instead of EMPTY for uncovered cells so a caller can
+## tell "region says EMPTY" apart from "no region here" -- the two must
+## resolve differently (EMPTY stays blocked, uncovered consults terrain).
+const _NO_REGION := -1
+
+func _region_class_at(cx: int, cy: int) -> int:
+	var sx := int(floor(float(cx) / float(Sacred.SECT)))
+	var sy := int(floor(float(cy) / float(Sacred.SECT)))
+	for dy in range(-SEARCH_BACK, 1):
+		var gy := sy + dy
+		if gy < 0:
+			continue
+		for dx in range(-SEARCH_BACK, 1):
+			var gx := sx + dx
+			if gx < 0:
+				continue
+			var regions := _regions_for(gx, gy)
+			if regions == null:
+				continue
+			for r: Dictionary in regions.list:
+				var anchor: Vector2i = r["cell"]
+				var size: Vector2i = r["size"]
+				var lx := cx - anchor.x
+				var ly := cy - anchor.y
+				if lx >= 0 and ly >= 0 and lx < size.x and ly < size.y:
+					return Sacred.Regions.cell_class(r, lx, ly)
+	return _NO_REGION
 
 
 func _regions_for(gx: int, gy: int) -> Sacred.Regions:
@@ -129,6 +192,49 @@ func _regions_for(gx: int, gy: int) -> Sacred.Regions:
 			regions = r
 	_region_cache[key] = regions   ## cache the miss too -- an absent sector is not re-inflated on every query
 	return regions
+
+
+## The retail terrain walkability of one WORLD cell: true when no region grid
+## covers it and the WldxEntry byte 26 says the ground is open (not 1, not 4,
+## per the retail canWalk rule). False for cells outside the world or in an
+## absent sector -- the house accessor rule again.
+func _terrain_open(cx: int, cy: int) -> bool:
+	if _world == null:
+		return false
+	var sx := int(floor(float(cx) / float(Sacred.SECT)))
+	var sy := int(floor(float(cy) / float(Sacred.SECT)))
+	if sx < 0 or sy < 0 or sx >= 100 or sy >= 100:
+		return false
+	var bytes := _terrain_bytes_for(sx, sy)
+	if bytes.is_empty():
+		return false
+	var lx := cx - sx * Sacred.SECT
+	var ly := cy - sy * Sacred.SECT
+	if lx < 0 or ly < 0 or lx >= Sacred.SECT or ly >= Sacred.SECT:
+		return false
+	var b := bytes[ly * Sacred.SECT + lx]
+	return b != 1 and b != 4
+
+
+## WldxEntry byte 26 for every cell of one sector, in row-major order, or an
+## empty array if the sector is absent. Byte 26 is the retail terrain
+## walkability field (canWalk sub_4B0220 reads `v8 + 26` where v8 points at a
+## 32-byte world cell record). Extracted once per sector and cached; the
+## decompressed stream is 150 KB but the byte-26 plane is 4 KB.
+func _terrain_bytes_for(gx: int, gy: int) -> PackedByteArray:
+	var key := gy * 100 + gx
+	if _terrain_cache.has(key):
+		return _terrain_cache[key]
+	var out := PackedByteArray()
+	if _world != null and _world.has_sector(gx, gy):
+		var stream := _world.sector(gx, gy)
+		if not stream.is_empty():
+			var n := Sacred.SECT * Sacred.SECT
+			out.resize(n)
+			for i in n:
+				out[i] = stream[32 + i * Sacred.CELL + 26]
+	_terrain_cache[key] = out   ## cache the miss too, same as _regions_for
+	return out
 
 
 ## Runtime check, not assert() -- assert() is stripped from release builds

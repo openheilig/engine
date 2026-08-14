@@ -44,6 +44,8 @@ const ZOOM_SCALES: Array[float] = [2.0, 1.0, 0.5]
 ## stopped the texture cache thrashing at the old 12000 free-zoom.
 var zoom_index := 0
 
+signal move_click(cell: Vector2i)
+
 ## Input Map actions, defined in project.godot [input] (WASD + arrows). Held as
 ## StringName literals so the per-frame Input.get_vector does not allocate.
 const PAN_LEFT := &"iso_left"
@@ -78,6 +80,9 @@ func _unhandled_input(e: InputEvent) -> void:
 			set_zoom_index(zoom_index - 1)
 		elif e.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			set_zoom_index(zoom_index + 1)
+		elif e.button_index == MOUSE_BUTTON_LEFT:
+			move_click.emit(viewport_to_cell(e.position))
+			get_viewport().set_input_as_handled()
 
 
 ## Centre the view on a cell coordinate.
@@ -123,6 +128,29 @@ static func world_to_cell(w: Vector2) -> Vector2:
 	var u := w.x / HW      # x - y
 	var v := -w.y / HH     # x + y
 	return Vector2((v + u) * 0.5, (v - u) * 0.5)
+
+
+## Converts a viewport click to the containing world cell. Orthographic camera
+## projection is renderer-independent here: the viewport centre maps to the
+## camera's XY position, and screen-down maps to decreasing world Y.
+func viewport_to_cell(viewport_position: Vector2) -> Vector2i:
+	var viewport_size := get_viewport().get_visible_rect().size
+	var world := viewport_to_world(viewport_position, viewport_size,
+		Vector2(position.x, position.y), size)
+	var cell := world_to_cell(world)
+	return Vector2i(floori(cell.x), floori(cell.y))
+
+
+## Pure form used by the deterministic click-equivalent check as well as the
+## node method above. `camera_world` is the camera XY position and `camera_size`
+## is the orthographic world height visible in the viewport.
+static func viewport_to_world(viewport_position: Vector2, viewport_size: Vector2,
+		camera_world: Vector2, camera_size: float) -> Vector2:
+	var scale := camera_size / viewport_size.y if viewport_size.y > 0.0 else 1.0
+	var centre := viewport_size * 0.5
+	return camera_world + Vector2(
+		(viewport_position.x - centre.x) * scale,
+		-(viewport_position.y - centre.y) * scale)
 
 
 ## Cell-space bounding box of what the viewport currently covers, grown by

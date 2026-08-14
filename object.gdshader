@@ -40,9 +40,19 @@ uniform sampler2DArray tex : filter_nearest;
 // No source_color, for the same reason as terrain: it would sRGB-decode RGB but
 // not A, and with the rotation that hits the wrong three channels.
 varying flat float layer;
+// Per-vertex swap bucket id (UV2.y): encodes the region key and the
+// exterior/interior class. The swap hides buckets by setting hidden_bucket_count
+// and filling hidden_buckets with the ids to discard. This is the shader-side
+// discard mechanism (06-04-SUMMARY's Option 3): ONE mesh per band keeps the
+// painter-correct contiguous submission order, and the swap is a uniform update
+// -- no mesh split, no per-run sorting_offset ambiguity, no geometry rebuild.
+varying flat float bucket;
+uniform int hidden_bucket_count = 0;
+uniform int hidden_buckets[64];
 
 void vertex() {
 	layer = UV2.x;
+	bucket = UV2.y;
 }
 
 vec3 srgb_to_linear(vec3 c) {
@@ -50,6 +60,16 @@ vec3 srgb_to_linear(vec3 c) {
 }
 
 void fragment() {
+	// The swap: discard any fragment whose bucket is hidden. SHARED buckets
+	// (id < 0) are never hidden -- props and ground always draw.
+	if (bucket >= 0.0) {
+		int b = int(bucket + 0.5);
+		for (int i = 0; i < hidden_bucket_count; ++i) {
+			if (hidden_buckets[i] == b) {
+				discard;
+			}
+		}
+	}
 	vec4 c = texture(tex, vec3(UV, layer));
 	// Sacred's alpha is a real 4-bit gradient, not a mask: shadows, glass and
 	// smoke are drawn at partial alpha. An alpha-scissor cut renders those

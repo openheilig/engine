@@ -1,4 +1,4 @@
-extends SceneTree
+extends "res://check.gd"
 ## 04-REVIEW CR-01 regression check: a goal request aimed at a numbered tick
 ## must fire on THAT tick, even when Sim.advance() runs several ticks in one
 ## call (a catch-up burst after a slow frame).
@@ -38,15 +38,16 @@ var _fired_on := -1
 
 
 func _init() -> void:
+	super()
 	var install := Sacred.find_install()
 	if install == "":
 		printerr("goaltick_check: no install found; pass --install=/path/to/install")
-		quit(1)
+		finish(1)
 		return
 	var world := Sacred.World.new(install.path_join("world"))
 	if not world.is_open():
 		printerr("goaltick_check: cannot open world")
-		quit(1)
+		finish(1)
 		return
 
 	var walk := Walkable.new(world)
@@ -55,7 +56,7 @@ func _init() -> void:
 	var spawn := _any_walkable(walk)
 	if spawn == Vector2i(-1, -1):
 		printerr("goaltick_check: no walkable cell found in the sampled sectors")
-		quit(1)
+		finish(1)
 		return
 
 	var ok := true
@@ -64,10 +65,10 @@ func _init() -> void:
 
 	if ok:
 		print("goaltick_check\toverall verdict=PASS")
-		quit(0)
+		finish(0)
 	else:
 		print("goaltick_check\toverall verdict=FAIL")
-		quit(1)
+		finish(1)
 
 
 ## Runs one burst and reports which tick the goal actually fired on.

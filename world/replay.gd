@@ -47,11 +47,15 @@ class Recorder extends RefCounted:
 	## second flag) when nothing was requested this tick. Still input, not
 	## output: the goal is what the composition root asked for, not anything
 	## the simulation computed from it.
-	func write_input(tick: int, intent: Vector2, goal: Vector2i = PathWindow.NO_GOAL) -> void:
+	func write_input(tick: int, intent: Vector2, goal: Vector2i = PathWindow.NO_GOAL,
+			route_cell: Vector2i = PathWindow.NO_GOAL) -> void:
 		if _f == null:
 			return
-		_f.store_line("input\ttick=%d\tdx=%.6f\tdy=%.6f\tgoal=%d,%d\t" % [
-			tick, intent.x, intent.y, goal.x, goal.y])
+		var route_field := ""
+		if route_cell != PathWindow.NO_GOAL:
+			route_field = "route=%d,%d\t" % [route_cell.x, route_cell.y]
+		_f.store_line("input\ttick=%d\tdx=%.6f\tdy=%.6f\tgoal=%d,%d\t%s" % [
+			tick, intent.x, intent.y, goal.x, goal.y, route_field])
 
 	## Written AFTER that frame's input lines (D-07): the dropped count only
 	## reaches the header of the FOLLOWING tick, and both the record run and
@@ -199,6 +203,13 @@ static func replay(path: String, sim: Sim, reg: ActorRegistry, player_id: int,
 		elif tag == "input":
 			var dx := float(fields.get("dx", "0"))
 			var dy := float(fields.get("dy", "0"))
+			var route_field: String = fields.get("route", "")
+			if route_field != "":
+				var route_parts := route_field.split(",")
+				if route_parts.size() != 2:
+					f.close()
+					return ERR_FILE_CORRUPT
+				player.cell = Vector2(int(route_parts[0]), int(route_parts[1])) + Vector2(0.5, 0.5)
 			# All three perturbations act BEFORE this line's tick_once()
 			# call, not after, so the tick they name is the one whose OWN
 			# dumped state diverges -- not the following tick. tick_once()
