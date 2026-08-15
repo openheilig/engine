@@ -12,7 +12,7 @@ preloads each of these under its old name, so `Sacred.Pak`, `Sacred.SECT` and
 |---|---|
 | `common.gd` | The shared layout constants (`SECT`, `CELL`, `PAK_*`, `KEY_*`) and zlib `inflate`. |
 | `pak.gd` | `.pak` archives, on demand — `texture.pak` is 820 MB and is never slurped whole. |
-| `tiles.gd` | `tiles.pak`: 64-byte records, texture id and atlas orientation. |
+| `tiles.gd` | `tiles.pak`: 64-byte records — source `.tga` name, texture id, and an orientation that is exactly `tile_id % 18`. The table is a product: 18 tile ids per art group. |
 | `world.gd` | `sectors.keyx` + `sectors.wldx`. keyx is the shipped index: no scan, no cache. |
 | `texture.gd` | ARGB4444 decode, and the 18-diamond atlas geometry `slot_uv()` resolves. |
 | `statics.gd` | Placed static art. |
@@ -28,6 +28,7 @@ preloads each of these under its old name, so `Sacred.Pak`, `Sacred.SECT` and
 | `creatures.gd` | `creature.pak` records. |
 | `rigs.gd` | Rig identity across models — which skeletons are the same rig. |
 | `armour.gd` | Armour piece grouping. |
+| `resources.gd` | `scripts/<lang>/global.res`, both namespaces — `res:N` by slot for the bytecode, and the engine's own name hash so a numeric resource id resolves. |
 
 ## Dependencies point one way
 

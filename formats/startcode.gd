@@ -22,7 +22,16 @@ extends RefCounted
 ##   tag 0x04  the POSITION. A VARIANT: either three i32 (cell_x, cell_y, layer)
 ##       or, behind the 0xfffffffe sentinel, the NAME of an opcode-23 position.
 ##       Never both -- that is what the variant is for.
-##   tag 0x01  a `res:N` global.res slot: the NPC's display name.
+##   tag 0x01  a `res:N` global.res slot, called "the NPC's display name" here
+##       since this file was written. That is STILL UNVERIFIED. The slot does
+##       resolve -- Sacred.Resources reads global.res now and 1377 of the 1521
+##       references land on text -- but the text is a MIX of names ("Wolff von
+##       Lindenau"), dialogue lines and item names; the 1377 share only 161
+##       distinct texts; and reading the same references two slots either side
+##       scores no worse on any test tried. checks/resources_check.gd was built
+##       to confirm the reading and instead shows the instrument cannot see it.
+##       The other 144 are `res:D1Dorf_01`..`_18`, word names global.res does
+##       not contain under either namespace.
 ##   tags 0x09/0x05/0x60/0x67  quest hook, quest state, on-sight script, combat
 ##       art. Read as raw strings here; nothing consumes them yet.
 ##
