@@ -131,11 +131,17 @@ func _init() -> void:
 		"the top field is meant to be a second tiles.pak index: %d of %d landed outside 0..%d" % [
 			hi_n - hi_valid, hi_n, TILE_COUNT])
 	# The two invariants above (hi < count, orientation == index mod 18) CANNOT
-	# FAIL on a wrong split: orientation(i) == i %% 18 holds for all 90132
-	# tiles.pak indices, so any value lands on one, and a doubled small id
-	# stays under the count. Measured, not assumed -- and it is why `v >> 16`
-	# used to pass this check. What discriminates is that the two fields must
-	# PARTITION the u32 with no shared bit: only a 17/15 split reconstructs it.
+	# FAIL on a wrong split. orientation(i) == i %% 18 is an IDENTITY BY
+	# CONSTRUCTION, not a property of the data: tiles.pak is a product table in
+	# which 18 consecutive ids share one source .tga and one texture id, so
+	# every index lands on a valid orientation by definition (confirmed for all
+	# 90132 retail and all 13402 prerelease tiles -- see formats/tiles.gd).
+	# A doubled small id likewise stays under the count. That is why `v >> 16`
+	# used to pass this check, and the reconstruction test below is worse
+	# still: (v & mask) | ((v >> s) << s) == v holds for EVERY s, measured
+	# 6872/6872 at s = 13, 16, 17, 18 and 20. Neither discriminates anything;
+	# they are kept only as file-integrity checks. The assertion that carries
+	# the 17-bit boundary is the fill-the-table ratio at the top.
 	assert(partition == n,
 		"%d of %d records do not reconstruct from (low17 | hi<<17) -- the field boundary is not at bit 17" % [n - partition, n])
 	assert(hi_mod18 == hi_n,
