@@ -144,6 +144,104 @@ func _init() -> void:
 		"only %.3f of WOLF's skin is opaque under the ARGB decode -- a character drawn with this is see-through" % [
 			float(opaque) / float(sampled)])
 
+	# JOIN 6 -- THE MATERIAL IS NOT THE TEXTURE. A draw batch's material number
+	# indexes the MATERIAL list; the material then names a texture. The port read
+	# the material number as a texture number, which is the identity mapping, and
+	# on 1415 of 1546 entries the identity happens to be right -- which is why a
+	# corpus census passed while GLADIATOR rendered with its head on the body
+	# image, an arm on the boots image and a leg on the head image.
+	#
+	# MaterialSection 0xCA5E0D01 -> Material 0xCA5E0D00, 16 bytes each, whose +4
+	# is a ONE-BASED texture reference. GLADIATOR's six read 2,6,1,3,4,5.
+	#
+	# The corpus check is structural: where an entry has as many materials as
+	# textures the references must form a PERMUTATION. A wrong field does not
+	# permute 1546 times out of 1546.
+	var with_mat := 0
+	var equal := 0
+	var permutation := 0
+	var nonidentity := 0
+	for e in models.count():
+		if models.kind_of(e) != 64:
+			continue
+		var link := models.material_textures(e)
+		if link.is_empty():
+			continue
+		with_mat += 1
+		var ntex := models.texture_names(e).size()
+		if link.size() != ntex:
+			continue
+		equal += 1
+		var seen := {}
+		var ident := true
+		for i in link.size():
+			seen[link[i]] = 1
+			if link[i] != i:
+				ident = false
+		if seen.size() == link.size() and not seen.has(-1):
+			permutation += 1
+		if not ident:
+			nonidentity += 1
+	assert(with_mat > 1500, "only %d mesh entries carry a material table" % with_mat)
+	assert(permutation == equal,
+		"only %d of %d equinumerous entries map materials to DISTINCT textures -- the +4 field is not a texture reference" % [
+			permutation, equal])
+	# and the identity must NOT be good enough, or this join is decoration
+	assert(nonidentity > 50,
+		"only %d entries permute -- if the identity really is the mapping this reader is pointless" % nonidentity)
+	# the case that made it visible
+	var gi := models.index_of("GLADIATOR.GRN")
+	var glink := models.material_textures(gi)
+	var gnames := models.texture_names(gi)
+	var head_mat := -1
+	for i in glink.size():
+		if glink[i] >= 0 and gnames[glink[i]].to_lower().contains("head"):
+			head_mat = i
+	assert(head_mat >= 0, "no GLADIATOR material references the head image")
+	assert(head_mat != glink[head_mat],
+		"GLADIATOR's head material is its own index, so this file no longer demonstrates the permutation")
+
+	# JOIN 7 -- A GROUP NAMES ITS OWN TRIANGLES, and they are not contiguous.
+	# 0xCA5E0E06 holds u32 count then 16 bytes per triangle whose first u32 is an
+	# index into the SUBMESH's triangle array. Slicing the submesh in group order
+	# instead put half a boot on a thigh. The invariant is exact: across a
+	# submesh's groups the indices cover 0..n-1 once, with no gaps and no repeats.
+	var interleaved := 0
+	for nm3 in ["GLADIATOR.GRN", "WALDELFE_DARK.GRN", "NOBLE_FEM.GRN"]:
+		var e3 := models.index_of(nm3)
+		if e3 < 0:
+			continue
+		var by_mesh := {}
+		for g in models.material_groups(e3):
+			var picks: PackedInt32Array = g.get("tri_index", PackedInt32Array())
+			assert(picks.size() == int(g["triangles"]),
+				"%s: a group declares %d triangles but names %d" % [
+					nm3, int(g["triangles"]), picks.size()])
+			var lst: Array = by_mesh.get(g["mesh"], [])
+			lst.append(picks)
+			by_mesh[g["mesh"]] = lst
+		for mk in by_mesh:
+			var all: Array[int] = []
+			var contiguous := true
+			for picks2: PackedInt32Array in by_mesh[mk]:
+				for i2 in picks2.size():
+					all.append(picks2[i2])
+					if i2 > 0 and picks2[i2] != picks2[i2 - 1] + 1:
+						contiguous = false
+			all.sort()
+			var want: Array[int] = []
+			for i3 in all.size():
+				want.append(i3)
+			assert(all == want,
+				"%s mesh %s: the groups' triangle indices do not cover 0..%d exactly once" % [
+					nm3, mk, all.size() - 1])
+			if not contiguous:
+				interleaved += 1
+	# and at least one submesh must be INTERLEAVED, or a contiguous slice would
+	# have worked and this join is untested by its own corpus.
+	assert(interleaved > 0,
+		"every group's triangles are contiguous, so this gate cannot tell the exact reading from the slice it replaced")
+
 	# Corpus census, and a rig that actually carries the skin.
 	var single := 0
 	var named := 0

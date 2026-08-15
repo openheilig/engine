@@ -132,6 +132,13 @@ var textured := false
 var surfaces := 0
 ## How many of those surfaces carry a real image rather than clay.
 var textured_surfaces := 0
+## The image each EMITTED surface received, in surface order, and the material
+## slot it came from. Recorded rather than re-derived: the emission order is the
+## reconciled submesh order, not the group order material_groups() returns, so a
+## caller pairing group i with surface i is reading a different assignment from
+## the one the renderer made.
+var surface_texture := PackedStringArray()
+var surface_material := PackedInt32Array()
 
 func set_texture_pak(pak: Sacred.Pak) -> void:
 	_texture_pak = pak
@@ -194,6 +201,22 @@ var is_prop := false
 ## Sacred.Models.bones() for a prop, kept because a prop has no Skeleton3D to
 ## ask. Empty for a skinned rig, which answers through its skeleton instead.
 var bone_rests: Array[Dictionary] = []
+
+
+## The Skeleton3D bone indices the SKIN actually binds, i.e. the bones the mesh
+## deforms with. Smaller than the bone count and legitimately so: GLADIATOR
+## stores 68 bones and binds 56, because a Granny export from Max carries the
+## scene's helpers -- Omni01/03/05 are omni LIGHTS, Cam_*.Target are camera
+## targets, and the two weapon sockets deform nothing either. They sit hundreds
+## of units from the body, so anything that treats the bone list as the skeleton
+## (a viewer, an AABB, a retarget) is reading furniture as anatomy.
+func bound_bones() -> PackedInt32Array:
+	var out := PackedInt32Array()
+	if _skin == null:
+		return out
+	for i in _skin.get_bind_count():
+		out.append(_skin.get_bind_bone(i))
+	return out
 
 
 ## Where `socket` sits in THIS rig's own model space, or null when the rig does
@@ -296,9 +319,22 @@ func _skin_material(models: Sacred.Models, entry: int, slot: int) -> StandardMat
 	if slot < 0 or _texture_pak == null:
 		return mat
 	var names := models.texture_names(entry)
-	if slot >= names.size():
+	# THE MATERIAL IS NOT THE TEXTURE. `slot` is the draw batch's MATERIAL index;
+	# the material then names a texture, and on GLADIATOR that mapping is the
+	# permutation 2,6,1,3,4,5 rather than the identity. Using slot directly put
+	# the head on the body image and an arm on the boots image while every batch
+	# still carried plausible leather -- see Models.material_textures.
+	var link := models.material_textures(entry)
+	var tex_slot := slot
+	if slot >= 0 and slot < link.size():
+		tex_slot = link[slot]
+	elif not link.is_empty():
+		# The entry has a material table and this batch is not in it. Clay is the
+		# honest answer; guessing an index is what produced the scrambled skin.
+		tex_slot = -1
+	if tex_slot < 0 or tex_slot >= names.size():
 		return mat
-	var tid := Sacred.TextureFormat.find_model_texture(_texture_pak, names[slot])
+	var tid := Sacred.TextureFormat.find_model_texture(_texture_pak, names[tex_slot])
 	if tid < 0:
 		return mat
 	# render=FALSE, and the difference is not a detail. The payload is ARGB4444;
@@ -320,6 +356,8 @@ func _skin_material(models: Sacred.Models, entry: int, slot: int) -> StandardMat
 	var img := Sacred.TextureFormat.decode_texture(_texture_pak, tid, false)
 	if img == null:
 		return mat
+	if not surface_texture.is_empty():
+		surface_texture[surface_texture.size() - 1] = names[tex_slot].get_file()
 	mat.albedo_texture = ImageTexture.create_from_image(img)
 	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR
 	mat.albedo_color = Color.WHITE
@@ -420,30 +458,55 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 	var mesh := ArrayMesh.new()
 	var mats: Array[StandardMaterial3D] = []
 	if split:
-		var at := {}
+		# EACH GROUP NAMES ITS OWN TRIANGLES. The previous version sliced the
+		# submesh's index range in group order, which assumed the groups were
+		# laid out contiguously. They are not: GLADIATOR's 442-triangle leg
+		# submesh splits 212 skin / 230 boot with the boot's indices running
+		# 28..441 interleaved through the skin's, so the slice put half a boot on
+		# a thigh and sampled the empty background of the wrong image.
+		#
+		# tri_index is exact -- across a submesh's groups it covers 0..n-1 once --
+		# so there is no ordering assumption left here at all.
 		for pm2 in port_order:
-			at[pm2] = int(port_start[pm2]) * 3
-		for pm3 in port_order:
 			for g2 in groups:
-				if g2p.get(g2["mesh"], -1) != pm3:
+				if g2p.get(g2["mesh"], -1) != pm2:
 					continue
-				var take := int(g2["triangles"]) * 3
-				var from: int = at[pm3]
-				if from + take > idx.size():
+				var picks: PackedInt32Array = g2.get("tri_index", PackedInt32Array())
+				if picks.size() != int(g2["triangles"]):
+					split = false
+					break
+				var start: int = int(port_start[pm2])
+				var gi := PackedInt32Array()
+				gi.resize(picks.size() * 3)
+				var bad := false
+				for t2 in picks.size():
+					var gt: int = start + picks[t2]
+					if gt < 0 or gt * 3 + 2 >= idx.size():
+						bad = true
+						break
+					gi[t2 * 3] = idx[gt * 3]
+					gi[t2 * 3 + 1] = idx[gt * 3 + 1]
+					gi[t2 * 3 + 2] = idx[gt * 3 + 2]
+				if bad:
 					split = false
 					break
 				var sub := arr.duplicate()
-				sub[Mesh.ARRAY_INDEX] = idx.slice(from, from + take)
+				sub[Mesh.ARRAY_INDEX] = gi
 				mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sub)
+				surface_texture.append("<clay>")
+				surface_material.append(int(g2["material"]))
 				mats.append(_skin_material(models, entry, int(g2["material"])))
-				at[pm3] = from + take
 			if not split:
 				break
 	if not split:
 		mesh = ArrayMesh.new()
 		mats.clear()
 		textured_surfaces = 0
+		surface_texture.clear()
+		surface_material.clear()
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		surface_texture.append("<clay>")
+		surface_material.append(0 if textures_named == 1 else -1)
 		mats.append(_skin_material(models, entry, 0 if textures_named == 1 else -1))
 	surfaces = mesh.get_surface_count()
 	textured = textured_surfaces > 0

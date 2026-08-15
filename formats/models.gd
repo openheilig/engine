@@ -2320,6 +2320,82 @@ func texture_names(entry: int) -> PackedStringArray:
 ## file's own group order. Empty when the entry has no ModelSection.
 const TAG_MODEL_GROUP := 0xCA5E0E02
 const TAG_MODEL_GROUP_COUNT := 0xCA5E0E04
+## The group's OWN triangle list: u32 count, then 16 bytes per triangle whose
+## first u32 is that triangle's index INTO ITS SUBMESH's triangle array.
+##
+## This is what removes the last assumption from the material chain. The port
+## used to slice the submesh's triangles in group order and hope the groups were
+## laid out contiguously; they are not. GLADIATOR's leg submesh has 442
+## triangles split 212 skin / 230 boot, and the boot's indices run 28..441
+## INTERLEAVED with the skin's -- so a contiguous slice put half a boot on a
+## thigh and sampled the empty grey background of the wrong image.
+##
+## The check is exact rather than statistical: across the groups of each submesh
+## the indices cover 0..n-1 EXACTLY ONCE. Measured on GLADIATOR's three
+## submeshes -- 442, 868 and 385 triangles, 442/868/385 distinct indices, no
+## gaps and no repeats.
+const TAG_MODEL_GROUP_TRIS := 0xCA5E0E06
+const GROUP_TRI_STRIDE := 16
+
+## MaterialSection (0xCA5E0D01) -> Material (0xCA5E0D00) -> texture reference.
+##
+## THE LINK A DRAW BATCH ACTUALLY USES, and it is NOT index equality. A group's
+## material number indexes the MATERIAL list; the material then names a TEXTURE.
+## Reading the material number as a texture number instead was wrong in a way
+## that renders: GLADIATOR's head batch landed on the body image, an arm batch
+## on the boots image, and a leg on the head image, while every batch still had
+## SOME plausible leather on it.
+##
+## Layout, fixed by exact arithmetic rather than by shape. GLADIATOR carries one
+## MaterialSection with 18 children, six Materials, and six Texture nodes, and
+## the material records are a uniform 16 bytes starting where the last Texture
+## record ends:
+##
+##   +0   u32  0
+##   +4   u32  texture reference, ONE-BASED     <- the link
+##   +8   u32  1
+##   +12  u32  a name/extension reference
+##
+## The six references read 2, 6, 1, 3, 4, 5 -- a PERMUTATION of 1..6, which is
+## exactly why index equality looked right on a corpus census and produced a
+## scrambled character on screen. A permutation is also the check: an entry
+## whose materials do not reference distinct textures in range is rejected here
+## rather than half-applied.
+const TAG_MATERIAL_SECTION := 0xCA5E0D01
+const TAG_MATERIAL := 0xCA5E0D00
+const MATERIAL_TEXTURE_OFF := 4
+
+
+## Per MATERIAL index (0-based, file order), the 0-based TEXTURE index it names,
+## or -1 where the reference is out of range. Empty when the entry declares no
+## materials, which is not an error -- a single-texture model needs no table.
+func material_textures(entry: int) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	var length := true_length(entry)
+	if length <= 0 or not magic_ok(entry):
+		return out
+	var buf := _pak.read_at(_pak.entry_offset(entry), length)
+	if buf.size() < length:
+		return out
+	var dir := _directory(buf)
+	if dir.is_empty():
+		return out
+	var textures := 0
+	for j in dir.size():
+		if dir[j]["tag"] == TAG_TEXTURE:
+			textures += 1
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_MATERIAL:
+			continue
+		var o := SECTION_OFF_MESH + int(dir[j]["rel"]) + MATERIAL_TEXTURE_OFF
+		if o + 4 > buf.size():
+			out.append(-1)
+			continue
+		var ref := int(buf.decode_u32(o))
+		# ONE-BASED, and out of range means "not a texture reference", not
+		# "clamp it to something" -- a wrong slot is a confidently wrong skin.
+		out.append(ref - 1 if ref >= 1 and ref <= textures else -1)
+	return out
 
 func material_groups(entry: int) -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
@@ -2352,5 +2428,21 @@ func material_groups(entry: int) -> Array[Dictionary]:
 			break
 		if tris < 0:
 			continue
-		out.append({"mesh": mesh, "material": mat - 1, "triangles": tris})
+		# The group's own triangle indices, so nothing downstream has to guess
+		# how the submesh's triangles are shared out.
+		var picks := PackedInt32Array()
+		for k2 in range(j + 1, last):
+			if dir[k2]["tag"] != TAG_MODEL_GROUP_TRIS:
+				continue
+			var q := SECTION_OFF_MESH + int(dir[k2]["rel"])
+			if q + 4 > buf.size():
+				break
+			var cnt := buf.decode_u32(q)
+			if cnt != tris or q + 4 + cnt * GROUP_TRI_STRIDE > buf.size():
+				break
+			for t in cnt:
+				picks.append(buf.decode_u32(q + 4 + t * GROUP_TRI_STRIDE))
+			break
+		out.append({"mesh": mesh, "material": mat - 1, "triangles": tris,
+			"tri_index": picks})
 	return out

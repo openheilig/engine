@@ -259,6 +259,25 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--grn="):
 			grn_name = a.trim_prefix("--grn=")
+	# --figure=NAME [--stage=skeleton|mesh|textured|equipped] -- the STAGED model
+	# viewer. One model, no world, no streamer, and one layer added at a time, so
+	# a fault is attributed to the layer that introduced it instead of being
+	# guessed at from a 60-pixel character in a camp. --grn= renders geometry only
+	# and never passes texture.pak; this route is where the skin and the equipment
+	# are looked at.
+	var figure_name := ""
+	var figure_stage := "equipped"
+	var figure_yaw := 270.0
+	var figure_surface := -1
+	for a in argv:
+		if a.begins_with("--figure="):
+			figure_name = a.trim_prefix("--figure=")
+		elif a.begins_with("--stage="):
+			figure_stage = a.trim_prefix("--stage=")
+		elif a.begins_with("--surface="):
+			figure_surface = int(a.trim_prefix("--surface="))
+		elif a.begins_with("--figure-yaw="):
+			figure_yaw = float(a.trim_prefix("--figure-yaw="))
 	# Single-clip mode. NAME is only ever looked up in the pak's own name
 	# table by Models.clip_index_of -- kind-scoped, never joined into a path.
 	var clip_name := ""
@@ -371,6 +390,10 @@ func _ready() -> void:
 	print("  sim\ttick %d Hz\tr_sim %.0f\tr_render %.0f\tr_load %.0f\tordered %s" % [
 		_tick_hz, Sim.R_SIM, Sim.R_RENDER, Sim.R_LOAD,
 		Sim.R_SIM < Sim.R_RENDER and Sim.R_RENDER < Sim.R_LOAD])
+
+	if figure_name != "":
+		await _show_figure(install, figure_name, figure_stage, anim_name, figure_yaw, figure_surface)
+		return
 
 	if equip_spec != "":
 		await _show_equip(install, equip_spec, anim_name)
@@ -2940,3 +2963,221 @@ func _ensure_rig_light() -> void:
 	key.transform = Transform3D(Basis(), Vector3.ZERO).looking_at(
 		ModelView.LIGHT_DIR.normalized(), Vector3.UP)
 	add_child(key)
+
+
+## --figure=NAME --stage=STAGE -- the STAGED single-model viewer.
+##
+## WHY IT EXISTS. Every character defect so far was diagnosed from the streamed
+## world, where a character is sixty pixels wide, unlit, half behind a tent and
+## possibly not in frame at all -- and where a splayed rig, an invisible one and
+## an absent one are the same picture. Three defects in a row were attributed to
+## the wrong layer that way. This route builds ONE model with NOTHING around it
+## and adds one layer at a time, so a fault belongs to the layer that introduced
+## it.
+##
+##   skeleton  bones only, drawn as lines, mesh hidden
+##   mesh      + the geometry, untextured
+##   textured  + texture.pak skins        (--grn= never passes the pak at all)
+##   equipped  + whatever items dock on the named sockets
+##
+## Each stage is a superset of the one before, so the first stage that looks
+## wrong names the culprit.
+const FIGURE_STAGES := ["skeleton", "mesh", "surfaces", "textured", "equipped"]
+
+
+func _show_figure(install: String, name: String, stage: String, anim_name: String = "",
+		figure_yaw: float = 270.0, only_surface: int = -1) -> void:
+	if not FIGURE_STAGES.has(stage):
+		printerr("figure\tunknown --stage=%s, expected one of %s" % [stage, ", ".join(FIGURE_STAGES)])
+		get_tree().quit(1)
+		return
+	var pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
+	if not pak.is_open():
+		printerr("figure\tcannot open pak/models.pak under %s" % install)
+		get_tree().quit(1)
+		return
+	var models := Sacred.Models.new(pak)
+	var idx := models.index_of(name)
+	if idx < 0:
+		printerr("figure\tno model named %s in pak/models.pak" % name)
+		get_tree().quit(1)
+		return
+	var rank := FIGURE_STAGES.find(stage)
+
+	var view := ModelView.new()
+	view.name = "Figure"
+	# The pak is withheld below the textured stage rather than the material being
+	# stripped afterwards, so "mesh" really is the geometry layer and cannot be
+	# quietly carrying a skin.
+	if rank >= 3:
+		view.set_texture_pak(Sacred.Pak.new(install.path_join("pak/texture.pak")))
+	if not view.setup(models, idx):
+		printerr("figure\t%s has no decodable mesh" % models.entry_name(idx))
+		view.free()
+		get_tree().quit(1)
+		return
+	add_child(view)
+
+	var skel: Skeleton3D = view.get_node_or_null("Skeleton")
+	var mesh_node: MeshInstance3D = view.get_node_or_null("Skeleton/Mesh")
+	if mesh_node == null:
+		mesh_node = view.get_node_or_null("Mesh")
+
+	if rank == 1 + 1:
+		# SURFACES -- one flat colour per draw batch, so a batch that is missing,
+		# duplicated or drawing someone else's triangles is named rather than
+		# guessed at. A skin hides exactly this: a wrongly-assigned batch still
+		# looks like plausible leather.
+		var mesh_res: ArrayMesh = mesh_node.mesh
+		for i in mesh_res.get_surface_count():
+			var m := StandardMaterial3D.new()
+			m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			m.albedo_color = Color.from_hsv(float(i) / float(maxi(mesh_res.get_surface_count(), 1)), 0.85, 1.0)
+			# --surface=N isolates one batch. Reading six hues off one picture is
+			# guesswork; one batch lit against a hidden body is not.
+			if only_surface >= 0 and i != only_surface:
+				m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				m.albedo_color = Color(0.25, 0.25, 0.28, 0.12)
+			mesh_node.set_surface_override_material(i, m)
+			print("  legend\tsurface=%d\thue=%.2f" % [i, float(i) / float(maxi(mesh_res.get_surface_count(), 1))])
+
+	if rank == 0:
+		# Bones only. The mesh is hidden rather than not built, because the camera
+		# is framed from the mesh AABB and a skeleton drawn at a different scale
+		# to the body it drives would be a picture of nothing.
+		if mesh_node != null:
+			mesh_node.visible = false
+		if skel != null:
+			view.add_child(_bone_lines(skel, view.bound_bones()))
+
+	# --surface=N also isolates in the TEXTURED stage, which is where a batch
+	# sampling the empty grey background of the wrong image has to be caught: at
+	# full dress every batch carries something and the wrong one is only obvious
+	# alone.
+	if rank >= 3 and only_surface >= 0 and mesh_node != null and mesh_node.mesh != null:
+		for i in mesh_node.mesh.get_surface_count():
+			if i == only_surface:
+				continue
+			var hide := StandardMaterial3D.new()
+			hide.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			hide.albedo_color = Color(0.25, 0.25, 0.28, 0.10)
+			mesh_node.set_surface_override_material(i, hide)
+
+	var docked := PackedStringArray()
+	if rank >= 4 and skel != null:
+		for pair in [[ModelView.SOCKET_MAIN, "SWORD.GRN"], [ModelView.SOCKET_OFF, "SHIELD_KITE.GRN"]]:
+			var socket: String = pair[0]
+			var item: String = pair[1]
+			var ie := models.index_of(item)
+			if ie < 0:
+				continue
+			if view.attach_socket(models, ie, socket) != null:
+				docked.append("%s@%s" % [item, socket])
+	if anim_name != "":
+		var ai := models.clip_index_of(anim_name)
+		if ai >= 0 and view.play_clip(models, ai):
+			view.seek_anim(0.35)
+
+	_reframe(view, mesh_node, figure_yaw)
+	# WHICH IMAGE LANDED ON WHICH BATCH, as data rather than as a judgement about
+	# a 60-pixel render. material_groups() gives {mesh, material, triangles} and
+	# texture_names() is the entry's own Texture-node order, so this is the exact
+	# pairing _skin_material made, printed back.
+	for i in view.surface_texture.size():
+		var tris := 0
+		if mesh_node != null and mesh_node.mesh != null:
+			tris = mesh_node.mesh.surface_get_array_index_len(i) / 3
+		print("  surface\t%d\tmaterial=%d\ttris=%d\ttexture=%s" % [
+			i, view.surface_material[i], tris, view.surface_texture[i]])
+	if skel != null:
+		for c in skel.get_children():
+			if not (c is BoneAttachment3D):
+				continue
+			var att2: BoneAttachment3D = c
+			var bp := skel.get_bone_global_pose(att2.bone_idx)
+			print("  dock\t%s\tbone=%s\tatt.origin=%s\tbone_pose.origin=%s\ttracking=%s" % [
+				att2.name, skel.get_bone_name(att2.bone_idx), att2.transform.origin,
+				bp.origin, att2.transform.origin.distance_to(bp.origin) < 0.01])
+	print("figure\t%s\tstage=%s\tverts=%d\ttris=%d\tsurfaces=%d\ttextured=%d/%d\tbones=%d\troots=%d\tbinds=%d\tsockets=%s\trefused=%d" % [
+		models.entry_name(idx), stage, view.vertex_count, view.triangle_count,
+		view.surfaces, view.textured_surfaces, view.surfaces,
+		view.bone_count, view.bone_roots, view.bind_count,
+		",".join(docked) if not docked.is_empty() else "none", view.sockets_refused])
+	await _maybe_screenshot()
+
+
+## One line per bone, from its parent's rest origin to its own, in the skeleton's
+## own space. Unshaded and depth-test-disabled so the rig reads as a diagram
+## rather than as geometry competing with the body.
+func _bone_lines(skel: Skeleton3D, bound: PackedInt32Array) -> MeshInstance3D:
+	# Only the bones the skin binds. The rest are the Max scene's furniture --
+	# omni lights, camera targets, the weapon sockets -- and they sit hundreds of
+	# units away, so drawing them turns the diagram into four rays off the edge
+	# of frame and shrinks the actual skeleton to nothing.
+	var keep := {}
+	for b in bound:
+		keep[b] = true
+	var im := ImmediateMesh.new()
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.vertex_color_use_as_albedo = true
+	mat.no_depth_test = true
+	im.surface_begin(Mesh.PRIMITIVE_LINES, mat)
+	for b in skel.get_bone_count():
+		if not keep.has(b):
+			continue
+		var p := skel.get_bone_parent(b)
+		var here := skel.get_bone_global_rest(b).origin
+		# Walk up to the nearest ancestor that is itself a deforming bone, so
+		# skipping a helper does not break the chain into loose segments.
+		while p >= 0 and not keep.has(p):
+			p = skel.get_bone_parent(p)
+		if p < 0:
+			# A parentless bone gets a short vertical stub so a root is visible as
+			# a mark rather than as nothing at all.
+			im.surface_set_color(Color(1, 0.35, 0.2))
+			im.surface_add_vertex(here)
+			im.surface_add_vertex(here + Vector3(0, 0, 2))
+			continue
+		im.surface_set_color(Color(0.3, 1, 0.4))
+		im.surface_add_vertex(skel.get_bone_global_rest(p).origin)
+		im.surface_add_vertex(here)
+	im.surface_end()
+	var mi := MeshInstance3D.new()
+	mi.name = "BoneLines"
+	mi.mesh = im
+	return mi
+
+
+## Re-aims the camera ModelView._frame() built, around the model's own vertical.
+##
+## _frame's CAM_DIR is fixed and lands GLADIATOR side-on, which is the worst
+## angle for judging a skin: the chest, the belt and the face are all edge-on.
+## This keeps _frame's distance -- its corner-fitting is what stops the model
+## being a smudge -- and only swings the eye around, so --grn= and the parity
+## dumps that depend on the canonical angle are untouched.
+##
+## The light is re-aimed with it and lifted, because a key fixed to the old
+## direction backlights the model at any other angle.
+func _reframe(view: Node3D, mesh_node: MeshInstance3D, yaw_deg: float) -> void:
+	var cam: Camera3D = view.get_node_or_null("Camera")
+	if cam == null or mesh_node == null or mesh_node.mesh == null:
+		return
+	var box: AABB = view.transform * mesh_node.mesh.get_aabb()
+	var centre := box.get_center()
+	var inv := view.transform.affine_inverse()
+	var dist := (view.transform * cam.transform).origin.distance_to(centre)
+	var dir := Basis(Vector3.UP, deg_to_rad(yaw_deg)) * Vector3(0.35, 0.30, 1.0).normalized()
+	cam.transform = inv * Transform3D(Basis(), centre + dir * dist).looking_at(centre, Vector3.UP)
+	# _frame's ambient is tuned for a clay silhouette against a dark plate. A
+	# SKIN needs to be read for colour and seam placement, not for outline, so
+	# the fill comes up and goes neutral -- a blue-grey ambient tints every
+	# judgement about a texture that is mostly browns.
+	if cam.environment != null:
+		cam.environment.ambient_light_color = Color(1, 1, 1)
+		cam.environment.ambient_light_energy = 1.1
+	var key: DirectionalLight3D = view.get_node_or_null("Key")
+	if key != null:
+		key.light_energy = 2.2
+		key.transform = inv * Transform3D(Basis(), centre).looking_at(
+			centre - dir + Vector3.UP * 0.35, Vector3.UP)
