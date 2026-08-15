@@ -442,10 +442,20 @@ func _child_with_tag(dir: Array[Dictionary], j: int, tag: int) -> int:
 ## of being clamped, because a clamped index renders a quietly wrong mesh
 ## and this phase exists to be able to see wrongness.
 ##
-## uvs is currently always empty: the per-vertex texture coordinates have
-## not been located in the file yet (see the 03-05 write-up "Known Stubs").
-## Returning an empty array is deliberate -- inventing a UV layout that
-## merely looked plausible would defeat the oracle check.
+## ~~uvs is currently always empty: the per-vertex texture coordinates have
+## not been located in the file yet.~~ STALE -- it predates the RenderPass
+## work below. UVs are real: one per vertex on every creature mesh sampled
+## (GLADIATOR 1195/1195, WOLF 571/571, BEAR 573/573, WALDELFE_DARK 1656/1656,
+## NOBLE_FEM 1449/1449, SOLDIER 1656/1656). `uv_complete` still suppresses the
+## array all-or-nothing when a corner goes unclaimed, because a partly
+## resolved UV array textures as a smear that still looks like geometry.
+##
+## What is NOT read is WHICH texture a submesh wants. The names are in the
+## file -- strings() returns them and they resolve in texture.pak by STEM,
+## since the authoring names say .bmp where the shipped pak says .tga -- but
+## the MaterialSection/TextureSection nodes that bind a name to a submesh have
+## no walker branch here, and the string table holds more names than a mesh
+## uses (SOLDIER.GRN lists nine, all of them SORCERESS_*).
 ## Per-mesh UV entry byte offsets, from every MeshField in the mesh subtree
 ## concatenated in directory order. A mesh may carry more than one field
 ## (GLADIATOR mesh 0 carries two, 2322 + 896 entries), and the RenderPass
