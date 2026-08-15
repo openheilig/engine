@@ -62,8 +62,8 @@ func _init() -> void:
 				if vi < uv.size():
 					lo = lo.min(uv[vi])
 					hi = hi.max(uv[vi])
-		print("uvbox\tgroup %d\tmesh %s\tmaterial %s\tu %.3f..%.3f\tv %.3f..%.3f" % [
-			gi, str(g["mesh"]), str(g["material"]), lo.x, hi.x, lo.y, hi.y])
+		print("uvbox\tgroup %d\tmesh %s\tmaterial %s\ttris %d\tu %.3f..%.3f\tv %.3f..%.3f" % [
+			gi, str(g["mesh"]), str(g["material"]), int(g["triangles"]), lo.x, hi.x, lo.y, hi.y])
 		gi += 1
 
 	# and the images themselves, so a claim about what the skin should look like
