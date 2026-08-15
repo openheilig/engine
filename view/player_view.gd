@@ -75,13 +75,19 @@ var _placement: SkeletonModifier3D = null
 ## -> Items.name_of -> this): the placement, scaling and depth-sort rules above
 ## are identical for a wolf and for the hero, and a second class restating them
 ## would be a rival spelling of the same invariants.
-func _init(models: Sacred.Models, model_name: String = MODEL_NAME) -> void:
+## `texture_pak` is optional and is texture.pak: pass it and a single-texture
+## model gets its skin, omit it and the rig is clay. Optional rather than
+## required so the parity dumps and grnwalk, which want geometry only, are
+## unaffected.
+func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
+		texture_pak: Sacred.Pak = null) -> void:
 	model_index = models.index_of(model_name)
 	if model_index < 0:
 		push_warning("PlayerView: %s not found in models.pak -- drawing nothing" % model_name)
 		return
 
 	var mv := ModelView.new()
+	mv.set_texture_pak(texture_pak)
 	if not mv.setup(models, model_index, false):
 		push_warning("PlayerView: %s failed to build -- drawing nothing" % model_name)
 		mv.free()

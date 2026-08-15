@@ -119,6 +119,17 @@ var anim_unbound_names := PackedStringArray()
 ## places this rig in the streamed world (Phase 4's player_view.gd) has its
 ## own IsoCamera already framing the scene and does not want a second,
 ## competing Camera3D/DirectionalLight3D built.
+## texture.pak, for the model skin. Optional: a caller that only wants
+## geometry (grnwalk, the parity dumps) leaves it null and gets clay.
+var _texture_pak: Sacred.Pak = null
+## Set by setup(): how many textures the .GRN named, and whether one was
+## actually applied. Callers report these rather than assuming a skin landed.
+var textures_named := 0
+var textured := false
+
+func set_texture_pak(pak: Sacred.Pak) -> void:
+	_texture_pak = pak
+
 func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool:
 	var b := models.coordinate_basis(entry)
 	basis_located = models.last_basis_located
@@ -163,6 +174,28 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 	mat.albedo_color = Color(0.78, 0.74, 0.68)
 	mat.roughness = 0.75
 	mat.metallic = 0.0
+
+	# THE SKIN, where the file names exactly one and it resolves.
+	#
+	# mesh_arrays() concatenates every submesh into ONE surface, so one
+	# material is all this node can carry. That is correct for the 1393 of
+	# 1558 mesh entries whose .GRN names a single texture, and it is why the
+	# binding is gated on `== 1` rather than taking texture_names()[0]:
+	# GLADIATOR names six over three submeshes and WALDELFE_DARK seven, and
+	# picking the first would texture the boots with the body. Those stay clay
+	# until the Material -> Mesh chain is read (0xCA5E0D00/0xCA5E0D01 have no
+	# walker yet), because a confidently wrong skin is worse than no skin.
+	textures_named = models.texture_names(entry).size()
+	textured = false
+	if textures_named == 1 and _texture_pak != null:
+		var tid := Sacred.TextureFormat.find_model_texture(
+			_texture_pak, models.texture_names(entry)[0])
+		if tid >= 0:
+			var img := Sacred.TextureFormat.decode_texture(_texture_pak, tid, true)
+			if img != null:
+				mat.albedo_texture = ImageTexture.create_from_image(img)
+				mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR
+				textured = true
 
 	var mi := MeshInstance3D.new()
 	mi.name = "Mesh"

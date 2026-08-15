@@ -14,7 +14,7 @@ preloads each of these under its old name, so `Sacred.Pak`, `Sacred.SECT` and
 | `pak.gd` | `.pak` archives, on demand — `texture.pak` is 820 MB and is never slurped whole. |
 | `tiles.gd` | `tiles.pak`: 64-byte records — source `.tga` name, texture id, and an orientation that is exactly `tile_id % 18`. The table is a product: 18 tile ids per art group. |
 | `world.gd` | `sectors.keyx` + `sectors.wldx`. keyx is the shipped index: no scan, no cache. |
-| `texture.gd` | ARGB4444 decode, and the 18-diamond atlas geometry `slot_uv()` resolves. |
+| `texture.gd` | ARGB4444 decode, the 18-diamond terrain atlas geometry `slot_uv()` resolves, and `find_model_texture()` — a creature skin is one whole image, found in `texture.pak` by STEM because the `.GRN`'s authoring names say `.bmp` where the pak says `.tga`. |
 | `statics.gd` | Placed static art. |
 | `mixed.gd` | The mixed object/name archive. |
 | `regions.gd` | Region grids and cell classes — what walkability is derived from. |

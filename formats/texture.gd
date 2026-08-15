@@ -88,3 +88,61 @@ static func _argb4444_to_rgba8(px: PackedByteArray, n: int) -> PackedByteArray:
 		out[o + 2] = _lo[px[i * 2] * 2 + 1]
 		out[o + 3] = _hi[hi + 1]
 	return out
+
+
+## --- Model textures -------------------------------------------------------
+##
+## A creature's skin is NOT an atlas tile: `slot_uv()` and the 18-diamond
+## geometry above are terrain-only and answer a different question. A model
+## texture is one whole image, named by the .GRN's own Texture nodes
+## (Models.texture_names()), and it is stored in texture.pak in exactly the
+## same container decode_texture() already reads -- u16 w, u16 h, kind 4,
+## zlib payload from +80, RGBA4444. Nothing new is decoded here; what is new
+## is FINDING the entry.
+##
+## THE JOIN IS ON THE STEM, NOT THE FILENAME. The names in a .GRN are the
+## artist's authoring paths and their extension does not survive the build:
+## `...\animals\wolf\maps\wolf.bmp` is `WOLF.TGA` in the pak, and
+## `SORCERESS_BODY.BMP` is `SORCERESS_BODY.TGA`. Matching on the full
+## filename silently loses every .bmp.
+
+static var _name_index: Dictionary = {}     ## pak file size -> {STEM: id}
+
+## STEM (upper case, no extension, no directory) -> texture.pak id, built once
+## per pak. Keyed on file size so a different install rebuilds rather than
+## silently reusing another corpus's index.
+static func _stems(pak: Pak) -> Dictionary:
+	var key := pak.file_size()
+	if _name_index.has(key):
+		return _name_index[key]
+	var out: Dictionary = {}
+	for i in pak.count():
+		var b := pak.blob(i, 0)
+		if b.size() < 32:
+			continue
+		var nul := b.find(0)
+		if nul <= 0:
+			continue
+		var nm := b.slice(0, mini(nul, 32)).get_string_from_ascii().to_upper()
+		var dot := nm.rfind(".")
+		if dot > 0:
+			nm = nm.substr(0, dot)
+		# first wins: a later duplicate stem must not shadow the earlier entry
+		if nm != "" and not out.has(nm):
+			out[nm] = i
+	_name_index[key] = out
+	return out
+
+## texture.pak id for a .GRN texture name, or -1. `name` is taken verbatim
+## from Models.texture_names(), backslashes and drive letter included.
+static func find_model_texture(pak: Pak, name: String) -> int:
+	if name == "":
+		return -1
+	var s := name.replace("\\", "/")
+	var slash := s.rfind("/")
+	if slash >= 0:
+		s = s.substr(slash + 1)
+	var dot := s.rfind(".")
+	if dot > 0:
+		s = s.substr(0, dot)
+	return _stems(pak).get(s.to_upper(), -1)

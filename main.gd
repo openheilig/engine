@@ -2442,6 +2442,7 @@ const CREATURE_SPREAD := 4.0
 
 
 func _build_creatures(install: String, models: Sacred.Models, player_cell: Vector2) -> void:
+	var tex_pak := Sacred.Pak.new(install.path_join("pak/texture.pak"))
 	var funk := Sacred.Funk.new(install.path_join("bin/type_npc_seraphim"))
 	var items := Sacred.Items.new(Sacred.Pak.new(install.path_join("pak/items.pak")))
 	var gx := int(player_cell.x) / SECT
@@ -2514,7 +2515,7 @@ func _build_creatures(install: String, models: Sacred.Models, player_cell: Vecto
 	var animated := 0
 	var kinds := {}
 	for pick in picks:
-		var pv := PlayerView.new(models, pick["name"])
+		var pv := PlayerView.new(models, pick["name"], tex_pak)
 		if pv.node == null:
 			continue
 		add_child(pv.node)
@@ -2595,6 +2596,7 @@ const NPC_RADIUS := 48.0
 
 
 func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -> void:
+	var tex_pak := Sacred.Pak.new(install.path_join("pak/texture.pak"))
 	var start := Time.get_ticks_msec()
 	var sc := Sacred.Startcode.new(install.path_join("bin/type_npc_seraphim"))
 	if sc.npcs.is_empty():
@@ -2653,7 +2655,7 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 	var animated := 0
 	var kinds := {}
 	for pick in picks:
-		var pv := PlayerView.new(models, pick["name"])
+		var pv := PlayerView.new(models, pick["name"], tex_pak)
 		if pv.node == null:
 			continue
 		add_child(pv.node)

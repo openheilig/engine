@@ -450,12 +450,12 @@ func _child_with_tag(dir: Array[Dictionary], j: int, tag: int) -> int:
 ## array all-or-nothing when a corner goes unclaimed, because a partly
 ## resolved UV array textures as a smear that still looks like geometry.
 ##
-## What is NOT read is WHICH texture a submesh wants. The names are in the
-## file -- strings() returns them and they resolve in texture.pak by STEM,
-## since the authoring names say .bmp where the shipped pak says .tga -- but
-## the MaterialSection/TextureSection nodes that bind a name to a submesh have
-## no walker branch here, and the string table holds more names than a mesh
-## uses (SOLDIER.GRN lists nine, all of them SORCERESS_*).
+## texture_names() below reads WHICH images the file names, in the file's own
+## per-material order, and Sacred.TextureFormat.find_model_texture() resolves
+## one to a texture.pak id. What is still NOT read is which SUBMESH each
+## material belongs to: MaterialSection/Material (0xCA5E0D01/0xCA5E0D00) have
+## no walker branch, so a model naming more than one texture cannot be skinned
+## and stays clay. See checks/skin_check.gd.
 ## Per-mesh UV entry byte offsets, from every MeshField in the mesh subtree
 ## concatenated in directory order. A mesh may carry more than one field
 ## (GLADIATOR mesh 0 carries two, 2322 + 896 entries), and the RenderPass
@@ -824,6 +824,16 @@ const TAG_TRANSFORM_CHANNEL := 0xCA5E0B00
 const TAG_FORM_BONE_CHANNELS := 0xCA5E0C02
 ## StringTable property key naming the resolved bone/object name.
 const OBJECT_NAME_KEY := "__ObjectName"
+## The DataExtension key a Texture node carries: the original authoring path
+## of its image, e.g. "D:\\New_Sacred\\Gladiator\\...\\Gladiator_body.tga".
+const FILE_NAME_KEY := "__FileName"
+## Texture, and the TextureSection that holds them. A TextureSection's
+## children come in fours -- an 0xCA5E0301 wrapper, an 0xCA5E0305, the
+## Texture itself, then a DataExtensionReference at rel + 12 whose ref_raw
+## indexes the extension list exactly as a bone's does. Measured on
+## GLADIATOR.GRN: 24 children for 6 textures, stride 16 bytes.
+const TAG_TEXTURE := 0xCA5E0303
+const TAG_TEXTURE_SECTION := 0xCA5E0304
 
 # REST_BIND_ULPS, REST_BIND_EPS, last_bind_maxmag / _ulp / _depth and
 # f32_ulp() stood here. All were machinery for sizing the rest-equals-bind
@@ -959,6 +969,14 @@ func strings(entry: int) -> PackedStringArray:
 ## (somewhere in the property's own descendant span) -> the value
 ## textid at the ValueSection's rel + 4.
 func object_names(entry: int) -> PackedStringArray:
+	return _extension_values(entry, OBJECT_NAME_KEY)
+
+
+## The same DataExtension walk object_names() does, for an arbitrary property
+## key. Split out unchanged so texture_names() can ask for __FileName without
+## a second copy of the three-level nesting; object_names() is now a one-line
+## call and its behaviour is identical.
+func _extension_values(entry: int, want_key: String) -> PackedStringArray:
 	var empty := PackedStringArray()
 	var length := true_length(entry)
 	if length <= 0 or not magic_ok(entry):
@@ -982,7 +1000,7 @@ func object_names(entry: int) -> PackedStringArray:
 				if dir[kn]["tag"] != TAG_DATA_EXTENSION_PROPERTY:
 					continue
 				var key := _resolve_textid(strs, _node_u32(buf, dir, kn))
-				if key != OBJECT_NAME_KEY:
+				if key != want_key:
 					continue
 				var value_section := -1
 				var last: int = mini(kn + 1 + int(dir[kn]["children"]), dir.size())
@@ -2198,4 +2216,46 @@ func clip_catalogue(prefix: String) -> Array[Dictionary]:
 		if token_at != -1:
 			action = body.substr(0, token_at).trim_suffix("_")
 		out.append({"entry": entry, "name": name, "action": action, "category": category})
+	return out
+
+
+## The image each Texture node names, in the file's own texture order.
+##
+## The chain is the one bone_names() already walks, one hop shorter: a
+## TextureSection's children run in fours -- wrapper, 0xCA5E0305, Texture,
+## then a DataExtensionReference -- and that reference's ref_raw, minus one,
+## indexes the DataExtension list. Where a bone asks that extension for
+## __ObjectName, a texture asks for __FileName and gets the authoring path.
+##
+## Returned VERBATIM, backslashes and drive letters included. Resolving one to
+## an installed image is the caller's job and is not a filename match: the
+## authoring names say `.bmp` where texture.pak says `.tga`, so the join is on
+## the STEM. See Sacred.Textures.find_model_texture().
+##
+## An entry with no TextureSection yields an empty array; a texture whose
+## reference does not resolve yields "" in place, so the array's length always
+## equals the file's texture count and indices stay meaningful.
+func texture_names(entry: int) -> PackedStringArray:
+	var empty := PackedStringArray()
+	var length := true_length(entry)
+	if length <= 0 or not magic_ok(entry):
+		return empty
+	var buf := _pak.read_at(_pak.entry_offset(entry), length)
+	if buf.size() < length:
+		return empty
+	var dir := _directory(buf)
+	if dir.is_empty():
+		return empty
+	var files := _extension_values(entry, FILE_NAME_KEY)
+	var out := PackedStringArray()
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_TEXTURE:
+			continue
+		# the reference is the Texture's next sibling in directory order
+		var name := ""
+		if j + 1 < dir.size() and dir[j + 1]["tag"] == TAG_DATA_EXTENSION_REFERENCE:
+			var ref := _node_u32(buf, dir, j + 1)
+			if ref > 0 and ref - 1 < files.size():
+				name = files[ref - 1]
+		out.append(name)
 	return out
