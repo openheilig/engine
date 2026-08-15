@@ -138,9 +138,9 @@ func _spot(models: Sacred.Models, _items: Sacred.Items, rigs: Sacred.Rigs,
 	if not by_name.has(mesh_name):
 		return          # not spawned by this class's tables; nothing to check
 	var ci := rigs.clip_for(by_name[mesh_name])
-	assert(ci >= 0, "%s resolved to no clip at all" % mesh_name)
+	expect(ci >= 0, "%s resolved to no clip at all" % mesh_name)
 	var cn := models.entry_name(ci).to_upper()
-	assert(cn.begins_with(want_prefix),
+	expect(cn.begins_with(want_prefix),
 		"%s picked clip %s, which is not a %s* clip" % [mesh_name, cn, want_prefix])
 
 

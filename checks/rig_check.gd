@@ -90,11 +90,11 @@ func _init() -> void:
 ## side, which is the whole point of the check.
 func _measure(models: Sacred.Models, midx: int, clip_name: String) -> Dictionary:
 	var cidx := models.clip_index_of(clip_name)
-	assert(cidx >= 0, "no motion entry named %s" % clip_name)
+	expect(cidx >= 0, "no motion entry named %s" % clip_name)
 	var mb := models.bones(midx)
 	var cb := models.clip_bones(cidx)
 	var cn := models.clip_bone_names(cidx)
-	assert(not mb.is_empty() and not cb.is_empty(), "undecodable bones for %s" % clip_name)
+	expect(not mb.is_empty() and not cb.is_empty(), "undecodable bones for %s" % clip_name)
 
 	var parent_of := {}
 	var local_of := {}

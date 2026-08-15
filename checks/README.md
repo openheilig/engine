@@ -33,6 +33,17 @@ misdiagnosis (findings log row 745) before it was spotted.
 all means `_init` returned without finishing, which is exactly what a failed
 assertion looks like, and the run exits 1 immediately.
 
+**An assertion outside `_init` must use `expect()`, not `assert()`** — found
+2026-08-15 by mutation, not by reading. A failed `assert()` inside a helper
+function does not abort `_init`: Godot prints `SCRIPT ERROR`, the function
+returns, and `_init` goes on to print its OK line and exit 0. The check reports
+success while its assertions fail on screen, which is worse than the hang this
+base class was written to fix, because a hang is at least visible. Eight
+assertions across four checks sat behind that hole, including the BEAR/WOLF
+spot checks that exist precisely so a human recognises a wrong result.
+`expect()` records the failure and makes `finish()` exit 1 whatever code it is
+handed.
+
 Two rules every check follows, both learned by measurement:
 
 1. Call `super()` as the **first** line of its own `_init`. GDScript does not

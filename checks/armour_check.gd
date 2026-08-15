@@ -95,6 +95,6 @@ func _init() -> void:
 
 func _one(a: Sacred.Armour, mesh: String, wearer: String, want_prefix: String) -> void:
 	var v := a.variants_for(mesh, wearer)
-	assert(not v.is_empty(), "%s worn by %s produced no variant" % [mesh, wearer])
-	assert(v[0].to_upper().begins_with(want_prefix.to_upper()),
+	expect(not v.is_empty(), "%s worn by %s produced no variant" % [mesh, wearer])
+	expect(v[0].to_upper().begins_with(want_prefix.to_upper()),
 		"%s worn by %s gave %s, want %s*" % [mesh, wearer, v[0], want_prefix])
