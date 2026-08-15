@@ -2667,7 +2667,7 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 	var animated := 0
 	var drawn_hands := 0
 	var refused_hands := 0
-	var fallback_hands := 0
+	var no_socket_hands := 0
 	var kinds := {}
 	for pick in picks:
 		var pv := PlayerView.new(models, pick["name"], tex_pak)
@@ -2692,8 +2692,19 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 				drawn_hands += 1
 			else:
 				refused_hands += 1
-		fallback_hands += pv.equipped_fallback()
-		var ci := rigs.clip_for(pick["mesh"])
+		no_socket_hands += pv.equipped_refused()
+		# --npcs-noanim mirrors --creatures-noanim, and exists for the same
+		# reason it does: MANY CLIPS SPLAY THE RIG THEY ARE BOUND TO. WOLF.GRN
+		# under WOLF_ATTACK_BH_A comes out as a flattened ribbon with a detached
+		# head -- in `--grn=` isolation, with no placement, no equipment and no
+		# world, so it is the clip-to-skeleton binding and nothing downstream of
+		# it. SOLDIER under SOLD_WALK_BH is fine, so it is per-clip rather than
+		# universal. That is rows 609 and 739 (the clip and the mesh do not share
+		# the bone chain above Bip01), still open. Without this flag a splayed
+		# rig is indistinguishable from a missing one, which is exactly how it
+		# was first reported.
+		var ci: int = -1 if "--npcs-noanim" in OS.get_cmdline_user_args() + OS.get_cmdline_args() \
+			else rigs.clip_for(pick["mesh"])
 		var mv := pv.node as ModelView
 		if mv != null and ci >= 0 and mv.play_clip(models, ci):
 			animated += 1
@@ -2703,9 +2714,9 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 			var c: Vector2 = pick["cell"]
 			mv.seek_anim(fmod(absf(c.x * 7.0 + c.y * 13.0), maxf(0.001, mv.anim_length)))
 		kinds[pick["name"]] = int(kinds.get(pick["name"], 0)) + 1
-	print("npcs\tcell=%d,%d\tin_radius=%d\tbuilt=%d\tanimated=%d\tarmed=%d\thands=%d\trefused=%d\thand_fallback=%d\tunresolved=%d\tdropped=%d\tmeshes=%d\t%d ms" % [
+	print("npcs\tcell=%d,%d\tin_radius=%d\tbuilt=%d\tanimated=%d\tarmed=%d\thands=%d\trefused=%d\tno_socket=%d\tunresolved=%d\tdropped=%d\tmeshes=%d\t%d ms" % [
 		int(player_cell.x), int(player_cell.y), in_radius, built, animated,
-		armed, drawn_hands, refused_hands, fallback_hands, unresolved, dropped,
+		armed, drawn_hands, refused_hands, no_socket_hands, unresolved, dropped,
 		wanted.size(), Time.get_ticks_msec() - start])
 	var listed := PackedStringArray()
 	for k: String in kinds:

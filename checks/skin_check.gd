@@ -29,9 +29,11 @@ extends "res://checks/check.gd"
 ##
 ## JOIN 3 -- the decode is not new. A model skin sits in the same container
 ## decode_texture() already read for terrain -- u16 w, u16 h, kind 4, zlib from
-## +80, RGBA4444 -- so nothing here decodes a new format. Terrain's atlas
+## +80, ARGB4444 -- so nothing here decodes a new format. Terrain's atlas
 ## geometry (slot_uv, the 18 diamonds) does NOT apply and is not used: a skin
-## is one whole image.
+## is one whole image. The CHANNEL ORDER does differ from terrain's, though;
+## see JOIN 5, which is where this gate previously said "RGBA4444" and was
+## wrong in a way that made every character see-through.
 ##
 ## JOIN 4 -- WHICH SUBMESH. Models.material_groups() reads the ModelSection's
 ## draw batches: 0xCA5E0E02 carries {u32 mesh, u32 material_index (ONE-BASED),
@@ -105,10 +107,42 @@ func _init() -> void:
 		"a name with a bogus stem resolved -- the lookup is not keying on the stem")
 
 	# The image decodes, and it is not an atlas tile.
-	var img := Sacred.TextureFormat.decode_texture(tp, wid, true)
+	var img := Sacred.TextureFormat.decode_texture(tp, wid, false)
 	assert(img != null, "WOLF's texture did not decode")
 	assert(img.get_width() >= 64 and img.get_height() >= 64,
 		"WOLF's texture is %dx%d" % [img.get_width(), img.get_height()])
+
+	# JOIN 5 -- THE CHANNEL ORDER, which a skin gets wrong in a way terrain does
+	# not. The payload is ARGB4444. decode_texture(render=true) hands those bytes
+	# to Godot as FORMAT_RGBA4444, rotating every channel by one: the real ALPHA
+	# arrives as red and the real BLUE as alpha. Terrain survives it by sampling
+	# through its own shader; a StandardMaterial3D does not, and with the
+	# transparent pass PlayerView draws in, an average alpha of 0.28 and NO fully
+	# opaque pixel made every character invisible while its untextured weapon
+	# stayed solid.
+	#
+	# So the two decodes must DISAGREE, and disagree by exactly that rotation --
+	# asserting only that the right one looks opaque would pass just as well if
+	# both paths were changed to the wrong one.
+	var rot := Sacred.TextureFormat.decode_texture(tp, wid, true)
+	assert(rot != null, "WOLF's texture did not decode on the render path")
+	var argb := img.get_pixel(img.get_width() / 2, img.get_height() / 2)
+	var rgba := rot.get_pixel(rot.get_width() / 2, rot.get_height() / 2)
+	assert(is_equal_approx(rgba.r, argb.a) and is_equal_approx(rgba.g, argb.r)
+		and is_equal_approx(rgba.b, argb.g) and is_equal_approx(rgba.a, argb.b),
+		"the two decode paths no longer differ by one channel rotation: ARGB %s vs render %s" % [argb, rgba])
+	# and the ARGB decode must be OPAQUE where retail's own art is opaque, which
+	# is the property the transparent pass depends on.
+	var opaque := 0
+	var sampled := 0
+	for y in range(0, img.get_height(), 4):
+		for x in range(0, img.get_width(), 4):
+			sampled += 1
+			if img.get_pixel(x, y).a > 0.98:
+				opaque += 1
+	assert(float(opaque) / float(sampled) > 0.95,
+		"only %.3f of WOLF's skin is opaque under the ARGB decode -- a character drawn with this is see-through" % [
+			float(opaque) / float(sampled)])
 
 	# Corpus census, and a rig that actually carries the skin.
 	var single := 0

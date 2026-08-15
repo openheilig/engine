@@ -215,14 +215,15 @@ func equip(models: Sacred.Models, mesh_name: String, slot: int) -> bool:
 	return (node as ModelView).attach_socket(models, e, socket) != null
 
 
-## How many equipped pieces docked, and how many of those had to use the bare
-## hand bone because the body carries no socket of its own.
+## How many equipped pieces docked, and how many were refused because this body
+## names no socket for that hand. A refusal is the honest outcome, not a
+## failure: see ModelView.SOCKET_HAND for why the hand bone is not a substitute.
 func equipped() -> int:
 	return (node as ModelView).sockets_attached if node != null else 0
 
 
-func equipped_fallback() -> int:
-	return (node as ModelView).sockets_fallback if node != null else 0
+func equipped_refused() -> int:
+	return (node as ModelView).sockets_refused if node != null else 0
 
 
 ## Turns the rig about its own vertical, in radians. Placement is unaffected --

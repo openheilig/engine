@@ -161,17 +161,31 @@ func set_texture_pak(pak: Sacred.Pak) -> void:
 ## a main-hand grip. Zero items sit in slot 2 without an off-hand socket.
 const SOCKET_MAIN := "Bone_weapon_01"
 const SOCKET_OFF := "Bone_weapon_02"
-## Where the socket sits when a wearer does not carry the socket bone itself.
-## Measured on the two NPC bodies that carry BOTH: the socket is a child of the
-## hand at a rest offset of ~1e-6, i.e. the same point. NOT universal -- the
-## DAEMONIA armour set puts its socket 3.86 units off the hand -- so this is a
-## fallback that gets COUNTED (see sockets_fallback), never a substitution.
-const SOCKET_FALLBACK := {SOCKET_MAIN: "Bip01 R Hand", SOCKET_OFF: "Bip01 L Hand"}
+## The hand each socket hangs off, used to TELL THE TWO SIDES APART -- never as
+## a place to hang a weapon when the wearer has no socket.
+##
+## Substituting the hand was tried and is withdrawn. It was justified on
+## position, which is real: on the bodies carrying both, the socket sits ~1e-6
+## from the hand. But a dock uses the whole TRANSFORM, and the ROTATION does not
+## follow. Over the 441 wearer-side sockets, the socket's rest rotation relative
+## to its parent hand is:
+##
+##      0-15 deg  299   the hand is a fair stand-in
+##     30-60 deg   13
+##    90-180 deg  107   a completely different frame
+##
+## So the hand is right about two thirds of the time and off by a quarter turn
+## or more for a quarter of the corpus -- and a body with no socket gives no way
+## to tell which group it belongs to. That is invention with a known failure
+## rate, and on SOLDIER it laid a kite shield flat across the character's chest.
+## A wearer with no socket is REFUSED and counted instead.
+const SOCKET_HAND := {SOCKET_MAIN: "Bip01 R Hand", SOCKET_OFF: "Bip01 L Hand"}
 
-## Pieces docked by attach_socket(), and how many of them had to fall back to
-## the bare hand bone because this rig carries no socket of its own.
+## Pieces docked by attach_socket(), and pieces refused because this rig names
+## no socket for that hand. The second is the honest measure of how much of the
+## cast cannot be armed yet -- see research/formats/granny-grn.md.
 var sockets_attached := 0
-var sockets_fallback := 0
+var sockets_refused := 0
 
 ## True when the entry declared bones but no weights: an unskinned rigid prop,
 ## whose bones are locators. Set by _build_rig; the Skeleton3D is discarded, so
@@ -182,13 +196,13 @@ var is_prop := false
 var bone_rests: Array[Dictionary] = []
 
 
-## Where `socket` sits in THIS rig's own model space, or null when the rig has
-## no such socket. Answers for a skinned rig and for a prop alike -- the two
-## keep the same numbers in different places, and every caller wants the
-## transform rather than an index into whichever one it happens to be.
+## Where `socket` sits in THIS rig's own model space, or null when the rig does
+## not name it. Answers for a skinned rig and for a prop alike -- the two keep
+## the same numbers in different places, and every caller wants the transform
+## rather than an index into whichever one it happens to be.
 ##
-## A wearer falls back to the bare hand bone; a prop never does, because a hand
-## is where you hold something and a prop has none.
+## Null is a real answer and the only honest one: there is no substitute bone,
+## for the reason SOCKET_HAND documents.
 func socket_rest(socket: String) -> Variant:
 	if is_prop:
 		var idx := -1
@@ -199,21 +213,7 @@ func socket_rest(socket: String) -> Variant:
 	if _skeleton == null:
 		return null
 	var b := _skeleton.find_bone(socket)
-	if b < 0:
-		b = _skeleton.find_bone(SOCKET_FALLBACK.get(socket, ""))
 	return _skeleton.get_bone_global_rest(b) if b >= 0 else null
-
-
-## True when this rig carries the socket bone ITSELF rather than only the hand
-## socket_rest() would fall back to -- the difference the fallback counter
-## reports, so a caller can tell a measured dock from an assumed one.
-func has_own_socket(socket: String) -> bool:
-	if is_prop:
-		for b in bone_rests:
-			if (b["name"] as PackedByteArray).get_string_from_utf8() == socket:
-				return true
-		return false
-	return _skeleton != null and _skeleton.find_bone(socket) >= 0
 
 
 ## A prop bone's rest composed up its parent chain, which is what a Skeleton3D
@@ -248,8 +248,9 @@ func attach_socket(models: Sacred.Models, entry: int, socket: String) -> ModelVi
 		return null
 	var bone := _skeleton.find_bone(socket)
 	if bone < 0:
-		bone = _skeleton.find_bone(SOCKET_FALLBACK.get(socket, ""))
-	if bone < 0:
+		# This wearer names no socket for this hand, so where the weapon goes is
+		# simply not in the file. Refused, not approximated.
+		sockets_refused += 1
 		return null
 	var piece := ModelView.new()
 	piece.name = "%s_%d" % [socket, entry]
@@ -280,8 +281,6 @@ func attach_socket(models: Sacred.Models, entry: int, socket: String) -> ModelVi
 	# startcode classes declare.
 	piece.transform = (grip as Transform3D).affine_inverse()
 	sockets_attached += 1
-	if not has_own_socket(socket):
-		sockets_fallback += 1
 	return piece
 
 ## The material for one draw batch. `slot` is a 0-based index into
@@ -302,7 +301,23 @@ func _skin_material(models: Sacred.Models, entry: int, slot: int) -> StandardMat
 	var tid := Sacred.TextureFormat.find_model_texture(_texture_pak, names[slot])
 	if tid < 0:
 		return mat
-	var img := Sacred.TextureFormat.decode_texture(_texture_pak, tid, true)
+	# render=FALSE, and the difference is not a detail. The payload is ARGB4444;
+	# the render=true branch hands those bytes to Godot as FORMAT_RGBA4444, which
+	# rotates every channel by one -- the real ALPHA is read as red and the real
+	# BLUE as alpha. Measured on Gladiator_body.tga: (1.00,0.41,0.32) a=0.28
+	# against the correct (0.41,0.32,0.28) a=1.00.
+	#
+	# Terrain can live with that because it samples through its own shader; a
+	# StandardMaterial3D cannot. Combined with the TRANSPARENCY_ALPHA that
+	# player_view.gd sets for depth sorting, an average alpha of 0.28 with NO
+	# fully-opaque pixel rendered every character nearly invisible while the
+	# untextured weapons stayed solid -- the whole body of the defect that made
+	# the world look like floating weapons.
+	#
+	# Correctly decoded the alpha is real: Gladiator and Wolf are fully opaque
+	# (a1=1.000) and Horse carries genuine cutouts (a1=0.877), so the transparent
+	# pass is still the right one to draw in.
+	var img := Sacred.TextureFormat.decode_texture(_texture_pak, tid, false)
 	if img == null:
 		return mat
 	mat.albedo_texture = ImageTexture.create_from_image(img)

@@ -78,7 +78,7 @@ func _init() -> void:
 			if pn.ends_with("Hand"):
 				wearer[nm] += 1
 				# A socket on the WRONG hand would break the whole mapping.
-				if pn != ModelView.SOCKET_FALLBACK[nm]:
+				if pn != ModelView.SOCKET_HAND[nm]:
 					crossed += 1
 			elif pn == "__Root":
 				weapon[nm] += 1
@@ -234,25 +234,37 @@ func _init() -> void:
 		"PIKE docked in the off hand it has no grip for")
 	assert(pv.equipped() == docked,
 		"%d pieces docked, %d counted" % [docked, pv.equipped()])
-	assert(pv.equipped_fallback() == 0,
-		"%s carries both sockets, so nothing should have used the hand fallback" % body_name)
+	assert(pv.equipped_refused() == 0,
+		"%s carries both sockets, so nothing should have been refused" % body_name)
 
-	# THE FALLBACK, on a body that needs it. SERAPHIM carries Bone_weapon_01 and
-	# NOT Bone_weapon_02, which is the ordinary case -- only 192 of 1571 entries
-	# carry the off-hand socket at all. Its off hand therefore docks to Bip01 L
-	# Hand, and that must be REPORTED rather than silently indistinguishable
-	# from a body that named its own socket.
+	# THE REFUSAL, on a body that needs it, and WHY the hand is not a stand-in.
+	# Substituting Bip01 L/R Hand for a missing socket was tried and withdrawn:
+	# it is justified on POSITION (~1e-6 on the bodies carrying both) but a dock
+	# uses the whole transform, and over the 441 wearer sockets the rotation
+	# relative to the parent hand is 0-15 deg on 299, 30-60 on 13, and 90-180 on
+	# 107. Right two thirds of the time, a quarter-turn or worse for a quarter of
+	# the corpus, with no way to tell which from a body that has no socket -- and
+	# on SOLDIER it laid a kite shield flat across the character's chest.
+	var spread := _rotation_spread(models)
+	assert(spread["far"] > 50,
+		"only %d wearer sockets sit 90+ deg from their hand -- if the hand really does stand in, this refusal can be reconsidered" % spread["far"])
+	assert(spread["near"] > spread["far"],
+		"most sockets now disagree with their hand (%d near, %d far)" % [spread["near"], spread["far"]])
+	# SERAPHIM carries Bone_weapon_01 and NOT _02, which is the ordinary case:
+	# only 192 of 1571 entries carry the off-hand socket at all. Its main hand
+	# docks and its off hand is refused.
 	var sv := PlayerView.new(models, "SERAPHIM.GRN", tp)
 	assert(sv.node != null, "SERAPHIM.GRN did not build")
 	var sskel: Skeleton3D = sv.node.get_node("Skeleton")
 	assert(sskel.find_bone(ModelView.SOCKET_MAIN) >= 0
 		and sskel.find_bone(ModelView.SOCKET_OFF) < 0,
-		"SERAPHIM no longer has exactly one of the two sockets -- pick another fallback subject")
-	assert(sv.equip(models, "SWORD.GRN", 1) and sv.equip(models, "SHIELD_KITE.GRN", 2),
-		"SERAPHIM could not carry a sword and a shield")
-	assert(sv.equipped() == 2 and sv.equipped_fallback() == 1,
-		"SERAPHIM docked %d pieces with %d fallbacks, expected 2 and 1" % [
-			sv.equipped(), sv.equipped_fallback()])
+		"SERAPHIM no longer has exactly one of the two sockets -- pick another subject")
+	assert(sv.equip(models, "SWORD.GRN", 1), "SERAPHIM could not carry a sword")
+	assert(not sv.equip(models, "SHIELD_KITE.GRN", 2),
+		"SERAPHIM took a shield in an off hand it names no socket for")
+	assert(sv.equipped() == 1 and sv.equipped_refused() == 1,
+		"SERAPHIM docked %d and refused %d, expected 1 and 1" % [
+			sv.equipped(), sv.equipped_refused()])
 
 	# THE LIVE WIRING, on the real cast. This is main.gd's _build_npcs minus the
 	# scene tree: the same Startcode -> Items -> PlayerView -> equip chain over
@@ -263,7 +275,7 @@ func _init() -> void:
 	var roster_built := 0
 	var roster_hands := 0
 	var roster_refused := 0
-	var roster_fallback := 0
+	var roster_nosocket := 0
 	var sc_g = Sacred.Startcode.new(install.path_join("bin/type_npc_gladiator"))
 	for rec in sc_g.npcs:
 		if roster_built >= ROSTER:
@@ -285,22 +297,55 @@ func _init() -> void:
 				roster_hands += 1
 			else:
 				roster_refused += 1
-		roster_fallback += npc.equipped_fallback()
+		roster_nosocket += npc.equipped_refused()
 		npc.node.free()
 	assert(roster_built == ROSTER,
 		"only %d of %d armed gladiator-class NPCs built" % [roster_built, ROSTER])
 	# Every hand these records name must actually be drawable. A refusal here is
 	# not a shrug: it would mean the roster carries an item whose grip the body
 	# has no socket for, which the slot census above says cannot happen.
-	assert(roster_refused == 0,
-		"%d hands on the real roster could not be docked" % roster_refused)
-	assert(roster_hands >= roster_built,
-		"%d NPCs built but only %d hands drawn -- the wiring is dropping items" % [
-			roster_built, roster_hands])
+	# NOT zero, and that is the finding rather than a defect: SOLDIER and almost
+	# every other NPC body names no socket at all, so the cast cannot be armed
+	# from the body mesh alone. The socket turns up on ARMOUR instead
+	# (DAEMONIA_ARMOR01_GLOVES carries one), which is the open lead. What must
+	# hold is that nothing is quietly approximated.
+	assert(roster_refused + roster_hands > 0, "the roster carries no hands at all")
+	assert(roster_refused == roster_nosocket,
+		"%d hands were refused but only %d for want of a socket -- something else is failing" % [
+			roster_refused, roster_nosocket])
 
-	print("compose_check\tOK\twearer=%d/%d\tweapon=%d/%d\tcrossed=%d\tslot1=%d (%.3f shields)\tslot2=%d (%.3f shields)\tno_off_grip=%d/%d\tdocked=%d\troster=%d\thands=%d\trefused=%d\tfallback=%d" % [
+	print("compose_check\tOK\twearer=%d/%d\tweapon=%d/%d\tcrossed=%d\tslot1=%d (%.3f shields)\tslot2=%d (%.3f shields)\tno_off_grip=%d/%d\tdocked=%d\troster=%d\thands=%d\trefused=%d\tno_socket=%d" % [
 		wearer[ModelView.SOCKET_MAIN], wearer[ModelView.SOCKET_OFF],
 		weapon[ModelView.SOCKET_MAIN], weapon[ModelView.SOCKET_OFF], crossed,
 		filled[1], r1, filled[2], r2, no_off_grip[1], no_off_grip[2], docked,
-		roster_built, roster_hands, roster_refused, roster_fallback])
+		roster_built, roster_hands, roster_refused, roster_nosocket])
 	finish(0)
+
+
+## How many wearer sockets sit NEAR their parent hand's orientation and how many
+## sit far from it. Read straight from the bone rests, so the refusal above is
+## justified by the corpus at run time rather than by a number in a comment.
+func _rotation_spread(models: Sacred.Models) -> Dictionary:
+	var near := 0
+	var far := 0
+	for e in models.count():
+		if models.kind_of(e) == Sacred.Models.KIND_MOTION:
+			continue
+		var bl := models.bones(e)
+		if bl.is_empty():
+			continue
+		var names := PackedStringArray()
+		for x in bl:
+			names.append((x["name"] as PackedByteArray).get_string_from_utf8())
+		for i in bl.size():
+			if not names[i].begins_with("Bone_weapon"):
+				continue
+			var pe: int = bl[i]["parent_effective"]
+			if pe < 0 or not names[pe].ends_with("Hand"):
+				continue
+			var q := (bl[i]["rest"] as Transform3D).basis.get_rotation_quaternion().normalized()
+			if rad_to_deg(2.0 * acos(clampf(absf(q.w), -1.0, 1.0))) < 15.0:
+				near += 1
+			else:
+				far += 1
+	return {"near": near, "far": far}
