@@ -450,12 +450,10 @@ func _child_with_tag(dir: Array[Dictionary], j: int, tag: int) -> int:
 ## array all-or-nothing when a corner goes unclaimed, because a partly
 ## resolved UV array textures as a smear that still looks like geometry.
 ##
-## texture_names() below reads WHICH images the file names, in the file's own
-## per-material order, and Sacred.TextureFormat.find_model_texture() resolves
-## one to a texture.pak id. What is still NOT read is which SUBMESH each
-## material belongs to: MaterialSection/Material (0xCA5E0D01/0xCA5E0D00) have
-## no walker branch, so a model naming more than one texture cannot be skinned
-## and stays clay. See checks/skin_check.gd.
+## texture_names() reads WHICH images the file names, material_groups() reads
+## which draw batch wants each of them, and
+## Sacred.TextureFormat.find_model_texture() resolves a name to a texture.pak
+## id. ModelView builds one surface per group. See checks/skin_check.gd.
 ## Per-mesh UV entry byte offsets, from every MeshField in the mesh subtree
 ## concatenated in directory order. A mesh may carry more than one field
 ## (GLADIATOR mesh 0 carries two, 2322 + 896 entries), and the RenderPass
@@ -2258,4 +2256,57 @@ func texture_names(entry: int) -> PackedStringArray:
 			if ref > 0 and ref - 1 < files.size():
 				name = files[ref - 1]
 		out.append(name)
+	return out
+
+
+## Material binding, and the reason a multi-material model can be split.
+##
+## The ModelSection's children run in fives -- 0xCA5E0E02, 0E03, 0E05, 0E04,
+## 0E06 -- one group per DRAW BATCH, and 0E02's payload is
+## `{u32 mesh_index, u32 material_index, f32, f32}` with the material index
+## ONE-BASED into texture_names(). The triangle count is the second u32 of
+## 0E04.
+##
+## Measured on GLADIATOR.GRN: six groups over three meshes and six materials,
+## with 212 + 230 + 260 + 258 + 350 + 385 = 1695 triangles -- exactly the
+## entry's own triangle total. That equality is the check, and it is not one
+## a wrong field can pass by luck.
+##
+## -> [{mesh:int, material:int (0-based, -1 if unset), triangles:int}] in the
+## file's own group order. Empty when the entry has no ModelSection.
+const TAG_MODEL_GROUP := 0xCA5E0E02
+const TAG_MODEL_GROUP_COUNT := 0xCA5E0E04
+
+func material_groups(entry: int) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	var length := true_length(entry)
+	if length <= 0 or not magic_ok(entry):
+		return out
+	var buf := _pak.read_at(_pak.entry_offset(entry), length)
+	if buf.size() < length:
+		return out
+	var dir := _directory(buf)
+	if dir.is_empty():
+		return out
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_MODEL_GROUP:
+			continue
+		var base := SECTION_OFF_MESH + int(dir[j]["rel"])
+		if base + 8 > buf.size():
+			continue
+		var mesh := buf.decode_u32(base)
+		var mat := buf.decode_u32(base + 4)
+		# the triangle count is in the group's own 0xCA5E0E04 child
+		var tris := -1
+		var last: int = mini(j + 1 + int(dir[j]["children"]), dir.size())
+		for k in range(j + 1, last):
+			if dir[k]["tag"] != TAG_MODEL_GROUP_COUNT:
+				continue
+			var o := SECTION_OFF_MESH + int(dir[k]["rel"]) + 4
+			if o + 4 <= buf.size():
+				tris = buf.decode_u32(o)
+			break
+		if tris < 0:
+			continue
+		out.append({"mesh": mesh, "material": mat - 1, "triangles": tris})
 	return out

@@ -33,13 +33,20 @@ extends "res://checks/check.gd"
 ## geometry (slot_uv, the 18 diamonds) does NOT apply and is not used: a skin
 ## is one whole image.
 ##
-## WHAT IS DELIBERATELY NOT DONE. mesh_arrays() concatenates every submesh into
-## one surface, so a rig carries one material. That is right for the 1393 of
-## 1558 mesh entries naming a single texture and wrong for GLADIATOR (six names
-## over three submeshes) and WALDELFE_DARK (seven), so the binding is gated on
-## `== 1` rather than taking the first name. Those stay clay until the
-## Material->Mesh chain (0xCA5E0D00/0xCA5E0D01) is read. A confidently wrong
-## skin is worse than no skin.
+## JOIN 4 -- WHICH SUBMESH. Models.material_groups() reads the ModelSection's
+## draw batches: 0xCA5E0E02 carries {u32 mesh, u32 material_index (ONE-BASED),
+## f32, f32} and the group's 0xCA5E0E04 carries its triangle count. ModelView
+## builds one surface per group.
+##
+## The check that the fields are what they look like is arithmetic, not
+## plausibility: THE GROUP TRIANGLE COUNTS SUM TO THE ENTRY'S OWN TOTAL, and
+## the PER-MESH sums equal each submesh's own face count. GLADIATOR is
+## 212+230+260+258+350+385 = 1695 over three meshes; WALDELFE_DARK 1792 over
+## seven groups. A wrong field does not partition anything.
+##
+## STILL ASSUMED: that groups of the SAME mesh appear in triangle order. The
+## per-mesh partition is measured, so a mis-slice can only swap two batches
+## within one submesh, never across submeshes.
 const SINGLE_MIN := 1300     ## mesh entries naming exactly one texture
 const RESOLVE_MIN := 0.60    ## share of named textures found in texture.pak
 
@@ -125,18 +132,60 @@ func _init() -> void:
 	assert(rate >= RESOLVE_MIN,
 		"only %.3f of named textures resolve in texture.pak, floor %.2f" % [rate, RESOLVE_MIN])
 
+	# THE PARTITION. Group triangles must sum to the entry total, and the
+	# per-mesh sums must equal each submesh's own face count -- derived here
+	# from the index array and the per-vertex mesh id, which material_groups()
+	# never sees. Two readings of the same file, no shared path.
+	var checked := 0
+	for nm2 in ["GLADIATOR.GRN", "WALDELFE_DARK.GRN", "WOLF.GRN", "NOBLE_FEM.GRN", "BEAR.GRN"]:
+		var e := models.index_of(nm2)
+		var a := models.mesh_arrays(e)
+		var groups := models.material_groups(e)
+		if a.is_empty() or groups.is_empty():
+			continue
+		checked += 1
+		var total := 0
+		var per_mesh := {}
+		for g in groups:
+			total += int(g["triangles"])
+			per_mesh[g["mesh"]] = int(per_mesh.get(g["mesh"], 0)) + int(g["triangles"])
+		assert(total == int(a["triangle_count"]),
+			"%s: groups sum to %d triangles, the mesh has %d" % [nm2, total, a["triangle_count"]])
+		var faces := {}
+		var ind: PackedInt32Array = a["indices"]
+		var vmesh: PackedInt32Array = a["vertex_mesh"]
+		for t in ind.size() / 3:
+			var mi2: int = vmesh[ind[t * 3]]
+			faces[mi2] = int(faces.get(mi2, 0)) + 1
+		# THE GROUP'S MESH NUMBER IS NOT mesh_arrays()' -- GLADIATOR's groups
+		# total {0:442, 1:868, 2:385} against a layout of {0:868, 1:385, 2:442},
+		# and WALDELFE_DARK permutes differently again. So the invariant is that
+		# the MULTISETS of triangle counts match, which is what lets ModelView
+		# reconcile the two orderings by count; comparing index to index would
+		# fail here and did.
+		var gs := per_mesh.values(); gs.sort()
+		var fs := faces.values(); fs.sort()
+		assert(gs == fs,
+			"%s: group triangle counts %s do not match the submesh face counts %s" % [nm2, gs, fs])
+		# and the counts must be DISTINCT, or the reconciliation is a guess
+		assert(fs.size() == 1 or fs[0] != fs[1],
+			"%s: two submeshes share a face count %s -- the count mapping is ambiguous" % [nm2, fs])
+	assert(checked >= 4, "only %d models had both arrays and groups" % checked)
+
 	var ModelViewScript := load("res://view/model_view.gd")
 	var mv = ModelViewScript.new()
 	mv.set_texture_pak(tp)
 	assert(mv.setup(models, wolf, false), "WOLF did not build")
 	assert(mv.textures_named == 1 and mv.textured,
 		"WOLF built with textures_named=%d textured=%s" % [mv.textures_named, mv.textured])
+	assert(mv.surfaces == 1, "WOLF built %d surfaces, expected 1" % mv.surfaces)
 	var gl = ModelViewScript.new()
 	gl.set_texture_pak(tp)
 	assert(gl.setup(models, models.index_of("GLADIATOR.GRN"), false), "GLADIATOR did not build")
-	assert(gl.textures_named > 1 and not gl.textured,
-		"GLADIATOR names %d textures and textured=%s -- a multi-material model must NOT be skinned from one name" % [
-			gl.textures_named, gl.textured])
+	assert(gl.surfaces == 6,
+		"GLADIATOR built %d surfaces, expected one per material group (6)" % gl.surfaces)
+	assert(gl.textured_surfaces == 6,
+		"only %d of GLADIATOR's 6 surfaces carry an image" % gl.textured_surfaces)
 	mv.free()
 	gl.free()
 

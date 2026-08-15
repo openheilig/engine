@@ -127,8 +127,41 @@ var _texture_pak: Sacred.Pak = null
 var textures_named := 0
 var textured := false
 
+## How many surfaces setup() built: one per material group where the groups
+## account for every triangle, otherwise one.
+var surfaces := 0
+## How many of those surfaces carry a real image rather than clay.
+var textured_surfaces := 0
+
 func set_texture_pak(pak: Sacred.Pak) -> void:
 	_texture_pak = pak
+
+## The material for one draw batch. `slot` is a 0-based index into
+## Models.texture_names(), or -1 for "no texture known". Clay whenever the
+## slot is unset, the pak was not supplied, the name does not resolve, or the
+## image fails to decode -- there is no fallback to another slot's image,
+## because a confidently wrong skin is worse than no skin.
+func _skin_material(models: Sacred.Models, entry: int, slot: int) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.78, 0.74, 0.68)
+	mat.roughness = 0.75
+	mat.metallic = 0.0
+	if slot < 0 or _texture_pak == null:
+		return mat
+	var names := models.texture_names(entry)
+	if slot >= names.size():
+		return mat
+	var tid := Sacred.TextureFormat.find_model_texture(_texture_pak, names[slot])
+	if tid < 0:
+		return mat
+	var img := Sacred.TextureFormat.decode_texture(_texture_pak, tid, true)
+	if img == null:
+		return mat
+	mat.albedo_texture = ImageTexture.create_from_image(img)
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR
+	mat.albedo_color = Color.WHITE
+	textured_surfaces += 1
+	return mat
 
 func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool:
 	var b := models.coordinate_basis(entry)
@@ -167,40 +200,96 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 		_discard_rig()
 		return false
 
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.78, 0.74, 0.68)
-	mat.roughness = 0.75
-	mat.metallic = 0.0
-
-	# THE SKIN, where the file names exactly one and it resolves.
+	# ONE SURFACE PER DRAW BATCH, so a model with several skins gets them.
 	#
-	# mesh_arrays() concatenates every submesh into ONE surface, so one
-	# material is all this node can carry. That is correct for the 1393 of
-	# 1558 mesh entries whose .GRN names a single texture, and it is why the
-	# binding is gated on `== 1` rather than taking texture_names()[0]:
-	# GLADIATOR names six over three submeshes and WALDELFE_DARK seven, and
-	# picking the first would texture the boots with the body. Those stay clay
-	# until the Material -> Mesh chain is read (0xCA5E0D00/0xCA5E0D01 have no
-	# walker yet), because a confidently wrong skin is worse than no skin.
+	# models.material_groups() reads the ModelSection's {mesh, material,
+	# triangles} draw batches. Their counts sum to the entry's own triangle
+	# total exactly -- that is the check that the fields are what they look
+	# like, and a wrong field partitions nothing.
+	#
+	# THE GROUP'S MESH NUMBER IS NOT THIS READER'S. Measured: GLADIATOR's
+	# groups total {0:442, 1:868, 2:385} per mesh while mesh_arrays() lays the
+	# submeshes out as {0:868, 1:385, 2:442}, and WALDELFE_DARK permutes
+	# differently again. Slicing the concatenated index array in group order
+	# would therefore have skinned the wrong triangles -- confidently, and
+	# invisibly to any check that only compared totals.
+	#
+	# The two orderings are reconciled by TRIANGLE COUNT, and only when that is
+	# unambiguous: if two submeshes have the same face count the mapping is not
+	# determined and the split is refused. Within one submesh the groups are
+	# taken in file order, which is assumed rather than measured -- so the worst
+	# a residual error can do is swap two batches of the SAME submesh.
 	textures_named = models.texture_names(entry).size()
-	textured = false
-	if textures_named == 1 and _texture_pak != null:
-		var tid := Sacred.TextureFormat.find_model_texture(
-			_texture_pak, models.texture_names(entry)[0])
-		if tid >= 0:
-			var img := Sacred.TextureFormat.decode_texture(_texture_pak, tid, true)
-			if img != null:
-				mat.albedo_texture = ImageTexture.create_from_image(img)
-				mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR
-				textured = true
+	textured_surfaces = 0
+	var groups: Array[Dictionary] = models.material_groups(entry)
+	var vmesh: PackedInt32Array = m["vertex_mesh"]
+
+	# this reader's own submesh layout: face count and first triangle
+	var port_faces := {}
+	var port_start := {}
+	var port_order: Array[int] = []
+	for t in idx.size() / 3:
+		var pm: int = vmesh[idx[t * 3]]
+		if not port_faces.has(pm):
+			port_faces[pm] = 0
+			port_start[pm] = t
+			port_order.append(pm)
+		port_faces[pm] = int(port_faces[pm]) + 1
+
+	# group triangles per GROUP mesh number, and the count -> port mesh map
+	var g_sum := {}
+	for g in groups:
+		g_sum[g["mesh"]] = int(g_sum.get(g["mesh"], 0)) + int(g["triangles"])
+	var by_count := {}
+	var ambiguous := false
+	for pm in port_faces:
+		var c: int = port_faces[pm]
+		if by_count.has(c):
+			ambiguous = true
+		by_count[c] = pm
+	var g2p := {}
+	for gm in g_sum:
+		var c2: int = g_sum[gm]
+		if by_count.has(c2):
+			g2p[gm] = by_count[c2]
+	var split := groups.size() > 1 and not ambiguous and g2p.size() == g_sum.size()
+
+	var mesh := ArrayMesh.new()
+	var mats: Array[StandardMaterial3D] = []
+	if split:
+		var at := {}
+		for pm2 in port_order:
+			at[pm2] = int(port_start[pm2]) * 3
+		for pm3 in port_order:
+			for g2 in groups:
+				if g2p.get(g2["mesh"], -1) != pm3:
+					continue
+				var take := int(g2["triangles"]) * 3
+				var from: int = at[pm3]
+				if from + take > idx.size():
+					split = false
+					break
+				var sub := arr.duplicate()
+				sub[Mesh.ARRAY_INDEX] = idx.slice(from, from + take)
+				mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sub)
+				mats.append(_skin_material(models, entry, int(g2["material"])))
+				at[pm3] = from + take
+			if not split:
+				break
+	if not split:
+		mesh = ArrayMesh.new()
+		mats.clear()
+		textured_surfaces = 0
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		mats.append(_skin_material(models, entry, 0 if textures_named == 1 else -1))
+	surfaces = mesh.get_surface_count()
+	textured = textured_surfaces > 0
 
 	var mi := MeshInstance3D.new()
 	mi.name = "Mesh"
 	mi.mesh = mesh
-	mi.material_override = mat
+	for i in mats.size():
+		mi.set_surface_override_material(i, mats[i])
 	if _skeleton != null:
 		# MeshInstance3D under the Skeleton3D, with `skeleton` as the relative
 		# NodePath ".." -- the conventional layout, and the one that does not
