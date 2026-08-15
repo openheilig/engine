@@ -10,6 +10,18 @@ godot --headless --path . --script res://checks/<name>.gd
 
 Every one states its own question and command line in its header comment.
 
+All 24 pass. 23 need nothing but the retail install; `pax_check` also needs
+`SACRED_CHARS` pointing at the eight-hero `.pax` corpus, which is **not** part
+of the retail install and is not shipped here. Without it the check exits 1
+with a message saying so — that refusal is the correct behaviour, not a
+failure, and it is what distinguishes "no corpus" from "corpus disagrees".
+
+```
+for f in checks/*_check.gd; do
+  godot --headless --path . --script "res://$f" || echo "FAILED $f"
+done
+```
+
 ## `check.gd` — why the base class exists
 
 A failed `assert()` halts the script but leaves the SceneTree running, so a
