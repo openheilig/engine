@@ -43,6 +43,17 @@ func _init() -> void:
 	var by_count := {}
 	for pm2 in faces:
 		by_count[int(faces[pm2])] = pm2
+	# vertices actually REFERENCED per submesh, which is what a draw call sees
+	var vused := {}
+	for t1 in idx.size() / 3:
+		var pm1: int = vmesh[idx[t1 * 3]]
+		var st: Dictionary = vused.get(pm1, {})
+		for c1 in 3:
+			st[idx[t1 * 3 + c1]] = 1
+		vused[pm1] = st
+	for pm1 in vused:
+		print("submesh\t%s\ttris %d\tvertices referenced %d" % [
+			str(pm1), int(faces[pm1]), (vused[pm1] as Dictionary).size()])
 	var g_sum := {}
 	for g0 in models.material_groups(e):
 		g_sum[g0["mesh"]] = int(g_sum.get(g0["mesh"], 0)) + int(g0["triangles"])
