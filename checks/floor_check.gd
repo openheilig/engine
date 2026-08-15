@@ -48,6 +48,7 @@ func _init() -> void:
 	var under17 := 0
 	var under18 := 0
 	var over16 := 0        ## values the field could not hold if it were 16 bits
+	var partition := 0     ## records where low17 and hi<<17 reconstruct the u32 exactly
 	var resolved := 0
 	for i in range(1, fp.count(), STRIDE):
 		var r := fp.blob(i)
@@ -63,6 +64,8 @@ func _init() -> void:
 		# resolve as a tile id, and tiles.pak's own orientation must equal the
 		# index mod 18 -- the rule the engine derives it by at 0x080e4dbb.
 		var hi := v >> 17
+		if (v & LOW17) | (hi << 17) == v:
+			partition += 1
 		if hi != 0:
 			hi_n += 1
 			if hi < TILE_COUNT:
@@ -107,6 +110,14 @@ func _init() -> void:
 	assert(hi_valid == hi_n,
 		"the top field is meant to be a second tiles.pak index: %d of %d landed outside 0..%d" % [
 			hi_n - hi_valid, hi_n, TILE_COUNT])
+	# The two invariants above (hi < count, orientation == index mod 18) CANNOT
+	# FAIL on a wrong split: orientation(i) == i %% 18 holds for all 90132
+	# tiles.pak indices, so any value lands on one, and a doubled small id
+	# stays under the count. Measured, not assumed -- and it is why `v >> 16`
+	# used to pass this check. What discriminates is that the two fields must
+	# PARTITION the u32 with no shared bit: only a 17/15 split reconstructs it.
+	assert(partition == n,
+		"%d of %d records do not reconstruct from (low17 | hi<<17) -- the field boundary is not at bit 17" % [n - partition, n])
 	assert(hi_mod18 == hi_n,
 		"tiles.pak orientation must equal index mod 18 for the top field (the engine's own rule): %d of %d disagreed" % [
 			hi_n - hi_mod18, hi_n])
