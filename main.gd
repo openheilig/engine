@@ -134,6 +134,11 @@ var _player_view: PlayerView = null
 ## mesh by bone geometry. Held so _process can keep them placed and so the
 ## tree frees them on quit exactly like the player's rig.
 var _show_creatures := false
+## --npcs: the scripted cast from startcode.bin, drawn at its REAL cells rather
+## than scattered (row 832). Shares _creature_views so the tree frees these
+## rigs exactly like the rolled ones -- the difference is where they stand,
+## not how they are owned.
+var _show_npcs := false
 var _creature_views: Array[PlayerView] = []
 var _creature_cells: Array[Vector2] = []
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
@@ -223,6 +228,10 @@ func _ready() -> void:
 	# taking plain data and never opens a file of its own.
 	var show_spawns := "--spawns" in argv
 	_show_creatures = "--creatures" in argv
+	# --npcs: the scripted cast at its real cells (rows 831-833). Independent of
+	# --creatures on purpose -- one is retail placement, the other a seeded
+	# stand-in, and mixing them in one flag would blur exactly that distinction.
+	_show_npcs = "--npcs" in argv
 	var exterior := "--exterior" in argv
 	var hide_levels := 0
 	for a in argv:
@@ -463,8 +472,13 @@ func _ready() -> void:
 				_sim.interior = Interior.new(world, walk, footprints)
 			print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
 				player_cell.x, player_cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
+			# The models pak is opened whenever ANY rig is wanted, not only when
+			# the player is drawn. --noplayer is what every capture runbook passes
+			# (row 616's settle race), so hanging the NPC and creature builds off
+			# _show_player would make them silently absent from exactly the runs
+			# that photograph them.
+			var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 			if _show_player:
-				var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 				if models_pak.is_open():
 					_player_view = PlayerView.new(Sacred.Models.new(models_pak))
 					if _player_view.node != null:
@@ -474,9 +488,12 @@ func _ready() -> void:
 						print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
 							PlayerView.MODEL_NAME, _player_view.model_index,
 							_player_view.vertex_count, _player_view.triangle_count])
+			if _show_player or _show_creatures or _show_npcs:
 				_ensure_rig_light()
-				if _show_creatures and models_pak.is_open():
-					_build_creatures(install, Sacred.Models.new(models_pak), player_cell)
+			if _show_creatures and models_pak.is_open():
+				_build_creatures(install, Sacred.Models.new(models_pak), player_cell)
+			if _show_npcs and models_pak.is_open():
+				_build_npcs(install, Sacred.Models.new(models_pak), player_cell)
 
 	if region != Vector3i.ZERO:
 		_view.load_region(region.x, region.y, region.z)
@@ -2539,6 +2556,129 @@ func _build_creatures(install: String, models: Sacred.Models, player_cell: Vecto
 	for k: String in kinds:
 		listed.append("%s x%d" % [k, kinds[k]])
 	print("creatures\t%s" % ", ".join(listed))
+
+
+## --npcs: the world's FIXED cast, drawn where retail puts it.
+##
+## The difference from --creatures is PLACEMENT, and it is the whole point.
+## --creatures scatters rolled creatures around the player under a fixed seed
+## because retail rolls spawn POINTS at runtime and this port cannot reproduce
+## that yet. startcode.bin needs no such stand-in: every opcode-1 record
+## carries its own literal cell, or the name of an opcode-23 position declared
+## in the same file, and placement there is CLOSED -- 18,586 of 18,586 across
+## the eight classes (autoresearch row 832). So these NPCs stand exactly where
+## the retail script puts them, and a disagreement with the running game is a
+## bug rather than an expected difference.
+##
+## The join, every step an already-decoded reader (rows 831-833, 837):
+##   Sacred.Startcode  which NPCs exist, their body/hand item ids, their cells
+##   Sacred.Items      items.pak record -> its Granny mesh name
+##   Sacred.Rigs       mesh -> the clip whose bones agree with it
+##   PlayerView        build, scale, place and depth-sort the rig
+##
+## ponytail: BODIES ONLY. Each record also names a main hand and an off hand
+## (tag-0x02 occurrences 1 and 2, both 100% resolving to a .grn), and --equip
+## already demonstrates that a wearer's ARMOUR shares its skeleton -- but
+## nothing has measured whether a WEAPON does, or which bone it would hang from
+## if it does not. Drawing a sword on that guess would put invention in the
+## picture, which is what the canonical-first rule exists to prevent. The armed
+## count is printed instead, so the next session starts from data.
+##
+## ponytail: no AI, no wandering, no schedule -- they stand and animate, like
+## --creatures. Facing is 0 for the same reason it is 0 there: no field in any
+## record has been shown to carry it, and scattering yaw would be invention
+## dressed as behaviour.
+const NPC_MAX := 64
+## Cells, not sectors: an NPC two sectors away is invisible but still costs a
+## rig build. Sized to cover a town square at the middle zoom step.
+const NPC_RADIUS := 48.0
+
+
+func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -> void:
+	var start := Time.get_ticks_msec()
+	var sc := Sacred.Startcode.new(install.path_join("bin/type_npc_seraphim"))
+	if sc.npcs.is_empty():
+		printerr("npcs\tstartcode.bin decoded no NPC records under %s" % install)
+		return
+	var items := Sacred.Items.new(Sacred.Pak.new(install.path_join("pak/items.pak")))
+
+	# Nearest first, so a cap truncates the far edge of the crowd rather than an
+	# arbitrary slice of it -- and so whatever gets dropped is reportable rather
+	# than silent. A silent cap reads as "this is everything there is".
+	var near: Array[Dictionary] = []
+	for n in sc.npcs:
+		var c: Vector2i = n["cell"]
+		if c == Sacred.Startcode.NO_CELL:
+			continue
+		var cell := Vector2(c)
+		var d := cell.distance_to(player_cell)
+		if d <= NPC_RADIUS:
+			near.append({"rec": n, "cell": cell, "d": d})
+	near.sort_custom(func(a, b): return a["d"] < b["d"])
+	var dropped := maxi(0, near.size() - NPC_MAX)
+	var in_radius := near.size()
+	if dropped > 0:
+		near.resize(NPC_MAX)
+	if near.is_empty():
+		print("npcs\tcell=%d,%d\tin_radius=0\t(no scripted NPC stands within %d cells)" % [
+			int(player_cell.x), int(player_cell.y), int(NPC_RADIUS)])
+		return
+
+	# Resolve every mesh BEFORE building any rig, so Sacred.Rigs decodes the
+	# clip corpus once for the whole crowd -- the same reason _build_creatures
+	# does it, and that one pass is its whole cost.
+	var picks: Array[Dictionary] = []
+	var wanted := PackedInt32Array()
+	var unresolved := 0
+	var armed := 0
+	for e in near:
+		var rec: Dictionary = e["rec"]
+		var nm := items.name_of(rec["body"])
+		var mi := models.index_of(nm) if nm != "" else -1
+		if mi < 0:
+			unresolved += 1
+			continue
+		if rec["main"] != 0:
+			armed += 1
+		picks.append({"name": nm, "mesh": mi, "cell": e["cell"]})
+		if not wanted.has(mi):
+			wanted.append(mi)
+	if picks.is_empty():
+		print("npcs\tcell=%d,%d\tin_radius=%d\tresolved=0" % [
+			int(player_cell.x), int(player_cell.y), in_radius])
+		return
+
+	var rigs := Sacred.Rigs.new(models, wanted)
+	var built := 0
+	var animated := 0
+	var kinds := {}
+	for pick in picks:
+		var pv := PlayerView.new(models, pick["name"])
+		if pv.node == null:
+			continue
+		add_child(pv.node)
+		pv.update(pick["cell"])
+		pv.set_yaw(0.0)
+		_creature_views.append(pv)
+		_creature_cells.append(pick["cell"])
+		built += 1
+		var ci := rigs.clip_for(pick["mesh"])
+		var mv := pv.node as ModelView
+		if mv != null and ci >= 0 and mv.play_clip(models, ci):
+			animated += 1
+			# Desynchronise by CELL, not by rng: these are FIXED placements, so
+			# the same NPC has to look the same in every capture or a
+			# screenshot pair stops being comparable.
+			var c: Vector2 = pick["cell"]
+			mv.seek_anim(fmod(absf(c.x * 7.0 + c.y * 13.0), maxf(0.001, mv.anim_length)))
+		kinds[pick["name"]] = int(kinds.get(pick["name"], 0)) + 1
+	print("npcs\tcell=%d,%d\tin_radius=%d\tbuilt=%d\tanimated=%d\tarmed=%d\tunresolved=%d\tdropped=%d\tmeshes=%d\t%d ms" % [
+		int(player_cell.x), int(player_cell.y), in_radius, built, animated,
+		armed, unresolved, dropped, wanted.size(), Time.get_ticks_msec() - start])
+	var listed := PackedStringArray()
+	for k: String in kinds:
+		listed.append("%s x%d" % [k, kinds[k]])
+	print("npcs\t%s" % ", ".join(listed))
 
 
 ## --equip=PREFIX[,PREFIX...] -- the R1.4 demonstration (autoresearch row 741):
