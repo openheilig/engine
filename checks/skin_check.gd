@@ -274,6 +274,57 @@ func _init() -> void:
 	assert(himg != null and himg.get_width() == 16 and himg.get_height() == 16,
 		"ELVE_SORCERESS_HANDS did not decode to the 16x16 retail uploads")
 
+	# JOIN 9 -- THE ITEM SKINS THE MESH, and for a shield it is the only route.
+	# items.pak record +0x08 is a texture.pak ENTRY INDEX, and retail's
+	# bindTextures prefers it over the mesh's own texture name whenever it is
+	# non-zero (Sacred.Items.TEXTURE_OFF carries the addresses). Two claims are
+	# gated here, and the second is the one that could be luck.
+	var ip := Sacred.Pak.new(install.path_join("pak/items.pak"))
+	assert(ip.is_open(), "cannot open pak/items.pak")
+	var items := Sacred.Items.new(ip)
+	# (a) the twelve items naming one kite shield carry twelve DISTINCT skins,
+	# and the mesh's own texture name is in no pak at all -- so index equality,
+	# or trusting the mesh, cannot produce this.
+	var kite := items.records_naming("SHIELD_KITE.GRN")
+	assert(kite.size() >= 12, "only %d items name SHIELD_KITE.GRN" % kite.size())
+	var seen_skin := {}
+	for r in kite:
+		var t := items.texture_of(r)
+		assert(t > 0, "item %d names SHIELD_KITE.GRN but carries no skin" % r)
+		assert(Sacred.TextureFormat.decode_texture(tp, t) != null,
+			"item %d's skin (texture.pak %d) does not decode" % [r, t])
+		seen_skin[t] = 1
+	assert(seen_skin.size() == kite.size(),
+		"the %d kite-shield items share only %d skins, so +0x08 is not the skin" % [
+			kite.size(), seen_skin.size()])
+	var ki := models.index_of("SHIELD_KITE.GRN")
+	for nm4 in models.texture_names(ki):
+		assert(Sacred.TextureFormat.find_model_texture(tp, nm4) < 0,
+			"SHIELD_KITE.GRN's own texture name resolves after all, so this join is not load-bearing for it")
+	# (b) THE CONTROL. Across the corpus an item's skin must agree with the mesh
+	# it skins by name far better than a shuffle does. Token agreement, real
+	# pairing against the same skins dealt to the wrong models.
+	var pairs: Array[Dictionary] = []
+	for rec2 in ip.count():
+		var mesh := items.name_of(rec2)
+		if not mesh.to_upper().ends_with(".GRN"):
+			continue
+		var t2 := items.texture_of(rec2)
+		if t2 <= 0 or t2 >= tp.count():
+			continue
+		var th := tp.read_at(tp.entry_offset(t2), 32)
+		var z2 := th.find(0)
+		if z2 <= 0:
+			continue
+		pairs.append({"mesh": mesh.get_basename().to_upper(),
+			"tex": th.slice(0, z2).get_string_from_ascii().get_basename().to_upper()})
+	assert(pairs.size() > 2000, "only %d item->skin pairs to test" % pairs.size())
+	var real := _agreement(pairs, 0)
+	var ctrl := _agreement(pairs, 7919)   # a fixed rotation: same skins, wrong models
+	assert(real > 0.40 and real > 5.0 * ctrl,
+		"item->skin name agreement is %.3f against a shuffled control of %.3f, which is not a join" % [
+			real, ctrl])
+
 	# Corpus census, and a rig that actually carries the skin.
 	var single := 0
 	var named := 0
@@ -353,6 +404,35 @@ func _init() -> void:
 	mv.free()
 	gl.free()
 
-	print("skin_check\tOK\tsingle_texture_entries=%d\tnamed=%d\tresolved=%d (%.3f)\twolf=%dx%d" % [
-		single, named, resolved, rate, img.get_width(), img.get_height()])
+	print("skin_check\tOK\tsingle_texture_entries=%d\tnamed=%d\tresolved=%d (%.3f)\twolf=%dx%d\titem_skins=%d (%.3f vs %.3f)" % [
+		single, named, resolved, rate, img.get_width(), img.get_height(),
+		pairs.size(), real, ctrl])
 	finish(0)
+
+
+## Mean token agreement between each pair's mesh name and its skin's name, with
+## the skins rotated by `shift` -- 0 is the real pairing, anything else deals
+## the same skins to the wrong models and is the control. Tokens are the
+## underscore-separated words of three characters or more, so WOLF/WOLF_VAMPDAY
+## agrees and WOLF/BEAR_MAGIC does not.
+func _agreement(pairs: Array[Dictionary], shift: int) -> float:
+	var total := 0.0
+	for i in pairs.size():
+		var a := _tokens(String(pairs[i]["mesh"]))
+		var b := _tokens(String(pairs[(i + shift) % pairs.size()]["tex"]))
+		if a.is_empty() or b.is_empty():
+			continue
+		var hit := 0
+		for t in a:
+			if b.has(t):
+				hit += 1
+		total += float(hit) / float(mini(a.size(), b.size()))
+	return total / float(maxi(1, pairs.size()))
+
+
+func _tokens(s: String) -> Array:
+	var out: Array = []
+	for t in s.replace("-", "_").split("_", false):
+		if t.length() > 2 and not out.has(t):
+			out.append(t)
+	return out

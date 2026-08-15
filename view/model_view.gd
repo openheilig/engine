@@ -140,6 +140,11 @@ var textured_surfaces := 0
 var surface_texture := PackedStringArray()
 var surface_material := PackedInt32Array()
 
+## The texture.pak entry this rig's ITEM skins it with, or -1 for "use the
+## mesh's own texture names". Set before setup() -- attach_socket takes it as an
+## argument; a body is never skinned this way, only a carried piece.
+var item_texture := -1
+
 func set_texture_pak(pak: Sacred.Pak) -> void:
 	_texture_pak = pak
 
@@ -266,7 +271,11 @@ func _prop_global_rest(idx: int) -> Transform3D:
 ## measured, a weapon shares only __Root and the socket names with a body (3 of
 ## 8..16 bones), so it is a rigid prop on a moving socket and not a second
 ## garment. The BoneAttachment3D is what makes it follow the animated hand.
-func attach_socket(models: Sacred.Models, entry: int, socket: String) -> ModelView:
+## `texture` is the carried item's own skin -- an items.pak `+0x08` texture.pak
+## entry, or -1 to let the piece's mesh name its own image. See
+## ModelView.item_texture and Sacred.Items.TEXTURE_OFF.
+func attach_socket(models: Sacred.Models, entry: int, socket: String,
+		texture: int = -1) -> ModelView:
 	if _skeleton == null:
 		return null
 	var bone := _skeleton.find_bone(socket)
@@ -278,6 +287,7 @@ func attach_socket(models: Sacred.Models, entry: int, socket: String) -> ModelVi
 	var piece := ModelView.new()
 	piece.name = "%s_%d" % [socket, entry]
 	piece.set_texture_pak(_texture_pak)
+	piece.item_texture = texture
 	if not piece.setup(models, entry, false):
 		piece.free()
 		return null
@@ -316,7 +326,26 @@ func _skin_material(models: Sacred.Models, entry: int, slot: int) -> StandardMat
 	mat.albedo_color = Color(0.78, 0.74, 0.68)
 	mat.roughness = 0.75
 	mat.metallic = 0.0
-	if slot < 0 or _texture_pak == null:
+	if _texture_pak == null:
+		return mat
+	# THE ITEM'S SKIN WINS, and it is consulted BEFORE the slot because retail
+	# consults it before the name: bindTextures prefers its override whenever
+	# that is non-zero and never looks the mesh's own texture name up in that
+	# case (Sacred.Items.TEXTURE_OFF). A kite shield has no other route at all --
+	# the name its mesh carries ships in no pak, and the twelve items naming that
+	# one mesh are the only thing that tells the twelve skins apart.
+	if item_texture >= 0:
+		var oimg := Sacred.TextureFormat.decode_texture(_texture_pak, item_texture, false)
+		if oimg == null:
+			return mat
+		if not surface_texture.is_empty():
+			surface_texture[surface_texture.size() - 1] = "item:%d" % item_texture
+		mat.albedo_texture = ImageTexture.create_from_image(oimg)
+		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR
+		mat.albedo_color = Color.WHITE
+		textured_surfaces += 1
+		return mat
+	if slot < 0:
 		return mat
 	var names := models.texture_names(entry)
 	# THE MATERIAL IS NOT THE TEXTURE. `slot` is the draw batch's MATERIAL index;

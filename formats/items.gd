@@ -30,6 +30,28 @@ const SPRITE_OFF := 0x10
 const NAME_OFF := 0x37
 const REC_MIN := 0x40
 
+## THE ITEM CARRIES ITS OWN SKIN, and the engine prefers it over the mesh's.
+##
+## `cGranny::bindTextures` (retail `0x80f7866`) reads an override at the
+## cGranny's `+0x34` and uses it INSTEAD of looking the mesh's own texture name
+## up in `texture.pak`, whenever it is non-zero. Its callers all follow one
+## shape -- set override, draw, clear override -- and the value they set comes
+## from `0x8136692(items, id)`, which is `*(u32*)(items + id*128 + 24)`. The
+## sibling `0x81365f8` returns `items + id*128 + 71`, the authoring name this
+## reader already takes from record `+0x37`, so the engine's table base sits 16
+## bytes below record 0 and the override field is record **`+0x08`**.
+##
+## It is a direct `texture.pak` ENTRY INDEX. Not a name, not a hash.
+##
+## Why it has to exist: one mesh wears many skins. `SHIELD_KITE.GRN` is named by
+## twelve items whose `+0x08` values are 8391..8402 -- exactly the twelve
+## `SHIELD_KITE*.TGA` entries, one to one and onto -- while the mesh's own
+## texture name, `Shield_kite_cross.tga`, ships in no pak at all. Over the 2652
+## item records that name a `.GRN` and index `texture.pak`, model-name to
+## texture-name token agreement is mean 0.630 against a permuted control at
+## 0.012.
+const TEXTURE_OFF := 0x08
+
 ## items.pak RECORD INDEX -> mixed.pak sprite id (the record's +0x10 field).
 ## static.pak +0x04 is an items.pak record index, NOT a mixed.pak index --
 ## Resacred's chain is PakStatic.itemTypeId -> PakItemType.mixedId ->
@@ -41,6 +63,7 @@ const REC_MIN := 0x40
 ## chapel interior. Every map below is keyed by RECORD INDEX for the same
 ## reason: every caller has a static's type field, never a sprite id.
 var _sprite: Dictionary[int, int] = {}
+var _texture: Dictionary[int, int] = {}     ## items record -> texture.pak entry (+0x08)
 var _interior: Dictionary[int, bool] = {}   ## items record -> is interior art
 ## items.pak record index -> bitmask of the building LEVELS this part belongs to.
 ## Names run <BUILDING>_<level>_<part>, and the level token is either a digit
@@ -86,6 +109,9 @@ func _init(pak: Pak) -> void:
 		if r.size() < REC_MIN:
 			continue
 		_sprite[i] = r.decode_u32(SPRITE_OFF)
+		var tex := r.decode_u32(TEXTURE_OFF)
+		if tex != 0:
+			_texture[i] = tex
 		var nm := r.slice(NAME_OFF).get_string_from_ascii()
 		if nm != "":
 			_name[i] = nm
@@ -146,6 +172,26 @@ func is_top_level(record: int) -> bool:
 ## The authoring name of this items.pak record, or "" if it has none.
 func name_of(record: int) -> String:
 	return _name.get(record, "")
+
+
+## The `texture.pak` entry index this item skins its mesh with, or -1 when the
+## record carries none. See TEXTURE_OFF: -1 means "fall back to the mesh's own
+## texture name", which is exactly what retail does when the override is zero.
+func texture_of(record: int) -> int:
+	return _texture.get(record, -1)
+
+
+## Every items.pak record naming `mesh`, in record order. One mesh is named by
+## many items precisely because each carries a different skin, so a caller that
+## wants "a" kite shield has to pick one and say which.
+func records_naming(mesh: String) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	var want := mesh.to_upper()
+	for k in _name:
+		if String(_name[k]).to_upper() == want:
+			out.append(k)
+	out.sort()
+	return out
 
 ## Prefix census over the `_name` table: for each prefix
 ## string, count how many stored names begin with it (`named`) and how many

@@ -2676,8 +2676,12 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 			continue
 		if rec["main"] != 0:
 			armed += 1
+		# The hand items travel as their SKINS too, not just their names: an
+		# item's +0x08 is a texture.pak entry and retail prefers it over the
+		# mesh's own texture name, which for a shield is the only right picture.
 		picks.append({"name": nm, "mesh": mi, "cell": e["cell"],
-			"hands": [items.name_of(rec["main"]), items.name_of(rec["off"])]})
+			"hands": [items.name_of(rec["main"]), items.name_of(rec["off"])],
+			"skins": [items.texture_of(rec["main"]), items.texture_of(rec["off"])]})
 		if not wanted.has(mi):
 			wanted.append(mi)
 	if picks.is_empty():
@@ -2711,7 +2715,7 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 			var held: String = pick["hands"][slot - 1]
 			if held == "":
 				continue
-			if pv.equip(models, held, slot):
+			if pv.equip(models, held, slot, int(pick["skins"][slot - 1])):
 				drawn_hands += 1
 			else:
 				refused_hands += 1
@@ -3065,14 +3069,29 @@ func _show_figure(install: String, name: String, stage: String, anim_name: Strin
 
 	var docked := PackedStringArray()
 	if rank >= 4 and skel != null:
+		# A carried mesh is skinned by the ITEM that carries it, so the piece is
+		# reached through an items.pak record rather than by mesh name alone.
+		# Twelve items name SHIELD_KITE.GRN and differ ONLY in that skin, so this
+		# takes the first and prints which -- picking one silently would make the
+		# viewer look like it knew something it does not.
+		var ipak := Sacred.Pak.new(install.path_join("pak/items.pak"))
+		var items := Sacred.Items.new(ipak) if ipak.is_open() else null
 		for pair in [[ModelView.SOCKET_MAIN, "SWORD.GRN"], [ModelView.SOCKET_OFF, "SHIELD_KITE.GRN"]]:
 			var socket: String = pair[0]
 			var item: String = pair[1]
 			var ie := models.index_of(item)
 			if ie < 0:
 				continue
-			if view.attach_socket(models, ie, socket) != null:
-				docked.append("%s@%s" % [item, socket])
+			var rec := -1
+			var skin := -1
+			if items != null:
+				var recs := items.records_naming(item)
+				if not recs.is_empty():
+					rec = recs[0]
+					skin = items.texture_of(rec)
+			if view.attach_socket(models, ie, socket, skin) != null:
+				docked.append("%s@%s%s" % [item, socket,
+					"" if rec < 0 else "(item %d skin %d)" % [rec, skin]])
 	if anim_name != "":
 		var ai := models.clip_index_of(anim_name)
 		if ai >= 0 and view.play_clip(models, ai):

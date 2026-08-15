@@ -205,14 +205,19 @@ func update(cell: Vector2) -> void:
 ## the rig cannot carry (the body has no such hand, or the item names no grip
 ## for it) and the caller draws the character unarmed rather than guessing a
 ## bone, which is the same refusal ModelView.attach_socket makes.
-func equip(models: Sacred.Models, mesh_name: String, slot: int) -> bool:
+## `texture` is the ITEM's own skin -- Sacred.Items.texture_of(record) -- or -1
+## when the caller holds no item record and the mesh must name its own image.
+## Retail prefers this over the mesh's name whenever the item carries one, which
+## for most weapons and every shield is the only route to the right picture.
+func equip(models: Sacred.Models, mesh_name: String, slot: int,
+		texture: int = -1) -> bool:
 	if node == null or _skeleton == null:
 		return false
 	var e := models.index_of(mesh_name)
 	if e < 0:
 		return false
 	var socket := ModelView.SOCKET_MAIN if slot == 1 else ModelView.SOCKET_OFF
-	return (node as ModelView).attach_socket(models, e, socket) != null
+	return (node as ModelView).attach_socket(models, e, socket, texture) != null
 
 
 ## How many equipped pieces docked, and how many were refused because this body
