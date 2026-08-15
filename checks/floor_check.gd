@@ -48,6 +48,7 @@ func _init() -> void:
 	var under17 := 0
 	var under18 := 0
 	var over16 := 0        ## values the field could not hold if it were 16 bits
+	var art_max := 0       ## highest low-17 value seen; must be the last tile
 	var partition := 0     ## records where low17 and hi<<17 reconstruct the u32 exactly
 	var resolved := 0
 	for i in range(1, fp.count(), STRIDE):
@@ -74,6 +75,8 @@ func _init() -> void:
 					hi_mod18 += 1
 		if (v & LOW17) >= 0x10000:
 			over16 += 1
+		if (v & LOW17) > art_max:
+			art_max = v & LOW17
 		if (v & LOW17) < TILE_COUNT:
 			under17 += 1
 			var t := v & LOW17
@@ -82,6 +85,23 @@ func _init() -> void:
 		if (v & 0x3ffff) < TILE_COUNT:
 			under18 += 1
 	assert(n > 1000, "sample too small to mean anything (%d)" % n)
+	# The cleanest discriminator, and the one that does not assume its answer:
+	# WHICH READ FILLS THE TILE TABLE. The 17-bit read runs 0..90131 over the
+	# whole file -- exactly TILE_COUNT - 1, the last tile there is. The 16-bit
+	# alternative tops out at 65420, just under its own 65536 ceiling, and would
+	# leave tiles 65421..90131 (27% of the table) unreachable as an art tile. A
+	# field that fills its index space to the final entry and stops is that
+	# index. Sampled at STRIDE the maximum is 90085 rather than 90131, so this is
+	# a ratio, not an equality; the 16-bit read misses it by 27 percentage points.
+	#
+	# The prerelease Armalion build is the mirror of this, and is why the comment
+	# is here: its tiles.pak holds 13402 entries, where the 17-bit read reaches
+	# 67071 and is impossible while the 16-bit read tops out at 13400. The split
+	# WIDENED between builds because the tile table outgrew 16 bits. This
+	# boundary is a fact about retail, not about the format for all time.
+	assert(float(art_max) / float(TILE_COUNT - 1) > 0.99,
+		"the low 17 bits top out at %d of %d -- a field that is really the tile index fills the table" % [
+			art_max, TILE_COUNT - 1])
 	assert(under17 == n,
 		"the low 17 bits are meant to be a tiles.pak index: %d of %d landed outside 0..%d" % [
 			n - under17, n, TILE_COUNT])
