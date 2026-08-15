@@ -226,10 +226,14 @@ func _corpus(pak: Sacred.Pak, models: Sacred.Models, offset: int, explicit_falsi
 	var walked_mesh := 0
 	var walked_motion := 0
 	var skip_lines: Array[String] = []
+	## Fed "<index>:<name>\n" for every entry, in index order, exactly as
+	## grn_tagwalk.py feeds its own md5 -- the two digests are the comparison.
+	var names_digest := ""
 	var files := {}   # tag (int) -> distinct entries containing it
 	var total := {}   # tag (int) -> total occurrences across the corpus
 
 	for i in n:
+		names_digest += "%d:%s\n" % [i, models.entry_name(i)]
 		if models.magic_ok(i):
 			walkable += 1
 			var result := _walk_report(pak, models, i, offset)
@@ -261,8 +265,12 @@ func _corpus(pak: Sacred.Pak, models: Sacred.Models, offset: int, explicit_falsi
 			skip_lines.append("skip\t%d\tname=%s\tkind=%d\treason=%s" % [
 				i, models.entry_name(i), models.kind_of(i), reason])
 
-	var corpus_line := "corpus\tentries=%d\twalkable=%d\tskipped=%d\twalked_mesh=%d\twalked_motion=%d" % [
-		n, walkable, skipped, walked_mesh, walked_motion]
+	# Names were printed by both walkers and compared by neither, so a misread
+	# name field passed the parity gate (measured 2026-08-15). One digest over
+	# index:name puts them in the compared surface without adding 4993 lines.
+	var corpus_line := "corpus\tentries=%d\twalkable=%d\tskipped=%d\twalked_mesh=%d\twalked_motion=%d\tnames=%s" % [
+		n, walkable, skipped, walked_mesh, walked_motion,
+		names_digest.md5_text()]
 	if explicit_falsify:
 		corpus_line += "\tfalsify=%d" % offset
 	print(corpus_line)
