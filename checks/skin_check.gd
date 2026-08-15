@@ -242,6 +242,38 @@ func _init() -> void:
 	assert(interleaved > 0,
 		"every group's triangles are contiguous, so this gate cannot tell the exact reading from the slice it replaced")
 
+	# JOIN 8 -- A SMALL ENTRY IS STILL AN ENTRY. texture.pak's index `size` is
+	# the ZLIB PAYLOAD length, not the entry length, and the 32-byte name sits
+	# before it. Gating the name index on that size dropped every entry under 32
+	# bytes -- 28 of 25535, all solid-colour placeholders, 8 of which models.pak
+	# references 13 times. The wood elf's hands batch is the visible one: retail
+	# binds ELVE_SORCERESS_HANDS.TGA, a 16x16 flat skin block (measured off
+	# retail's own glTexImage2D, row 903), where the port drew clay.
+	var tiny := 0
+	for i in tp.count():
+		var head := tp.read_at(tp.entry_offset(i), 40)
+		if head.size() < 40:
+			continue
+		var z := head.find(0)
+		if z <= 0:
+			continue
+		# +32 u16 width, +34 u16 height, +36 u32 kind, and the index size is the
+		# payload -- a real image with a tiny payload is exactly the dropped case
+		if int(tp.blob(i, 0).size()) < 32 and head.decode_u16(32) > 0:
+			tiny += 1
+			var stem := head.slice(0, z).get_string_from_ascii()
+			assert(Sacred.TextureFormat.find_model_texture(tp, stem) >= 0,
+				"%s is a %dx%d texture the index cannot find -- the payload size is being read as the entry size again" % [
+					stem, head.decode_u16(32), head.decode_u16(34)])
+	assert(tiny >= 20,
+		"only %d entries have a sub-32-byte payload; this gate is watching nothing" % tiny)
+	# and the one that renders, named outright so a corpus count cannot hide it
+	var hands := Sacred.TextureFormat.find_model_texture(tp, "elve_sorceress_hands.bmp")
+	assert(hands >= 0, "ELVE_SORCERESS_HANDS is unresolvable, so the wood elf's hands draw clay")
+	var himg := Sacred.TextureFormat.decode_texture(tp, hands)
+	assert(himg != null and himg.get_width() == 16 and himg.get_height() == 16,
+		"ELVE_SORCERESS_HANDS did not decode to the 16x16 retail uploads")
+
 	# Corpus census, and a rig that actually carries the skin.
 	var single := 0
 	var named := 0

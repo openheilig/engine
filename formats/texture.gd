@@ -117,13 +117,19 @@ static func _stems(pak: Pak) -> Dictionary:
 		return _name_index[key]
 	var out: Dictionary = {}
 	for i in pak.count():
-		var b := pak.blob(i, 0)
+		# Read the name from the entry's own bytes, NOT through blob(i, 0). The
+		# index's `size` is the ZLIB PAYLOAD length and the 32-byte name sits
+		# before it, so gating on that size drops every small entry:
+		# ELVE_SORCERESS_HANDS.TGA declares 15 and is a real 16x16 texture that
+		# retail draws on the wood elf's hands. 28 entries are that small, 8 of
+		# them referenced 13 times from models.pak.
+		var b := pak.read_at(pak.entry_offset(i), 32)
 		if b.size() < 32:
 			continue
 		var nul := b.find(0)
 		if nul <= 0:
 			continue
-		var nm := b.slice(0, mini(nul, 32)).get_string_from_ascii().to_upper()
+		var nm := b.slice(0, nul).get_string_from_ascii().to_upper()
 		var dot := nm.rfind(".")
 		if dot > 0:
 			nm = nm.substr(0, dot)
