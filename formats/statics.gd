@@ -28,6 +28,16 @@ func count() -> int:
 ## Layout from Resacred-old rs_file.h:322-350 (PakStatic, #pragma pack(1),
 ## static_assert sizeof == 64), whose +0x04 itemTypeId and +0x0e/+0x12
 ## worldX/worldY already match what this class reads.
+##
+## That was an outside description until 2026-08-15. It is now pinned by two
+## structural properties instead, in tools/parity/static_next_check.py:
+##   1. A chain is a LINKED LIST, so links - distinct targets must be 0.
+##      +0x1f scores 0 over 174,422 links in retail and over 51,224 in the
+##      Armalion prerelease; the best rival that carries comparable traffic
+##      has 30,973 excess over 31,031 links.
+##   2. A LINKED RECORD IS NEVER A HEAD. None of those 174,422 targets is
+##      among the 31,752 chain heads the world cells name -- two separate
+##      files partitioning the same records between them.
 const NEXT_OFF := 0x1f
 
 ## Every static in the chain starting at `i`, head first, as get_object()
