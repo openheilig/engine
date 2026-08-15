@@ -137,10 +137,20 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 	# (_build_sortcube's constraint 2); depth_draw_mode still writes the
 	# depth buffer so opaque terrain occludes/is occluded correctly, mirroring
 	# the sortcube's own material exactly.
-	var mat: StandardMaterial3D = _mesh.material_override
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_OPAQUE_ONLY
+	#
+	# PER SURFACE, not material_override. ModelView built ONE material for the
+	# whole mesh until the material chain landed and now builds one per draw
+	# batch, so material_override is null and reading it crashed every rig this
+	# class builds -- every NPC, every creature, the player. Two gated commits
+	# passed with that live, because nothing in checks/ built a PlayerView; the
+	# gate that does is checks/compose_check.gd, added with this fix.
 	_mesh.sorting_use_aabb_center = false
+	for s in _mesh.get_surface_override_material_count():
+		var mat: StandardMaterial3D = _mesh.get_surface_override_material(s)
+		if mat == null:
+			continue
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_OPAQUE_ONLY
 
 	if _skeleton != null:
 		for i in _skeleton.get_bone_count():
@@ -185,6 +195,34 @@ func update(cell: Vector2) -> void:
 	# through the node's position, per the class doc above.
 	var world_offset := Vector3(p.x, p.y, ground_z)
 	_placement.local_offset = node.transform.basis.inverse() * world_offset
+
+
+## Hangs an equipped mesh on one of the rig's two hand sockets. `slot` is
+## startcode's tag-0x02 occurrence: 1 = main hand, 2 = off hand -- the mapping
+## measured in ModelView's socket block, not inferred from the socket number.
+##
+## Returns true if the piece docked. False is the ordinary answer for an item
+## the rig cannot carry (the body has no such hand, or the item names no grip
+## for it) and the caller draws the character unarmed rather than guessing a
+## bone, which is the same refusal ModelView.attach_socket makes.
+func equip(models: Sacred.Models, mesh_name: String, slot: int) -> bool:
+	if node == null or _skeleton == null:
+		return false
+	var e := models.index_of(mesh_name)
+	if e < 0:
+		return false
+	var socket := ModelView.SOCKET_MAIN if slot == 1 else ModelView.SOCKET_OFF
+	return (node as ModelView).attach_socket(models, e, socket) != null
+
+
+## How many equipped pieces docked, and how many of those had to use the bare
+## hand bone because the body carries no socket of its own.
+func equipped() -> int:
+	return (node as ModelView).sockets_attached if node != null else 0
+
+
+func equipped_fallback() -> int:
+	return (node as ModelView).sockets_fallback if node != null else 0
 
 
 ## Turns the rig about its own vertical, in radians. Placement is unaffected --

@@ -136,6 +136,154 @@ var textured_surfaces := 0
 func set_texture_pak(pak: Sacred.Pak) -> void:
 	_texture_pak = pak
 
+
+## THE EQUIPMENT SOCKETS. Both halves of the dock are NAMED, on both sides, in
+## the file -- nothing here is a guess about where a weapon hangs.
+##
+## Corpus census over all 1571 rigged models.pak entries (2026-08-15):
+##
+##   WEARER SIDE   Bone_weapon_01 <- Bip01 R Hand   235 entries
+##                 Bone_weapon_02 <- Bip01 L Hand   192
+##   WEAPON SIDE   Bone_weapon_01 <- __Root         206      the grip point, in
+##                 Bone_weapon_02 <- __Root         176      the weapon's space
+##
+## with ZERO disagreements: _01 never hangs off a left hand and _02 never off a
+## right one. The two populations are disjoint by parent, so the same bone name
+## means "where I hold it" on a body and "where it is held" on a weapon, and
+## docking is aligning one to the other.
+##
+## _01 IS THE MAIN HAND, and that is measured rather than assumed from the
+## number. startcode's tag-0x02 occurrence 1 and 2 are the two hand slots; over
+## the 1111 armed slots the eight classes declare, SHIELDS are 58.8% of slot 2
+## against 10.5% of slot 1. The structural half is stronger than that rate: all
+## 272 slot-2 meshes carry Bone_weapon_02, while 97 of the 839 slot-1 meshes do
+## NOT -- the polearms (PIKE, SPEAR, HELLEBARDE, STAFF_FIGHT), which have only
+## a main-hand grip. Zero items sit in slot 2 without an off-hand socket.
+const SOCKET_MAIN := "Bone_weapon_01"
+const SOCKET_OFF := "Bone_weapon_02"
+## Where the socket sits when a wearer does not carry the socket bone itself.
+## Measured on the two NPC bodies that carry BOTH: the socket is a child of the
+## hand at a rest offset of ~1e-6, i.e. the same point. NOT universal -- the
+## DAEMONIA armour set puts its socket 3.86 units off the hand -- so this is a
+## fallback that gets COUNTED (see sockets_fallback), never a substitution.
+const SOCKET_FALLBACK := {SOCKET_MAIN: "Bip01 R Hand", SOCKET_OFF: "Bip01 L Hand"}
+
+## Pieces docked by attach_socket(), and how many of them had to fall back to
+## the bare hand bone because this rig carries no socket of its own.
+var sockets_attached := 0
+var sockets_fallback := 0
+
+## True when the entry declared bones but no weights: an unskinned rigid prop,
+## whose bones are locators. Set by _build_rig; the Skeleton3D is discarded, so
+## bone_rests below is the only record of where those locators are.
+var is_prop := false
+## Sacred.Models.bones() for a prop, kept because a prop has no Skeleton3D to
+## ask. Empty for a skinned rig, which answers through its skeleton instead.
+var bone_rests: Array[Dictionary] = []
+
+
+## Where `socket` sits in THIS rig's own model space, or null when the rig has
+## no such socket. Answers for a skinned rig and for a prop alike -- the two
+## keep the same numbers in different places, and every caller wants the
+## transform rather than an index into whichever one it happens to be.
+##
+## A wearer falls back to the bare hand bone; a prop never does, because a hand
+## is where you hold something and a prop has none.
+func socket_rest(socket: String) -> Variant:
+	if is_prop:
+		var idx := -1
+		for i in bone_rests.size():
+			if (bone_rests[i]["name"] as PackedByteArray).get_string_from_utf8() == socket:
+				idx = i
+		return _prop_global_rest(idx) if idx >= 0 else null
+	if _skeleton == null:
+		return null
+	var b := _skeleton.find_bone(socket)
+	if b < 0:
+		b = _skeleton.find_bone(SOCKET_FALLBACK.get(socket, ""))
+	return _skeleton.get_bone_global_rest(b) if b >= 0 else null
+
+
+## True when this rig carries the socket bone ITSELF rather than only the hand
+## socket_rest() would fall back to -- the difference the fallback counter
+## reports, so a caller can tell a measured dock from an assumed one.
+func has_own_socket(socket: String) -> bool:
+	if is_prop:
+		for b in bone_rests:
+			if (b["name"] as PackedByteArray).get_string_from_utf8() == socket:
+				return true
+		return false
+	return _skeleton != null and _skeleton.find_bone(socket) >= 0
+
+
+## A prop bone's rest composed up its parent chain, which is what a Skeleton3D
+## would have done had one been built.
+func _prop_global_rest(idx: int) -> Transform3D:
+	var t: Transform3D = bone_rests[idx]["rest"]
+	var p: int = bone_rests[idx]["parent_effective"]
+	var guard := 0
+	while p >= 0 and p < bone_rests.size() and guard < bone_rests.size():
+		t = (bone_rests[p]["rest"] as Transform3D) * t
+		p = bone_rests[p]["parent_effective"]
+		guard += 1
+	return t
+
+
+## Docks `entry` onto this rig's `socket`, building it with the same unmodified
+## setup() every other mesh goes through. Returns the built piece, or null.
+##
+## THE ALIGNMENT, in one line, and why it is that line. A BoneAttachment3D child
+## of the Skeleton3D reproduces the socket bone's posed transform S, so a piece
+## parented under it renders at S * T * p for a point p in its own model space.
+## The piece's grip sits at G = its coordinate basis times the grip bone's own
+## global rest, so setting T = G^-1 puts the grip exactly on the socket and
+## leaves the piece hanging off it -- which is the whole dock.
+##
+## The piece keeps its OWN small skeleton and is never re-skinned onto this one:
+## measured, a weapon shares only __Root and the socket names with a body (3 of
+## 8..16 bones), so it is a rigid prop on a moving socket and not a second
+## garment. The BoneAttachment3D is what makes it follow the animated hand.
+func attach_socket(models: Sacred.Models, entry: int, socket: String) -> ModelView:
+	if _skeleton == null:
+		return null
+	var bone := _skeleton.find_bone(socket)
+	if bone < 0:
+		bone = _skeleton.find_bone(SOCKET_FALLBACK.get(socket, ""))
+	if bone < 0:
+		return null
+	var piece := ModelView.new()
+	piece.name = "%s_%d" % [socket, entry]
+	piece.set_texture_pak(_texture_pak)
+	if not piece.setup(models, entry, false):
+		piece.free()
+		return null
+	var grip: Variant = piece.socket_rest(socket)
+	if grip == null:
+		# The piece names no grip for this hand. Refused rather than dropped at
+		# the origin: an item with only a main-hand grip (every polearm) put in
+		# an off hand would otherwise render inside the character.
+		piece.free()
+		return null
+	var att := BoneAttachment3D.new()
+	att.name = "Socket_%s_%d" % [socket, entry]
+	_skeleton.add_child(att)
+	att.bone_idx = bone
+	att.add_child(piece)
+	# T = G^-1, and NOTHING ELSE. The piece's own coordinate basis is deliberately
+	# overwritten rather than composed in: a BoneAttachment3D under this rig's
+	# Skeleton3D lives in the body's RAW model space, because setup() applies the
+	# basis once at the ModelView above the skeleton and every bone transform
+	# below it is pre-basis. Multiplying the piece's basis back in here applies it
+	# twice and lands the grip 18.8 units off the hand, which is exactly what the
+	# first version of this line did. Safe because the two bases are the same
+	# transform anyway -- measured identical on all 41 body/hand pairs the eight
+	# startcode classes declare.
+	piece.transform = (grip as Transform3D).affine_inverse()
+	sockets_attached += 1
+	if not has_own_socket(socket):
+		sockets_fallback += 1
+	return piece
+
 ## The material for one draw batch. `slot` is a 0-based index into
 ## Models.texture_names(), or -1 for "no texture known". Clay whenever the
 ## slot is unset, the pak was not supplied, the name does not resolve, or the
@@ -455,6 +603,20 @@ func _build_rig(models: Sacred.Models, entry: int) -> bool:
 	var skel_to_bind := PackedInt32Array()
 	skel_to_bind.resize(n)
 	skel_to_bind.fill(-1)
+	# A RIGID PROP is not a decode failure. 199 of the 221 entries carrying a
+	# weapon-side grip declare no MeshWeights at all: a sword's bones are
+	# locators (the grip, the fx emitters), and nothing deforms. Those build as
+	# an unskinned mesh and keep their bone TRANSFORMS available for docking.
+	#
+	# The loud failure below is kept for the other case -- weights declared and
+	# unreadable -- because that IS the silently-unskinned render this class
+	# refuses to make. has_mesh_weights() is what separates the two; without it
+	# mesh_weights()' empty answer means both.
+	if not models.has_mesh_weights(entry):
+		is_prop = true
+		bone_rests = bl
+		_discard_rig()
+		return true
 	_weights = models.mesh_weights(entry)
 	if _weights.is_empty():
 		push_error("ModelView: entry %d has bones but no readable weight blocks" % entry)

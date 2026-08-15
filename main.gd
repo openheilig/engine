@@ -2577,13 +2577,24 @@ func _build_creatures(install: String, models: Sacred.Models, player_cell: Vecto
 ##   Sacred.Rigs       mesh -> the clip whose bones agree with it
 ##   PlayerView        build, scale, place and depth-sort the rig
 ##
-## ponytail: BODIES ONLY. Each record also names a main hand and an off hand
-## (tag-0x02 occurrences 1 and 2, both 100% resolving to a .grn), and --equip
-## already demonstrates that a wearer's ARMOUR shares its skeleton -- but
-## nothing has measured whether a WEAPON does, or which bone it would hang from
-## if it does not. Drawing a sword on that guess would put invention in the
-## picture, which is what the canonical-first rule exists to prevent. The armed
-## count is printed instead, so the next session starts from data.
+## BODIES AND HANDS since 2026-08-15. The two questions this comment used to
+## park -- does a weapon share the body's skeleton, and which bone would it hang
+## from otherwise -- are both measured now, and the first answer is no:
+##
+##   A WEAPON IS A RIGID PROP. It carries 3..16 bones of its own and shares only
+##   __Root and the socket names with a body, and 199 of the 221 entries with a
+##   weapon-side grip declare no vertex weights at all. Re-using equip_check's
+##   armour instrument on hands returned own == cross == 1.0000 -- the control
+##   scoring as well as the subject, i.e. the instrument measuring nothing.
+##
+##   THE SOCKET IS NAMED ON BOTH SIDES. Bone_weapon_01/_02 appear on wearers as
+##   children of Bip01 R/L Hand (235/192 entries) and on weapons as children of
+##   __Root (206/176), with zero crossings. Docking is aligning one to the other.
+##
+## checks/compose_check.gd holds the census, the control that decides which
+## socket is which hand, and the geometric test that the dock moves the mesh.
+## ARMOUR is still bodies-only: nothing read so far says which armour pieces an
+## NPC wears, and --equip's demonstration takes its set from the caller.
 ##
 ## ponytail: no AI, no wandering, no schedule -- they stand and animate, like
 ## --creatures. Facing is 0 for the same reason it is 0 there: no field in any
@@ -2642,7 +2653,8 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 			continue
 		if rec["main"] != 0:
 			armed += 1
-		picks.append({"name": nm, "mesh": mi, "cell": e["cell"]})
+		picks.append({"name": nm, "mesh": mi, "cell": e["cell"],
+			"hands": [items.name_of(rec["main"]), items.name_of(rec["off"])]})
 		if not wanted.has(mi):
 			wanted.append(mi)
 	if picks.is_empty():
@@ -2653,6 +2665,9 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 	var rigs := Sacred.Rigs.new(models, wanted)
 	var built := 0
 	var animated := 0
+	var drawn_hands := 0
+	var refused_hands := 0
+	var fallback_hands := 0
 	var kinds := {}
 	for pick in picks:
 		var pv := PlayerView.new(models, pick["name"], tex_pak)
@@ -2664,6 +2679,20 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 		_creature_views.append(pv)
 		_creature_cells.append(pick["cell"])
 		built += 1
+		# THE HANDS. startcode's tag-0x02 occurrences 1 and 2, docked onto the
+		# body's own named sockets -- see checks/compose_check.gd for the census
+		# that fixes which socket is which hand and the control that separates
+		# them. equip() refuses rather than guesses, so an item the body cannot
+		# carry leaves the hand empty and is counted here instead.
+		for slot in [1, 2]:
+			var held: String = pick["hands"][slot - 1]
+			if held == "":
+				continue
+			if pv.equip(models, held, slot):
+				drawn_hands += 1
+			else:
+				refused_hands += 1
+		fallback_hands += pv.equipped_fallback()
 		var ci := rigs.clip_for(pick["mesh"])
 		var mv := pv.node as ModelView
 		if mv != null and ci >= 0 and mv.play_clip(models, ci):
@@ -2674,9 +2703,10 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 			var c: Vector2 = pick["cell"]
 			mv.seek_anim(fmod(absf(c.x * 7.0 + c.y * 13.0), maxf(0.001, mv.anim_length)))
 		kinds[pick["name"]] = int(kinds.get(pick["name"], 0)) + 1
-	print("npcs\tcell=%d,%d\tin_radius=%d\tbuilt=%d\tanimated=%d\tarmed=%d\tunresolved=%d\tdropped=%d\tmeshes=%d\t%d ms" % [
+	print("npcs\tcell=%d,%d\tin_radius=%d\tbuilt=%d\tanimated=%d\tarmed=%d\thands=%d\trefused=%d\thand_fallback=%d\tunresolved=%d\tdropped=%d\tmeshes=%d\t%d ms" % [
 		int(player_cell.x), int(player_cell.y), in_radius, built, animated,
-		armed, unresolved, dropped, wanted.size(), Time.get_ticks_msec() - start])
+		armed, drawn_hands, refused_hands, fallback_hands, unresolved, dropped,
+		wanted.size(), Time.get_ticks_msec() - start])
 	var listed := PackedStringArray()
 	for k: String in kinds:
 		listed.append("%s x%d" % [k, kinds[k]])

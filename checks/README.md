@@ -10,7 +10,7 @@ godot --headless --path . --script res://checks/<name>.gd
 
 Every one states its own question and command line in its header comment.
 
-All 26 pass. 25 need nothing but the retail install; `pax_check` also needs
+All 27 pass. 26 need nothing but the retail install; `pax_check` also needs
 `SACRED_CHARS` pointing at the eight-hero `.pax` corpus, which is **not** part
 of the retail install and is not shipped here. Without it the check exits 1
 with a message saying so — that refusal is the correct behaviour, not a

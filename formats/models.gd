@@ -1241,6 +1241,50 @@ func bind_poses(entry: int) -> Array[Transform3D]:
 ## unique in every entry (GLADIATOR's three meshes declare highest 44/3/9
 ## against sections of 45/4/10) and it is checked for uniqueness at run time
 ## -- an ambiguous pairing returns empty rather than picking one.
+## True if every drawable Mesh node in `entry` carries a MeshWeights child, i.e.
+## the entry is SKINNED. False means the bones are pure locators and the mesh is
+## a rigid prop -- which is a real and common shape here, not a defect: 199 of
+## the 221 entries carrying a weapon-side Bone_weapon_01 grip have no weights at
+## all, because a sword does not deform.
+##
+## Exists so a caller can tell "this model has no weights" from "this model's
+## weights did not decode". mesh_weights() answers [] to both and push_errors on
+## the second, and treating them alike either turns every prop into a decode
+## failure or silences a real one.
+func has_mesh_weights(entry: int) -> bool:
+	var length := true_length(entry)
+	if length <= 0 or not magic_ok(entry):
+		return false
+	var buf := _pak.read_at(_pak.entry_offset(entry), length)
+	if buf.size() < length:
+		return false
+	var dir := _directory(buf)
+	if dir.is_empty():
+		return false
+	var meshes := 0
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_MESH:
+			continue
+		# The same three-child drawability test mesh_weights() uses, so the two
+		# agree on WHICH nodes have to carry weights.
+		if _child_with_tag(dir, j, TAG_MESH_VERTICES) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_NORMALS) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_TRIANGLES) == -1:
+			continue
+		meshes += 1
+		var wj := _child_with_tag(dir, j, TAG_MESH_WEIGHTS)
+		if wj == -1:
+			return false
+		# A DECLARED BUT EMPTY block is still a prop. SWORD.GRN carries a
+		# MeshWeights node whose span is exactly the 12-byte header, holding
+		# zero weights -- so "the node exists" is not the question, "does it
+		# weight anything" is. Testing only for the node's presence called
+		# every such weapon a decode failure.
+		if _span(dir, wj, buf.size()) <= 12:
+			return false
+	return meshes > 0
+
+
 func mesh_weights(entry: int) -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	var length := true_length(entry)
