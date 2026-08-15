@@ -23,6 +23,7 @@ preloads each of these under its old name, so `Sacred.Pak`, `Sacred.SECT` and
 | `models.gd` | Granny `.GRN`: the tag walk, meshes, skeletons, bind poses, weights, clips. |
 | `pax.gd` | `.pax` hero saves. |
 | `funk.gd` | `Start/FunkCode.bin` script bytecode. |
+| `startcode.gd` | `startcode.bin` opcodes 23/1/8 — which NPCs and objects exist, their body and hand items, and the cells they start in. Refuses an unlisted tag rather than shifting its cursor. |
 | `factions.gd` | The faction hostility matrix. |
 | `creatures.gd` | `creature.pak` records. |
 | `rigs.gd` | Rig identity across models — which skeletons are the same rig. |

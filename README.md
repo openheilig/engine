@@ -22,9 +22,17 @@ core**, not a playable game. What runs today:
   cell-space walkability over Sacred's region grids, interior/exterior swap.
 - **A record/replay harness.** Runs are recorded and replayed deterministically
   so a change that alters simulation output is caught rather than argued about.
+- **The scripted cast, where retail puts it.** `startcode.bin` decodes to 2565
+  NPCs across the eight character classes plus 16,021 objects, each with its
+  body model, hand items and starting cell; `--npcs` draws them at those cells.
+  Placement only — nothing animates or acts.
 
-Not implemented: combat, items, inventory, skills, quests, dialogue, UI,
-sound, multiplayer, save/load. Do not expect to play anything.
+Several readers have no feature behind them yet: `creature.pak`, the faction
+matrix, `.pax` hero saves, items and armour are decoded and gated, and the
+game system that would consume each one is not written.
+
+Not implemented: combat, inventory, skills, quests, dialogue, UI, sound,
+multiplayer, save/load. Do not expect to play anything.
 
 ## Start here
 
