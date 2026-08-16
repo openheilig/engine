@@ -19,10 +19,15 @@ extends RefCounted
 ##              far says what from. So the link below is the port's, and it is
 ##              in one place, named, rather than spread through the engine.
 ##
-##   PLACEHOLDER  every combat STAT. creature.pak exposes only an id and a
-##              class; no shipped table has been shown to carry AT, PA or a
-##              level, so the four numbers fed to the recovered to-hit formula
-##              are invented. The FORMULA is retail's; the numbers are not.
+##   PLACEHOLDER  the two RATINGS and the hostile's hit points. creature.pak
+##              is fully read now (row 949) and its six base attributes are
+##              real -- the Ghoul's are STK 35, RES 35, GES 25, REPHY 40,
+##              REMAG 0, CHARISMA 50 -- but nothing recovered says which
+##              attribute becomes the attack rating and which the defence
+##              rating, and HP is in no table at all. So the ATTRIBUTES are
+##              read and the two ratings they feed are still invented.
+##              Experience is NOT a placeholder: `exp = A + level*B` is
+##              retail's own comment and both terms are in the file.
 ##
 ## Nothing here touches the scene tree, a node or a thread (R10.1).
 
@@ -46,6 +51,10 @@ const HERO_LEVEL := 5
 const FOE_PA := 100
 const FOE_LEVEL := 4
 const FOE_HP := 40
+## The kernel applied to a real attribute, reported so the difference between
+## "read" and "invented" is visible in the status line rather than only in a
+## comment. WHICH attribute feeds which rating is the missing half.
+const FOE_KERNEL_ATTR := 2      ## Creatures.B_GES
 ## ponytail: damage per landed blow is a PLACEHOLDER TOO, and a flat one --
 ## the resolution step (damage against resistance) is undecoded, so there is
 ## deliberately no formula here to be wrong about.
@@ -60,6 +69,10 @@ var hostile := false            ## per the faction matrix, not per our opinion
 var giver_cell := Vector2i(-1, -1)
 var giver_body := ""
 var giver_name := ""            ## the op-1 `res:` slot, resolved when it can be
+var foe_base := PackedInt32Array()   ## the six BASE attributes, read from creature.pak
+var foe_exp := 0                ## experience awarded on the kill, exp = A + level*B
+var foe_speed := Vector2i.ZERO
+var awarded_exp := 0            ## banked when the hostile dies
 var log: QuestLog = null
 var title := ""
 
@@ -104,6 +117,9 @@ func _init(install: String, registry: ActorRegistry, items, creatures, factions)
 		foe_body = items.name_of(n["body"]) if items != null else ""
 		if creatures != null:
 			foe_class = creatures.class_of(n["body"])
+			foe_base = creatures.base_all(n["body"])
+			foe_exp = creatures.experience(n["body"], FOE_LEVEL)
+			foe_speed = creatures.speed(n["body"])
 		if factions != null and foe_class != 0:
 			hostile = factions.hostile(HERO_CLASS, foe_class)
 		if registry != null and foe_cell.x >= 0:
@@ -150,6 +166,7 @@ func strike(rng: RandomNumberGenerator) -> Dictionary:
 	if foe.hp == 0:
 		foe.flags &= ~ActorState.FLAG_ALIVE
 		out["killed"] = true
+		awarded_exp = foe_exp
 		_finish()
 	return out
 
@@ -177,7 +194,10 @@ func status_line() -> String:
 	return "encounter\tquest=%d\ttitle=%s\tnpc=%s@%d,%d\tfoe=%s@%d,%d\tclass=%d\thostile=%s\thp=%d\tswings=%d\thits=%d\tlines=%d\tdone=%s" % [
 		QUEST, title, giver_body, giver_cell.x, giver_cell.y,
 		foe_body, foe_cell.x, foe_cell.y, foe_class, hostile,
-		foe_hp(), _attacks, _hits, log.lines.size() if log != null else 0, is_complete()]
+		foe_hp(), _attacks, _hits, log.lines.size() if log != null else 0, is_complete()] \
+		+ "\tbase=%s\tspeed=%d,%d\texp=%d\tawarded=%d\tK(GES)=%.1f" % [
+			foe_base, foe_speed.x, foe_speed.y, foe_exp, awarded_exp,
+			Combat.stat_kernel(float(foe_base[FOE_KERNEL_ATTR])) if foe_base.size() > FOE_KERNEL_ATTR else 0.0]
 
 
 ## Resolves the NPC's `res:` name slot. Separate from _init because it needs a

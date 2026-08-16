@@ -29,6 +29,7 @@ func _init() -> void:
 	_levels()
 	_strictness()
 	_determinism()
+	_kernel()
 	print("combat_check OK to_hit(100,100,10,10)=%d floor=%d ceiling=%d" % [
 		Combat.to_hit(100, 100, 10, 10),
 		Combat.to_hit(1, 10000, 1, 10000),
@@ -112,3 +113,28 @@ func _determinism() -> void:
 	for i in 64:
 		b.append(int(Combat.resolve(120, 80, 12, 10, rng)["roll"]))
 	expect(a == b, "two runs from the same seed disagree -- combat is not replayable")
+
+
+## The derived-stat kernel's two PINNED POINTS, which are properties of the
+## algebra rather than measurements: K(0) = BalStatOff + 9 for any offset, and
+## K(156) = 165 for any offset. A transcription error in either coefficient
+## breaks at least one of them, and the second is the sharper -- it holds only
+## because the slope and intercept are tied to each other.
+func _kernel() -> void:
+	for off in [0.0, 20.0, 77.0, 156.0]:
+		expect(absf(Combat.stat_kernel(0.0, off) - (off + 9.0)) < 1e-4,
+			"K(0) with offset %.1f is %.4f, expected %.4f" % [off, Combat.stat_kernel(0.0, off), off + 9.0])
+		expect(absf(Combat.stat_kernel(Combat.STAT_SPAN, off) - Combat.STAT_CEILING) < 1e-4,
+			"K(156) with offset %.1f is %.4f, expected %.1f" % [
+				off, Combat.stat_kernel(Combat.STAT_SPAN, off), Combat.STAT_CEILING])
+	# Retail's shipped offset gives the reduced form 0.8718*S + 29.
+	expect(absf(Combat.stat_kernel(0.0) - 29.0) < 1e-4, "retail K(0) is not 29")
+	expect(absf(Combat.stat_kernel(100.0) - (0.8717948 * 100.0 + 29.0)) < 1e-3,
+		"retail K(100) does not match 0.8718*S + 29")
+	# Monotone increasing, which a sign error would break while leaving the two
+	# pinned points intact.
+	var prev := -1.0
+	for s2 in [0.0, 1.0, 35.0, 80.0, 156.0]:
+		var v := Combat.stat_kernel(s2)
+		expect(v > prev, "the kernel fell from %.3f to %.3f" % [prev, v])
+		prev = v
