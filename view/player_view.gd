@@ -226,6 +226,34 @@ func equip(models: Sacred.Models, mesh_name: String, slot: int,
 	return (node as ModelView).attach_socket(models, e, socket, texture) != null
 
 
+## Puts a skinned garment on the rig -- the ARMOUR path, distinct from equip()
+## above because armour shares the wearer's skeleton and a weapon does not.
+## See ModelView.attach_skinned for the measurement that licenses binding by
+## bone name.
+##
+## Returns true if the garment bound. False is the ordinary answer for a piece
+## that is a rigid prop, whose vertex weights do not decode, or that is
+## weighted to a bone this body lacks -- and the caller draws the character
+## without it rather than binding it wrongly.
+func wear(models: Sacred.Models, mesh_name: String, texture: int = -1) -> bool:
+	if node == null or _skeleton == null:
+		return false
+	var e := models.index_of(mesh_name)
+	if e < 0:
+		return false
+	return (node as ModelView).attach_skinned(models, e, texture) != null
+
+
+## How many garments bound, and how many were refused. As with equipped(), a
+## refusal is an outcome rather than an error.
+func worn() -> int:
+	return (node as ModelView).worn_attached if node != null else 0
+
+
+func worn_refused() -> int:
+	return (node as ModelView).worn_refused if node != null else 0
+
+
 ## How many equipped pieces docked, and how many were refused because this body
 ## names no socket for that hand. A refusal is the honest outcome, not a
 ## failure: see ModelView.SOCKET_HAND for why the hand bone is not a substitute.

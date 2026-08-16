@@ -35,6 +35,16 @@ const SECT: int = Sacred.SECT
 ## ponytail: a constant until there is a UI to choose with.
 const START_CLASS := "type_npc_seraphim"
 
+## bin/sets.bin record the player starts dressed in. 6 is "Uriel's Legacy", the
+## Seraphim suite -- nine members, seven garments and two blades. A set rather
+## than a list of mesh names because retail already decided what goes together,
+## and because it keeps this constant honest: change START_CLASS and this is
+## the one other line that has to move.
+## ponytail: a full starting kit is not what a new retail character has. It is
+## here so the composition path is exercised by the default run; a real
+## inventory replaces it.
+const START_SET := 6
+
 ## Script tree -> the class's whole-body mesh in models.pak. These are the
 ## short, underscore-free rig names (`SERAPHIM.GRN`, `GLADIATOR.GRN`); the
 ## long `SERAPHIM_LEATHER_02.GRN` family beside them is ARMOUR worn over one,
@@ -560,6 +570,7 @@ func _ready() -> void:
 						print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
 							_player_model, _player_view.model_index,
 							_player_view.vertex_count, _player_view.triangle_count])
+						_dress_player(install, Sacred.Models.new(models_pak), items)
 			if _show_player or _show_creatures or _show_npcs:
 				_ensure_rig_light()
 			if _show_creatures and models_pak.is_open():
@@ -887,18 +898,56 @@ func _region_arg() -> Vector3i:
 	return Vector3i.ZERO
 
 
-## The chosen spawn cell as a fact line, its class, the component size and
-## how many sectors were scanned -- MEASURED, never hardcoded from a guess.
-## `--spawn=cx,cy` (a debugging override, not part of the falsifiable path)
-## skips derivation entirely; component/sectors read 0 in that case, since
-## no scan ran.
-## Moves start_cell to START_CLASS's own StartPosition record. Non-fatal: an
-## install whose tree has no such record keeps the fallback literal, and says
-## so, rather than aborting a run over a cosmetic default.
+## Dresses the player in a REAL retail outfit rather than a hand-picked list of
+## mesh names: START_SET is a bin/sets.bin record, its members are items.pak
+## records, and an items.pak record's name field is the .GRN. Nothing here
+## names a file.
 ##
-## The cell is used as a SEED, not as the spawn -- _resolve_spawn still derives
-## a walkable cell from the sector it names, so "measured, never hardcoded"
-## survives. What changes is which sector is searched.
+## The garment/weapon split is MEASURED, not spelled out: a piece that declares
+## vertex weights is skinned and goes on the skeleton, one that does not is a
+## rigid prop and goes on a hand socket -- exactly the distinction
+## granny-grn.md draws between armour and weapons. Set 6 mixes both, seven
+## garments and the two Wind blades, so a caller could not sort them by name.
+func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) -> void:
+	if _player_view == null or items == null:
+		return
+	var sets := Sacred.Sets.new(install)
+	if not sets.found:
+		push_warning("dress: bin/sets.bin did not decode -- drawing the bare rig")
+		return
+	var members := sets.members_of(START_SET)
+	if members.is_empty():
+		push_warning("dress: set %d has no members" % START_SET)
+		return
+	# Two failure kinds, counted APART because they mean different things. A
+	# member whose mesh name does not resolve is a broken chain -- sets.bin to
+	# items.pak to models.pak -- and should be zero. A member the rig refuses is
+	# an ordinary outcome the view already counts: a blade with no grip for the
+	# hand it was offered, or a garment whose weights did not decode. Summing
+	# them made the first version of this line report "unresolved=3" for a set
+	# in which every member resolved.
+	var unresolved := 0
+	var hand := 1
+	for rec in members:
+		var nm: String = items.name_of(rec)
+		var e := models.index_of(nm)
+		if nm == "" or e < 0:
+			unresolved += 1
+			continue
+		if models.has_mesh_weights(e):
+			_player_view.wear(models, nm, items.texture_of(rec))
+		else:
+			_player_view.equip(models, nm, hand, items.texture_of(rec))
+			hand += 1
+	print("dress\tset=%d\tmembers=%d\tworn=%d\tarmed=%d\tworn_refused=%d\tarm_refused=%d\tunresolved=%d" % [
+		START_SET, members.size(), _player_view.worn(), _player_view.equipped(),
+		_player_view.worn_refused(), _player_view.equipped_refused(), unresolved])
+
+
+## Moves start_cell to START_CLASS's own StartPosition record, and picks the
+## body mesh for that class. Non-fatal: an install whose tree has no such
+## record keeps the fallback literal, and says so, rather than aborting a run
+## over a cosmetic default.
 func _apply_retail_start(install: String) -> void:
 	if CLASS_MODEL.has(START_CLASS):
 		_player_model = CLASS_MODEL[START_CLASS]
@@ -915,6 +964,11 @@ func _apply_retail_start(install: String) -> void:
 		sc.start_cell.x / SECT, sc.start_cell.y / SECT])
 
 
+## The chosen spawn cell as a fact line, its class, the component size and how
+## many sectors were scanned. `--spawn=cx,cy` (a debugging override, not part
+## of the falsifiable path) and the retail StartPosition below both skip the
+## scan, so component/sectors read 0 in those cases rather than reporting a
+## measurement that never ran.
 func _resolve_spawn(walk: Walkable) -> Dictionary:
 	if _has_spawn_override:
 		var cls := walk.class_at(floori(_spawn_override.x), floori(_spawn_override.y))
@@ -1448,6 +1502,7 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 				print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
 					_player_model, _player_view.model_index,
 					_player_view.vertex_count, _player_view.triangle_count])
+				_dress_player(install, Sacred.Models.new(models_pak), items)
 
 	# Plan 04-02: the sliding path window and its one scripted goal request,
 	# derived from the ACTUAL spawn component -- never a hardcoded cell, so

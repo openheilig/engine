@@ -51,8 +51,28 @@ const DOCK_EPS := 0.001
 const ROSTER := 24
 
 ## Preloaded by PATH, not by class_name: main.gd is a scene script and this
-## check wants only its CLASS_MODEL constant, never an instance of it.
+## check wants only its constants, never an instance of it.
 const MainScript := preload("res://main.gd")
+
+## Of main.gd's seven mapped class bodies, how many actually BUILD, and which
+## two do not. Both are decoder gaps rather than naming errors -- see the block
+## in _init that pins them.
+const CLASS_BODIES_BUILD := 5
+const CLASS_BODIES_UNBUILT: Array[String] = ["DUNKELELVE.GRN", "MAGICIAN.GRN"]
+
+## Uriel's Legacy (bin/sets.bin record 6) on its own Seraphim: five garments
+## bind, two are refused because their vertex weights do not decode
+## (SERABOOTS01, SERASHOULDER01), one blade docks in the main hand and the
+## second is refused because SERAPHIM names no off-hand socket.
+const URIEL_WORN := 5
+const URIEL_WORN_REFUSED := 2
+const URIEL_ARMED := 1
+const URIEL_ARM_REFUSED := 1
+## THE CONTROL. Offered the same seven garments, a body they were not cut for
+## must take NONE. This is the assertion the first version of attach_skinned
+## failed: binding by bone name alone, GLADIATOR scored 5 worn / 2 refused --
+## identical to the Seraphim's own score, i.e. the test measured nothing.
+const URIEL_CROSS_WORN := 0
 
 
 func _init() -> void:
@@ -271,6 +291,90 @@ func _init() -> void:
 	assert(seen_models.size() == MainScript.CLASS_MODEL.size(),
 		"class body meshes collapsed: %d distinct over %d classes" % [
 			seen_models.size(), MainScript.CLASS_MODEL.size()])
+
+	# RESOLVING IS NOT BUILDING, and the first version of this block asserted
+	# only the former -- which passed a map containing two names that produce no
+	# body at all. DUNKELELVE.GRN and MAGICIAN.GRN are correctly NAMED and fail
+	# in the mesh decoder, so the map is right and the renderer is short. Pinned
+	# as a measured count so both directions are caught: a regression that
+	# breaks a third, and a decoder fix that repairs one of these (at which
+	# point this number should be raised deliberately, not silently).
+	var built := 0
+	var unbuilt: Array[String] = []
+	for cls in MainScript.CLASS_MODEL:
+		var mn: String = MainScript.CLASS_MODEL[cls]
+		var bv := PlayerView.new(models, mn, tp)
+		if bv.node != null:
+			built += 1
+			bv.node.free()
+		else:
+			unbuilt.append(mn)
+	unbuilt.sort()
+	assert(built == CLASS_BODIES_BUILD,
+		"class bodies that build moved: want %d, got %d (failing: %s)" % [
+			CLASS_BODIES_BUILD, built, unbuilt])
+	assert(unbuilt == CLASS_BODIES_UNBUILT,
+		"a DIFFERENT set of class bodies fails to build: %s, expected %s" % [
+			unbuilt, CLASS_BODIES_UNBUILT])
+	# START_CLASS's own body must be one that works, or the default run draws
+	# nothing. This is the assertion that would have caught pointing START_CLASS
+	# at the magician.
+	assert(not unbuilt.has(MainScript.CLASS_MODEL[MainScript.START_CLASS]),
+		"START_CLASS %s maps to %s, which does not build" % [
+			MainScript.START_CLASS, MainScript.CLASS_MODEL[MainScript.START_CLASS]])
+
+	# ARMOUR COMPOSITION, driven the way main.gd drives it: sets.bin record 6 ->
+	# items.pak records -> .GRN names, so this tests the real chain and not a
+	# list of names typed here. A piece that declares vertex weights is a
+	# garment; one that does not is a prop for a hand.
+	var sets := Sacred.Sets.new(install)
+	assert(sets.found, "bin/sets.bin did not decode -- the outfit chain cannot be tested")
+	var uriel: Array[String] = []
+	var blades: Array[String] = []
+	for rec in sets.members_of(MainScript.START_SET):
+		var nm: String = items.name_of(rec)
+		var e := models.index_of(nm)
+		assert(e >= 0, "set %d member %d names %s, which models.pak does not carry" % [
+			MainScript.START_SET, rec, nm])
+		if models.has_mesh_weights(e):
+			uriel.append(nm)
+		else:
+			blades.append(nm)
+	assert(uriel.size() == 7 and blades.size() == 2,
+		"set %d split into %d garments and %d props, expected 7 and 2" % [
+			MainScript.START_SET, uriel.size(), blades.size()])
+
+	var dressed := PlayerView.new(models, "SERAPHIM.GRN", tp)
+	assert(dressed.node != null, "SERAPHIM.GRN did not build for the outfit test")
+	for g in uriel:
+		dressed.wear(models, g)
+	var hand := 1
+	for w in blades:
+		dressed.equip(models, w, hand)
+		hand += 1
+	assert(dressed.worn() == URIEL_WORN and dressed.worn_refused() == URIEL_WORN_REFUSED,
+		"Uriel's Legacy on its own Seraphim: %d worn / %d refused, expected %d / %d" % [
+			dressed.worn(), dressed.worn_refused(), URIEL_WORN, URIEL_WORN_REFUSED])
+	assert(dressed.equipped() == URIEL_ARMED and dressed.equipped_refused() == URIEL_ARM_REFUSED,
+		"Uriel's blades: %d docked / %d refused, expected %d / %d" % [
+			dressed.equipped(), dressed.equipped_refused(), URIEL_ARMED, URIEL_ARM_REFUSED])
+	dressed.node.free()
+
+	# THE CROSS-CHARACTER CONTROL, and it is the load-bearing half of this
+	# block. See URIEL_CROSS_WORN: without the geometric fit test, these two
+	# score exactly what the Seraphim scores.
+	for other in ["GLADIATOR.GRN", "DWARF.GRN"]:
+		var wrong := PlayerView.new(models, other, tp)
+		assert(wrong.node != null, "%s did not build for the control arm" % other)
+		for g in uriel:
+			wrong.wear(models, g)
+		assert(wrong.worn() == URIEL_CROSS_WORN,
+			"%s wore %d of the Seraphim's %d garments -- the fit test has stopped discriminating"
+				% [other, wrong.worn(), uriel.size()])
+		assert(wrong.worn_refused() == uriel.size(),
+			"%s refused %d of %d, so some piece neither bound nor was refused"
+				% [other, wrong.worn_refused(), uriel.size()])
+		wrong.node.free()
 
 	# SERAPHIM carries Bone_weapon_01 and NOT _02, which is the ordinary case:
 	# only 192 of 1571 entries carry the off-hand socket at all. Its main hand

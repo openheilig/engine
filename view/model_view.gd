@@ -198,6 +198,16 @@ const SOCKET_HAND := {SOCKET_MAIN: "Bip01 R Hand", SOCKET_OFF: "Bip01 L Hand"}
 ## cast cannot be armed yet -- see research/formats/granny-grn.md.
 var sockets_attached := 0
 var sockets_refused := 0
+## Skinned garments (attach_skinned) that bound, and that were refused because
+## the piece is a prop, its weights did not decode, it is weighted to a bone
+## this wearer does not have, or it was cut for a different body.
+var worn_attached := 0
+var worn_refused := 0
+## Rest-transform tolerance for the garment-fits-wearer test in
+## attach_skinned. Borrowed from checks/equip_check.gd's WITHIN rather than
+## chosen here, so the render path admits a garment on exactly the instrument
+## R1.4 was measured with.
+const FIT_WITHIN := 0.01
 
 ## True when the entry declared bones but no weights: an unskinned rigid prop,
 ## whose bones are locators. Set by _build_rig; the Skeleton3D is discarded, so
@@ -315,6 +325,113 @@ func attach_socket(models: Sacred.Models, entry: int, socket: String,
 	piece.transform = (grip as Transform3D).affine_inverse()
 	sockets_attached += 1
 	return piece
+
+## Puts a SKINNED garment on this rig: the piece's mesh is added under THIS
+## skeleton and its skin re-bound to this skeleton's bones BY NAME, so it
+## deforms with the body instead of standing beside it. This is the armour
+## path; attach_socket above is the weapon path, and they are different because
+## the files are different (granny-grn.md, "A weapon is a rigid prop, not a
+## second garment").
+##
+## WHY BY NAME IS ENOUGH, measured rather than assumed. R1.4 (checks/
+## equip_check.gd) confirmed armour shares its wearer's skeleton on the local
+## instrument -- for the SERA family, 0.9123 own-agreement against a 0.2059
+## cross-character control over 72 pieces. And the naming gap that looks fatal
+## is not: Uriel's Legacy pieces carry 75-77 bones against the body's 72, but
+## every extra one (`Angel_armor_Breast`, `Bip01 Ponytail1`, the two
+## `Spot*.Target` light aims) is an UNWEIGHTED locator. Across the seven pieces
+## the count of bones that are weighted AND absent from the body is ZERO, which
+## is why the refusal below tests the BIND SET and not the bone list -- testing
+## the bone list would refuse every garment in the game.
+##
+## Returns the added MeshInstance3D, or null on refusal. Refusals are ordinary
+## and counted, never approximated: a garment half-bound to the wrong bones is
+## worse than a character without it.
+func attach_skinned(models: Sacred.Models, entry: int, texture: int = -1) -> MeshInstance3D:
+	if _skeleton == null:
+		return null
+	var piece := ModelView.new()
+	piece.name = "Worn_%d" % entry
+	piece.set_texture_pak(_texture_pak)
+	piece.item_texture = texture
+	if not piece.setup(models, entry, false):
+		piece.free()
+		worn_refused += 1
+		return null
+	# A prop has no skin to re-bind, and an entry whose weights did not decode
+	# reaches here with _skin null as well -- both are refusals, and the caller
+	# is told which by mesh_weights' own push_error rather than by a guess here.
+	if piece._skeleton == null or piece._skin == null or piece._skin.get_bind_count() == 0:
+		piece.free()
+		worn_refused += 1
+		return null
+	# Bind ORDER is what the mesh's ARRAY_BONES indexes, so the remap keeps the
+	# order and changes only which skeleton each bind points into. The bind POSE
+	# is the piece's own -- it takes the piece's vertices into that bone's space,
+	# which is a fact about the garment's geometry, not about the wearer.
+	#
+	# NAMES ALONE DO NOT SAY THE GARMENT FITS, and the control is what showed
+	# it: offered Uriel's Legacy, GLADIATOR.GRN binds 5 pieces and refuses 2 --
+	# exactly SERAPHIM.GRN's own score. Every humanoid shares the `Bip01 *`
+	# biped names, so a name-only test discriminates nothing, which is the same
+	# way the weapon-socket instrument once "measured" its own sockets agreeing
+	# with themselves (granny-grn.md). rust.bin exists precisely because a
+	# garment is per-wearer, so binding one to the wrong body is a real error
+	# and not a curiosity.
+	#
+	# So the admission test is GEOMETRIC, and it is R1.4's local instrument
+	# (checks/equip_check.gd): a bind bone's own rest transform in the garment,
+	# compared to the same-named bone's rest in this body, chain never composed.
+	# Measured over Uriel's seven pieces: SERAPHIM agrees on 1/1, 1/15, 5/7,
+	# 3/5 and 2/7 bind bones, while GLADIATOR and DWARF agree on ZERO of every
+	# one. The rule is therefore "at least one bind bone agrees" -- weak-looking
+	# and totally separating on what has been measured.
+	# ponytail: `> 0` is the threshold the evidence supports, not a tuned one.
+	# The own-rates are low and uneven because a garment poses fingers and
+	# extremities freely; a per-bone fit score would be a better rule and needs
+	# a wider measurement than five pieces to set a cut on.
+	var skin := Skin.new()
+	var agreed := 0
+	for i in piece._skin.get_bind_count():
+		var pb := piece._skin.get_bind_bone(i)
+		var nm := piece._skeleton.get_bone_name(pb)
+		var b := _skeleton.find_bone(nm)
+		if b < 0:
+			piece.free()
+			worn_refused += 1
+			return null
+		var pr := piece._skeleton.get_bone_rest(pb)
+		var wr := _skeleton.get_bone_rest(b)
+		if pr.origin.distance_to(wr.origin) < FIT_WITHIN \
+				and pr.basis.get_rotation_quaternion().angle_to(wr.basis.get_rotation_quaternion()) < FIT_WITHIN:
+			agreed += 1
+		skin.add_bind(b, piece._skin.get_bind_pose(i))
+	if agreed == 0:
+		# This garment was cut for a different body. Refused rather than bound
+		# to a skeleton whose bones sit somewhere else.
+		piece.free()
+		worn_refused += 1
+		return null
+	var src: MeshInstance3D = piece.get_node_or_null("Skeleton/Mesh")
+	if src == null or src.mesh == null:
+		piece.free()
+		worn_refused += 1
+		return null
+	var mi := MeshInstance3D.new()
+	mi.name = "Worn_%d" % entry
+	mi.mesh = src.mesh
+	for s in src.mesh.get_surface_count():
+		mi.set_surface_override_material(s, src.get_surface_override_material(s))
+	_skeleton.add_child(mi)
+	mi.skeleton = NodePath("..")
+	mi.skin = skin
+	# The mesh and its materials are Resources and outlive the node they were
+	# built under, so the scratch rig goes away here rather than lingering as a
+	# second, invisible skeleton under this one.
+	piece.free()
+	worn_attached += 1
+	return mi
+
 
 ## The material for one draw batch. `slot` is a 0-based index into
 ## Models.texture_names(), or -1 for "no texture known". Clay whenever the
