@@ -31,6 +31,7 @@ func _init() -> void:
 	_determinism()
 	_kernel()
 	_ratings()
+	_base_ratings()
 	print("combat_check OK to_hit(100,100,10,10)=%d floor=%d ceiling=%d" % [
 		Combat.to_hit(100, 100, 10, 10),
 		Combat.to_hit(1, 10000, 1, 10000),
@@ -204,3 +205,69 @@ func _ratings() -> void:
 		"VW families moved: %d, expected 2 (Agility and Constitution)" % Sacred.Balance.VW.size())
 	expect(Sacred.Balance.VW.has("W") and Sacred.Balance.VW.has("HP"),
 		"the two VW families are no longer Agility and Constitution")
+
+
+## THE BASE RATINGS (row 959) -- the last invented quantity in a fight, and the
+## thing `_ratings` above could only describe the shape of.
+##
+## Every assertion is a property of the transcribed coefficients rather than a
+## measured number, so a coefficient typo breaks at least one:
+##
+##   attack weights STR and DEX EQUALLY   (0.5 / 0.5)
+##   defence weights DEX FOUR TIMES STR   (0.2 / 0.8)
+##   both are 1.0 per point of gear
+##
+## The asymmetry is the load-bearing part: an implementation that used the same
+## split for both would pass a spot check on equal attributes and fail here.
+func _base_ratings() -> void:
+	# Equal attributes: attack is that value, defence is that value. Both
+	# coefficient pairs sum to 1, which is what makes this hold.
+	for v in [10, 25, 47, 100]:
+		expect(absf(Combat.base_attack(v, v) - float(v)) < 1e-4,
+			"base_attack(%d,%d) is %.3f, expected %d" % [v, v, Combat.base_attack(v, v), v])
+		expect(absf(Combat.base_defence(v, v) - float(v)) < 1e-4,
+			"base_defence(%d,%d) is %.3f, expected %d" % [v, v, Combat.base_defence(v, v), v])
+	# UNEQUAL is where the two formulas separate. Dexterity is worth four times
+	# Strength on defence and exactly as much on attack.
+	expect(absf(Combat.base_attack(100, 0) - Combat.base_attack(0, 100)) < 1e-4,
+		"attack is not symmetric in STR and DEX")
+	expect(absf(Combat.base_defence(0, 100) - 4.0 * Combat.base_defence(100, 0)) < 1e-4,
+		"defence does not weight DEX four times STR")
+	# Gear is a flat point-for-point add on both.
+	expect(absf(Combat.base_attack(10, 10, 7) - (10.0 + 7.0)) < 1e-4, "gear is not 1:1 on attack")
+	expect(absf(Combat.base_defence(10, 10, 7) - (10.0 + 7.0)) < 1e-4, "gear is not 1:1 on defence")
+	# Never negative: CalcResults clamps both at 0 after the modifier pass.
+	expect(Combat.base_attack(-100, -100) == 0.0, "a negative base attack was not clamped")
+
+	# THE RATING ASSEMBLY. base x multiplier x proz, and the multiplier is 1.0
+	# for a character with no skill in an AW or VW family.
+	expect(absf(Combat.rating(20.0) - 20.0) < 1e-4, "a bare rating is not its base")
+	expect(absf(Combat.rating(20.0, 2.0, 1.5) - 60.0) < 1e-4, "the rating product is wrong")
+
+	# THE TWO REAL SUBJECTS, so the gate breaks if either data source moves.
+	# A new Seraphim is STK 22 / GES 25; the Ghoul at monster107 is 33 / 24.
+	var sera_at := Combat.base_attack(22, 25)
+	var ghoul_pa := Combat.base_defence(33, 24)
+	expect(absf(sera_at - 23.5) < 1e-4, "the new Seraphim's attack base is %.2f" % sera_at)
+	expect(absf(ghoul_pa - 25.8) < 1e-4, "the Ghoul's defence base is %.2f" % ghoul_pa)
+	# She is the WEAKER of the two on these numbers, which is why the fight is
+	# not a foregone conclusion in either direction.
+	expect(sera_at < ghoul_pa, "the level-1 Seraphim now out-attacks the Ghoul's defence")
+	var hit := Combat.to_hit(int(sera_at), int(ghoul_pa), 1, 2)
+	expect(hit > Combat.HIT_MIN and hit < 50,
+		"the MVP fight is %d%%, expected between the floor and even" % hit)
+
+	# ProzAW, the one balance.bin key on this path. It multiplies a NON-HERO's
+	# ratings only, and it rises steeply: a monster on Niob is 4.5x its own
+	# numbers. If this ever read 1.0 across the board the difficulty tiers have
+	# stopped differing.
+	var bal2 = Sacred.Balance.new(Sacred.find_install())
+	var proz := PackedFloat32Array()
+	for d in [1, 2, 3, 4]:
+		proz.append(bal2.proz_aw(d))
+	expect(absf(proz[0] - 1.0) < 1e-4, "ProzAW on Silver is %.2f, expected 1.0" % proz[0])
+	expect(absf(proz[3] - 4.5) < 1e-4, "ProzAW on Niob is %.2f, expected 4.5" % proz[3])
+	for i in 3:
+		expect(proz[i + 1] > proz[i], "ProzAW does not rise from difficulty %d to %d" % [i + 1, i + 2])
+	print("combat_check\tbase OK\tsera_AT=%.1f\tghoul_PA=%.1f\thit=%d%%\tProzAW=%s" % [
+		sera_at, ghoul_pa, hit, proz])

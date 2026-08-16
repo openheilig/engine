@@ -52,11 +52,21 @@ extends RefCounted
 ## across the band would get the difficulty curve wrong everywhere while still
 ## producing levels inside the right range -- an error no range check catches.
 ##
-## THE TWO DIFFICULTY TABLES ARE NOT READ. They live in the executable's data
-## at 0x8B89BA8 and 0x8B89DAC, not in any shipped file, and their values are
-## not recovered -- so level_for() takes them as arguments and defaults both to
-## zero, which is the identity and is presumably Silver. A caller that needs
-## Gold or Platinum must supply them rather than get a silently wrong number.
+## THE TWO DIFFICULTY TABLES ARE `balance.bin` KEYS, recovered (row 958). They
+## sit in .bss at 0x8B89BA8 and 0x8B89DAC because `sub_812B3E6` slurps the whole
+## of `bin/balance.bin` into that block, and they are `OffLevel` and `LevelKap`
+## -- SIX-ELEMENT int32 arrays whose key-map entries name only their first
+## element. See Sacred.Balance.OFF_LEVEL.
+##
+##   difficulty   1 Silver  2 Gold  3 Platinum  4 Niob
+##   OffLevel        +0       +35      +70        +128    on the LOW bound
+##   LevelKap       +50      +120     +190        +250    on the HIGH bound
+##
+## `LevelKap` is large enough that on Silver the high bound of a (1,4) sector
+## becomes 54, so the clamp tracks the player for most of a playthrough and the
+## band's own high bound only bites in the endgame. That is the level-scaling
+## everyone remembers about this game, and it is a property of these two
+## numbers rather than of the band.
 ##
 ## STILL OPEN: whether this level is also the level at which the creature's
 ## SKILLS are known. The skills feed the rating curve
@@ -190,8 +200,10 @@ func bands_of(cx: int, cy: int) -> Array:
 ## what band() returns for a sector that declares none -- leaves the hero's
 ## level untouched, which is retail's own `if (lo && hi)` guard.
 ##
-## `diff_lo`/`diff_hi` are the two unrecovered difficulty tables; see the class
-## doc for why they are parameters rather than constants.
+## `diff_lo`/`diff_hi` are `OffLevel[i]` and `LevelKap[i]` for the difficulty in
+## play; they default to the identity so a caller that has no balance.bin gets
+## the band verbatim instead of a silently shifted one. Prefer
+## level_at_difficulty(), which reads them.
 static func level_for(hero_level: int, band: Vector2i, rng: RandomNumberGenerator,
 		diff_lo: int = 0, diff_hi: int = 0) -> int:
 	if band.x <= 0 or band.y <= 0:
@@ -203,3 +215,16 @@ static func level_for(hero_level: int, band: Vector2i, rng: RandomNumberGenerato
 	if hero_level <= hi:
 		return hero_level + rng.randi_range(0, 1)
 	return hi
+
+
+## The same clamp, with the difficulty adjustments read from balance.bin rather
+## than passed in. `difficulty` is 1..4 = Silver / Gold / Platinum / Niob.
+##
+## This is the form a game should call: level_for's bare arguments exist for a
+## gate that wants to drive the branches directly.
+static func level_at_difficulty(hero_level: int, band: Vector2i,
+		rng: RandomNumberGenerator, bal, difficulty: int) -> int:
+	if bal == null or not bal.found:
+		return level_for(hero_level, band, rng)
+	var adj: Vector2i = bal.difficulty_adjust(difficulty)
+	return level_for(hero_level, band, rng, adj.x, adj.y)

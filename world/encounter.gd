@@ -19,15 +19,22 @@ extends RefCounted
 ##              far says what from. So the link below is the port's, and it is
 ##              in one place, named, rather than spread through the engine.
 ##
-##   PLACEHOLDER  the two RATINGS and the hostile's hit points. creature.pak
-##              is fully read now (row 949) and its six base attributes are
-##              real -- the Ghoul's are STK 35, RES 35, GES 25, REPHY 40,
-##              REMAG 0, CHARISMA 50 -- but nothing recovered says which
-##              attribute becomes the attack rating and which the defence
-##              rating, and HP is in no table at all. So the ATTRIBUTES are
-##              read and the two ratings they feed are still invented.
-##              Experience is NOT a placeholder: `exp = A + level*B` is
-##              retail's own comment and both terms are in the file.
+##              The HERO is retail's too, now: `templates/hero01.ptx` is the
+##              new-game Seraphim, so her level, skills and attributes are read
+##              (row 955). So is the hostile's LEVEL -- the start sector's band
+##              clamping her level, with balance.bin's OffLevel/LevelKap for the
+##              difficulty (rows 956, 958).
+##
+##              The two RATINGS are retail's now too (row 959): base attack is
+##              `0.5*(STR+DEX)`, base defence `0.2*STR + 0.8*DEX`, over the six
+##              attributes already read for each side.
+##
+##   PLACEHOLDER  the hostile's HIT POINTS and the damage per blow. HP is in no
+##              table read so far and the resolution step (damage against
+##              resistance) is undecoded, so there is deliberately no formula
+##              here to be wrong about. Experience is NOT a placeholder:
+##              `exp = A + level*B` is retail's own comment and both terms are
+##              in creature.pak.
 ##
 ## Nothing here touches the scene tree, a node or a thread (R10.1).
 
@@ -54,22 +61,30 @@ const FOE_LEVEL_FALLBACK := 1
 ## slot list, independently. See Sacred.Hero.
 const HERO_TYPE := 1
 const TEMPLATES := 8
+## Silver -- retail's first of four (Silver / Gold / Platinum / Niob). A
+## constant until there is a difficulty selector, and named rather than passed
+## as a bare 1 so the choice is visible.
+const DIFFICULTY := 1
 
-## ponytail: THE TWO RATINGS ARE STILL PLACEHOLDERS -- but it is now possible
-## to say exactly WHY, which is the difference between a gap and an excuse.
+## THE RATINGS ARE NO LONGER INVENTED EITHER (row 959). The base both
+## multipliers multiply is `0.5*(STR+DEX)` for attack and `0.2*STR + 0.8*DEX`
+## for defence -- see Combat.base_attack -- and STR/DEX are the first and third
+## of the six attributes this port already reads for both sides: from the hero
+## template for her, from creature.pak for the hostile.
 ##
-## `sub_81F596E` accumulates attack and defence at creature-struct +0xE6 and
-## +0xEA, both initialised to 1.0 by cCreatureHero::CalcResults, and each of
-## the eight skill slots multiplies in through the recovered curve
-## (Combat.skill_rating). A rating is therefore `base x product of skill
-## curves`, and it is the BASE that is unrecovered.
+## THE MULTIPLIERS ARE 1.0 HERE, and that is a reading rather than a shortcut.
+## They start at 1.0 in cCreatureHero::CalcResults and are raised only by skills
+## whose balance family carries an AW or VW triplet. A new Seraphim knows Magic
+## Lore and Weapon Lore -- families MK and WK -- and neither does. So at level 1
+## she genuinely has no skill contributing to either rating.
 ##
-## For THIS encounter the base is not merely half the answer, it is all of it:
-## a new Seraphim knows Magic Lore and Weapon Lore, balance families MK and WK,
-## and neither carries an AW or a VW triplet. At level 1 no skill she has feeds
-## either rating, so both are entirely base.
-const HERO_AT := 120
-const FOE_PA := 100
+## `ProzAW[difficulty]` scales a NON-HERO's ratings; retail ships
+## [1.0, 1.5, 2.5, 4.5] and Silver is the identity.
+const HERO_MULT := 1.0
+const FOE_MULT := 1.0
+## ponytail: HIT POINTS ARE STILL A PLACEHOLDER. HP is in no table read so far
+## and the resolution step is undecoded, so this is a duration knob and nothing
+## claims otherwise.
 const FOE_HP := 40
 ## The kernel applied to a real attribute, reported so the difference between
 ## "read" and "invented" is visible in the status line rather than only in a
@@ -89,6 +104,10 @@ var band := Vector2i(-1, -1)
 var hero_class := ""            ## the class name global.res gives HERO_TYPE
 var hero_skills: Array[Dictionary] = []
 var hero_attrs := PackedInt32Array()
+## The two ratings, computed rather than chosen. See the constants above.
+var hero_at := 0.0
+var foe_pa := 0.0
+var proz_aw := 1.0              ## ProzAW[difficulty]; applies to the hostile only
 var foe_id: int = 0             ## ActorRegistry id, 0 when nothing spawned
 var foe_cell := Vector2i(-1, -1)
 var foe_body := ""              ## the .GRN the hostile wears
@@ -150,6 +169,11 @@ func _init(install: String, registry: ActorRegistry, items, creatures, factions)
 			foe_base = creatures.base_all(n["body"])
 			foe_exp = creatures.experience(n["body"], foe_level)
 			foe_speed = creatures.speed(n["body"])
+			# The same two attributes, and the hostile DOES take ProzAW -- it is
+			# not one of the eight playable classes.
+			if foe_base.size() >= 3:
+				foe_pa = Combat.rating(
+					Combat.base_defence(foe_base[0], foe_base[2]), FOE_MULT, proz_aw)
 		if factions != null and foe_class != 0:
 			hostile = factions.hostile(HERO_CLASS, foe_class)
 		if registry != null and foe_cell.x >= 0:
@@ -174,6 +198,13 @@ func _read_hero(install: String) -> void:
 		hero_level = h.level
 		hero_skills = h.skills()
 		hero_attrs = h.attributes()
+		# STR and DEX are the FIRST and THIRD attributes: the struct reads +0x10
+		# and +0x14 of six u16 at +0x10..+0x1A, which in creature.pak's own order
+		# (STK, RES, GES, REPHY, REMAG, CHARISMA) are Strength and Dexterity.
+		# A hero takes no ProzAW factor -- the getters gate it on type-id > 0x10
+		# and the playable classes are 1..9.
+		hero_at = Combat.rating(
+			Combat.base_attack(h.attribute("STK"), h.attribute("GES")), HERO_MULT)
 		var res = Sacred.Resources.new(install.path_join("scripts/us/global.res"))
 		hero_class = res.slot(h.class_slot())
 		return
@@ -196,7 +227,14 @@ func _read_level(install: String, sc) -> void:
 	band = sl.band_at_cell(cell)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = QUEST
-	foe_level = Sacred.SpawnLevels.level_for(hero_level, band, rng)
+	# Silver, retail's own first difficulty. The two adjustments come from
+	# balance.bin's OffLevel/LevelKap (row 958) rather than defaulting to zero,
+	# which would cap a levelled hero at the band's own high bound instead of
+	# tracking her -- 4 rather than 30 at this sector.
+	var bal = Sacred.Balance.new(install)
+	foe_level = Sacred.SpawnLevels.level_at_difficulty(
+		hero_level, band, rng, bal, DIFFICULTY)
+	proz_aw = bal.proz_aw(DIFFICULTY)
 
 
 ## Opens the quest by running its OWN OnEnter bytecode. False when the hook
@@ -224,7 +262,7 @@ func strike(rng: RandomNumberGenerator) -> Dictionary:
 	var foe := _registry.get_actor(foe_id)
 	if foe == null or foe.hp <= 0:
 		return out
-	var r := Combat.resolve(HERO_AT, FOE_PA, hero_level, foe_level, rng)
+	var r := Combat.resolve(int(hero_at), int(foe_pa), hero_level, foe_level, rng)
 	_attacks += 1
 	out["hit"] = r["hit"]
 	out["roll"] = r["roll"]
@@ -261,8 +299,9 @@ func foe_hp() -> int:
 
 ## One tab-separated status line, in the shape main.gd's other fact lines use.
 func status_line() -> String:
-	return "encounter\thero=%s\tlvl=%d\tskills=%s\tband=%s\tfoe_lvl=%d\n" % [
-		hero_class, hero_level, hero_skills, band, foe_level] \
+	return "encounter\thero=%s\tlvl=%d\tskills=%s\tband=%s\tfoe_lvl=%d\tAT=%.1f\tPA=%.1f\tprozAW=%.2f\thit=%d%%\n" % [
+		hero_class, hero_level, hero_skills, band, foe_level, hero_at, foe_pa,
+		proz_aw, Combat.to_hit(int(hero_at), int(foe_pa), hero_level, foe_level)] \
 		+ "encounter\tquest=%d\ttitle=%s\tnpc=%s@%d,%d\tfoe=%s@%d,%d\tclass=%d\thostile=%s\thp=%d\tswings=%d\thits=%d\tlines=%d\tdone=%s" % [
 		QUEST, title, giver_body, giver_cell.x, giver_cell.y,
 		foe_body, foe_cell.x, foe_cell.y, foe_class, hostile,

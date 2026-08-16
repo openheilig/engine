@@ -139,3 +139,50 @@ func _starts(sl) -> void:
 	expect(first == 1 or first == 2,
 		"a new Seraphim's first monster is level %d, expected 1 or 2" % first)
 	print("spawnlevel_check\tclamp OK\tstart_band=%s\tfirst_monster_level=%d" % [start_band, first])
+
+	# THE DIFFICULTY ADJUSTMENTS, recovered from balance.bin (row 958). These
+	# were the last unread input to the clamp; before this they defaulted to
+	# zero and the port silently played every difficulty as if it were the
+	# fallback.
+	var bal = Sacred.Balance.new(Sacred.find_install())
+	expect(bal.found, "balance.bin did not load")
+	var off_level: PackedInt32Array = bal.int_array(Sacred.Balance.OFF_LEVEL)
+	var level_kap: PackedInt32Array = bal.int_array(Sacred.Balance.LEVEL_KAP)
+	# Named values, so a shifted offset is caught by a number a human can check
+	# against the key map rather than by a range.
+	expect(off_level == PackedInt32Array([0, 35, 70, 128, 0, 0]),
+		"OffLevel is %s, expected [0, 35, 70, 128, 0, 0]" % [off_level])
+	expect(level_kap == PackedInt32Array([50, 120, 190, 250, 250, 0]),
+		"LevelKap is %s, expected [50, 120, 190, 250, 250, 0]" % [level_kap])
+	# The index map, including its odd default arm: anything outside 1..4 lands
+	# on the fallback slot, whose entries are both zero.
+	for pair in [[1, 0], [2, 1], [3, 2], [4, 3], [0, 5], [9, 5]]:
+		expect(Sacred.Balance.difficulty_index(pair[0]) == pair[1],
+			"difficulty %d maps to index %d, expected %d" % [
+				pair[0], Sacred.Balance.difficulty_index(pair[0]), pair[1]])
+	expect(bal.difficulty_adjust(0) == Vector2i.ZERO,
+		"the fallback difficulty is not the identity")
+	# Both bounds must RISE with difficulty across the four real settings, or
+	# the two arrays have been swapped or mis-strided.
+	for d in [2, 3, 4]:
+		var lower: Vector2i = bal.difficulty_adjust(d - 1)
+		var higher: Vector2i = bal.difficulty_adjust(d)
+		expect(higher.x > lower.x and higher.y > lower.y,
+			"difficulty %d does not raise the band above difficulty %d" % [d, d - 1])
+	# THE CONSEQUENCE, which is the thing worth pinning. On Silver, LevelKap
+	# +50 puts the start sector's high bound at 54, so a mid-game hero is still
+	# TRACKED there rather than held down -- that is the level scaling. A port
+	# that ignored these tables would cap her at 4.
+	var rng2 := RandomNumberGenerator.new()
+	rng2.seed = 4242
+	var sb: Vector2i = sl.band(STARTS_LOW[0].x, STARTS_LOW[0].y)
+	var tracked := Sacred.SpawnLevels.level_at_difficulty(30, sb, rng2, bal, 1)
+	expect(tracked == 30 or tracked == 31,
+		"a level-30 hero on Silver in a %s sector meets level %d, expected 30 or 31" % [sb, tracked])
+	var capped := Sacred.SpawnLevels.level_for(30, sb, rng2)
+	expect(capped == sb.y,
+		"without the difficulty tables the same hero should be capped at %d, got %d" % [sb.y, capped])
+	expect(tracked != capped,
+		"the difficulty tables changed nothing, so this check is not testing them")
+	print("spawnlevel_check\tdifficulty OK\tOffLevel=%s\tLevelKap=%s\ttracked=%d\tcapped=%d" % [
+		off_level, level_kap, tracked, capped])

@@ -127,3 +127,70 @@ static func skill_rating(off: float, level: float, s: float, w: float) -> float:
 		return 0.0
 	var v := (1.0 - 1.0 / ((level - 1.0) / s + 1.0)) * (w - off)
 	return off + v + v
+
+
+## THE BASE ATTACK AND DEFENCE RATINGS -- the numbers `skill_rating`'s
+## multipliers multiply, and the last invented quantity in the fight.
+##
+## `cCreatureHero::CalcResults` (sub_820E04C) zeroes both at 0x820E512 and then
+## accumulates, at 0x8210331:
+##
+##     C = &per-class coefficient record       ; flt_8793720[class * 16]
+##     base_AT += 0.01 * (STR*C[0] + DEX*C[1])
+##     base_PA += 0.01 * (STR*C[3] + DEX*C[4])
+##
+## and at 0x820EE2F adds the equipment aggregate, `+= 0.01 * gear * C[2]` and
+## `C[5]` respectively.
+##
+## EVERY CLASS RECORD IN RETAIL IS IDENTICAL -- C = [50, 50, 100, 20, 80, 100]
+## -- so the per-class table is a lever the shipped game does not pull, and the
+## coefficients reduce to the constants below. They are kept as named constants
+## rather than folded into the arithmetic so that a build which DOES vary them
+## has somewhere to put the numbers.
+##
+## `flt_8793720` is statically initialised in .data with exactly two xrefs, both
+## the reads above, and no writer was found -- so it is compiled in rather than
+## loaded from creature.pak or balance.bin. (An absence of xrefs cannot rule out
+## a memcpy through a computed pointer; recorded as the weaker claim.)
+##
+## WHICH TWO ATTRIBUTES. The struct's six u16 sit at +0x10..+0x1A and the
+## reads are +0x10 and +0x14, i.e. the FIRST and THIRD -- which in
+## `creature.pak`'s own order (STK, RES, GES, REPHY, REMAG, CHARISMA) are
+## Strength and Dexterity. The 20/80 split favouring Dexterity on defence is
+## what the game plays like, and is the corroboration rather than the source.
+const AT_STR := 0.5      ## C[0] * 0.01
+const AT_DEX := 0.5      ## C[1] * 0.01
+const AT_GEAR := 1.0     ## C[2] * 0.01
+const PA_STR := 0.2      ## C[3] * 0.01
+const PA_DEX := 0.8      ## C[4] * 0.01
+const PA_GEAR := 1.0     ## C[5] * 0.01
+
+
+## Base attack rating. `gear` is the aggregated equipment bonus (u16 at the
+## gear struct's +0x2C); zero for a bare creature.
+static func base_attack(strength: int, dexterity: int, gear: int = 0) -> float:
+	return maxf(0.0, AT_STR * float(strength) + AT_DEX * float(dexterity)
+		+ AT_GEAR * float(gear))
+
+
+## Base defence rating. `gear` is the equipment aggregate at the gear struct's
+## +0x2E. Dexterity carries four times the weight Strength does.
+static func base_defence(strength: int, dexterity: int, gear: int = 0) -> float:
+	return maxf(0.0, PA_STR * float(strength) + PA_DEX * float(dexterity)
+		+ PA_GEAR * float(gear))
+
+
+## One finished rating, as the two getters `sub_81FA5AA` (attack) and
+## `sub_81FA622` (defence) assemble it:
+##
+##     rating = base * multiplier * proz
+##
+## `multiplier` is the creature-struct's +0xE6 or +0xEA -- 1.0 before any skill
+## folds in, which is what a level-1 character with no weapon skill has.
+##
+## `proz` is `ProzAW[difficulty]` and applies ONLY to non-heroes: the getters
+## gate it on `type-id > 0x10`, and the eight playable classes are 1..9. Retail
+## ships [1.0, 1.5, 2.5, 4.5] for Silver / Gold / Platinum / Niob, so a monster
+## on Niob hits and blocks at four and a half times its own numbers.
+static func rating(base: float, multiplier: float = 1.0, proz: float = 1.0) -> float:
+	return maxf(0.0, base * multiplier * proz)

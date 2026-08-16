@@ -13,8 +13,17 @@ extends RefCounted
 ## to a Vectoren, a ScriptVM or an install path either -- the caller owns
 ## those, and this owns only what the player has actually done.
 
+## BIT INDICES, not values -- see set_var(). Quests 65 and 74 both set bit 1 on
+## entry and bit 3 on exit, and questcode.bin seeds its initial state the same
+## way. This class does NOT invent an enum: these are the file's own numbers,
+## named for readability and never used to reject an unfamiliar bit.
 const STATE_ACTIVE := 1
 const STATE_DONE := 3
+## Retail's array is 160 bits per difficulty (sub_83A436C caps `bit` at 0x9F),
+## and the whole of it is the 100-byte `0xCE` section of a .pax save -- five
+## difficulties x 160 bits. A bit past the end is a decode error, not a
+## variable, so it is refused rather than silently widening the mask.
+const BITS := 160
 
 ## One quest-book line, in the order the bytecode wrote it.
 ##   quest  the id the record itself carries
@@ -41,8 +50,21 @@ func quest_book(quest: int, kind: int, key: String) -> void:
 	lines.append({"quest": quest, "kind": kind, "key": key, "text": ""})
 
 
-func set_var(name: String, value: int) -> void:
-	_var[name] = value
+## SetVarBit's second argument is a BIT INDEX, not a value, so this ORs rather
+## than assigns. Measured: `Teleporter_WP` is written 26 times with indices
+## 0..12, one bit per waypoint, and assignment would keep only the last one.
+## Retail agrees -- `sub_83A43C2(stats, difficulty, bit, 1)` sets a single bit
+## in a 160-bit-per-difficulty array, and a variable whose name is not
+## `HeroQBit` ORs into a mask at its script object's +0x20.
+##
+## A quest's state is therefore a MASK, not a scalar: quest 65 sets bit 1 on
+## entry and bit 3 on exit, so a finished quest has both -- it was active AND
+## it is done. That distinction is invisible under assignment.
+func set_var(name: String, bit: int) -> void:
+	if bit < 0 or bit >= BITS:
+		push_warning("QuestLog: bit %d for %s is outside the %d-bit array" % [bit, name, BITS])
+		return
+	_var[name] = int(_var.get(name, 0)) | (1 << bit)
 
 
 ## SetQuestInfo's argument is 3 in every hook read so far and nothing says what
@@ -60,15 +82,18 @@ func autosave(_value: int) -> void:
 
 # --- queries -----------------------------------------------------------------
 
-## A quest's state, or -1 when the bytecode has never written one. The variable
-## is named for the quest id as a DECIMAL STRING, which is how the records
-## spell it: SetVarBit("74", 3).
+## A quest's state MASK, or 0 when the bytecode has never written one. The
+## variable is named for the quest id as a DECIMAL STRING, which is how the
+## records spell it: SetVarBit("74", 3) sets bit 3.
 func state_of(quest: int) -> int:
-	return _var.get(str(quest), -1)
+	return int(_var.get(str(quest), 0))
 
 
+## Started. Stays true after the quest finishes, because the bit stays set --
+## that is the file's own model, and is_running() is what asks the other
+## question.
 func is_active(quest: int) -> bool:
-	return state_of(quest) == STATE_ACTIVE
+	return (state_of(quest) & (1 << STATE_ACTIVE)) != 0
 
 
 ## Marks a quest started. Called by whatever runs OnEnter, never by the VM --
@@ -84,7 +109,7 @@ func is_running(quest: int) -> bool:
 
 
 func is_done(quest: int) -> bool:
-	return state_of(quest) == STATE_DONE
+	return (state_of(quest) & (1 << STATE_DONE)) != 0
 
 
 ## Every variable the bytecode has written, for a gate that wants to see the
@@ -95,20 +120,54 @@ func vars() -> Dictionary[String, int]:
 
 ## Fills in each line's `text` from a Sacred.Resources.
 ##
-## THE KEYS DO NOT RESOLVE, and that is a property of the shipped install
-## rather than of this code: `Res:HQ_7_4_1_Log_Title`, `..._Log_Header`,
-## `..._Log_Qstart` and `Res:HQ_Log_Qend` appear in funkcode.bin and in NO
-## other file in the install, so global.res has nothing to answer with. This
-## is the same gap as the 389 symbolic keys in credits.txt. Returns how many
-## resolved, so a caller can report the shortfall instead of showing a blank
-## quest book and calling it working.
+## THE KEYS RESOLVE. This used to say they did not -- "they appear in
+## funkcode.bin and in NO other file in the install, so global.res has nothing
+## to answer with" -- and that was wrong for the reason recorded in row 954:
+## the name hash was reimplemented in 64-bit and stopped matching retail's
+## wrapping int32 from the fifth character on, which is every symbolic key and
+## no numeric one. Quest 74 reads:
+##
+##   HQ_7_4_1_Log_Title   "The Soul of the Demon"
+##   HQ_7_4_1_Log_Header  "Kill the demon, after Shareefa has summoned it."
+##   HQ_7_4_1_Log_Qstart  "Shareefa told me that she would summon the demon..."
+##   HQ_Log_Qend          "Quest completed."
+##
+## A COMPOSED key -- `NAME+Var(X)+SUFFIX` -- is instantiated from this log's own
+## variables, which is the whole reason the substitution belongs here and not in
+## Sacred.Resources: the VM's state is what the key is missing.
+##
+## Returns how many resolved, so a caller reports the shortfall rather than
+## showing a blank quest book and calling it working.
 func resolve_with(res) -> int:
+	if res == null:
+		return 0
 	var got := 0
 	for l in lines:
 		var key: String = l["key"]
-		var bare := key.substr(4) if key.to_lower().begins_with("res:") else key
-		var text: String = res.by_id(-Sacred.Resources.name_hash(bare)) if res != null else ""
-		l["text"] = text
-		if text != "":
+		var text: String = res.resolve(key)
+		if text == key:
+			# Unresolved as written. If it is composed, substitute and retry.
+			text = _compose(res, key)
+		l["text"] = text if text != key else ""
+		if l["text"] != "":
 			got += 1
 	return got
+
+
+## One composed key, instantiated from this log's variables. `NAME+Var(X)+SUF`
+## takes X's value; an unknown variable yields "" rather than a guessed 0,
+## because index 0 is a real quest in every template measured.
+func _compose(res, key: String) -> String:
+	var bare := key.substr(4) if key.to_lower().begins_with("res:") else key
+	var open := bare.find("+")
+	if open < 0:
+		return key
+	var inner := bare.substr(open + 1, bare.rfind("+") - open - 1)
+	var lb := inner.find("(")
+	var rb := inner.rfind(")")
+	if lb < 0 or rb <= lb:
+		return key
+	var vname := inner.substr(lb + 1, rb - lb - 1)
+	if not _var.has(vname):
+		return key
+	return res.compose(bare, int(_var[vname]))

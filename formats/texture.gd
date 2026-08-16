@@ -41,12 +41,50 @@ static func slot_uv(n: int) -> Rect2:
 
 
 
+## texture.pak's two pixel formats. Everything else that appears to be a `kind`
+## is a misread offset, not a third format.
+const TYPE_ARGB4444 := 4     ## zlib, inflates to w*h*2
+const TYPE_RAW32 := 6        ## uncompressed, w*h*4, BGRA byte order
+
+
+## One raw 32-bit texture. Separate from decode_texture's body because it shares
+## none of it: no inflate, no channel expansion, and the size check is against
+## the ENTRY rather than an inflated length.
+static func _raw32(pak: Pak, id: int, w: int, h: int) -> Image:
+	var want := w * h * 4
+	var buf := pak.blob(id, 80 + want)
+	if buf.size() < 80 + want:
+		push_error("Sacred.decode_texture: id %d holds %d bytes, expected %d" % [
+			id, buf.size() - 80, want])
+		return null
+	# Godot has no BGRA8 format, so the swap is done here rather than by asking
+	# it for one. In place, on the slice, so this is one pass and no second copy.
+	var px := buf.slice(80, 80 + want)
+	var i := 0
+	while i < want:
+		var b := px[i]
+		px[i] = px[i + 2]
+		px[i + 2] = b
+		i += 4
+	return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, px)
+
+
 static func decode_texture(pak: Pak, id: int, render: bool = false) -> Image:
 	var buf := pak.blob(id, 80)
 	var w := buf.decode_u16(32)
 	var h := buf.decode_u16(34)
 	var kind := buf.decode_u8(36)
-	if kind != 4:
+	# TYPE 6 IS RAW 32-BIT, and it is not compressed at all. 233 of texture.pak's
+	# entries carry it, and they are exactly the ones a HUD needs: every
+	# GUI_CHAR_*, GUI_HERO_* and GUI_UW_* portrait is type 6, so a decoder that
+	# knows only type 4 can draw the whole world and none of the interface.
+	#
+	# The payload is exactly `w*h*4` bytes from +80 -- GUI_CHAR_01 is 256x256
+	# with a 262144-byte payload, FX_HORIZON 1024x128 with 524288 -- where type
+	# 4's is a zlib stream inflating to `w*h*2`.
+	if kind == TYPE_RAW32:
+		return _raw32(pak, id, w, h)
+	if kind != TYPE_ARGB4444:
 		push_error("Sacred.decode_texture: id %d has unsupported type %d" % [id, kind])
 		return null
 	var px := Common.inflate(buf.slice(80), w * h * 2)

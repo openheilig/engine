@@ -31,10 +31,12 @@ const WANT_QUESTS := 601
 const WANT_ENTER_RECORDS := 4
 const WANT_EXIT_RECORDS := 3
 const WANT_BOOK_LINES := 4          ## 3 written on entry, 1 on exit
-## NONE of the four resolve. See QuestLog.resolve_with: the keys appear in
-## funkcode.bin and in no other file in the install. Pinned at 0 so that an
-## install which DOES carry them is noticed rather than silently better.
-const WANT_RESOLVED := 0
+## ALL FOUR resolve, in English. This was pinned at 0 -- "the keys appear in
+## funkcode.bin and in no other file in the install" -- and that was an artefact
+## of a 64-bit name hash where retail's wraps at int32 (row 954). The quest is
+## "The Soul of the Demon"; its objective is "Kill the demon, after Shareefa
+## has summoned it."
+const WANT_RESOLVED := 4
 
 
 func _init() -> void:
@@ -108,7 +110,7 @@ func _run(vec, code: PackedByteArray) -> QuestLog:
 	# writes one. Quest 65 does write 1 on entry, so the corpus is not even
 	# self-consistent, which is exactly why "has it started" is the port's own
 	# flag and not a reading of the file.
-	expect(log.state_of(QUEST) == -1,
+	expect(log.state_of(QUEST) == 0,
 		"quest %d's OnEnter now writes state %d -- it wrote none when this was measured"
 			% [QUEST, log.state_of(QUEST)])
 	expect(log.is_running(QUEST), "the quest is not running after OnEnter")
@@ -167,7 +169,7 @@ func _refusal(vec, code: PackedByteArray) -> void:
 	expect(log.lines.is_empty(), "refused hooks wrote %d quest-book lines" % log.lines.size())
 
 
-## The log text does not resolve, and the check says so rather than hiding it.
+## The log text, which now resolves in English.
 func _resolution(install: String, log: QuestLog) -> void:
 	var res := Sacred.Resources.new(install.path_join("scripts/us/global.res"))
 	expect(res.count() > 0, "global.res did not load")
@@ -191,12 +193,23 @@ func _state_machine(vec, code: PackedByteArray) -> void:
 	var exit: Dictionary = vec.hook(Q, Sacred.Vectoren.H_ON_EXIT)
 	expect(vm.run(code, enter["offset"], enter["length"], log),
 		"quest %d OnEnter refused opcode %d" % [Q, vm.refused_op])
-	expect(log.state_of(Q) == QuestLog.STATE_ACTIVE,
-		"quest %d is state %d after OnEnter, expected %d" % [Q, log.state_of(Q), QuestLog.STATE_ACTIVE])
+	# STATE IS A MASK, not a scalar: SetVarBit's second argument is a bit index
+	# (measured -- Teleporter_WP takes 0..12, one bit per waypoint), so entry
+	# sets bit 1 and the variable reads 2.
+	expect(log.state_of(Q) == 1 << QuestLog.STATE_ACTIVE,
+		"quest %d is state %d after OnEnter, expected %d" % [
+			Q, log.state_of(Q), 1 << QuestLog.STATE_ACTIVE])
+	expect(log.is_active(Q), "quest %d does not read as active after OnEnter" % Q)
 	expect(vm.run(code, exit["offset"], exit["length"], log),
 		"quest %d OnExit refused opcode %d" % [Q, vm.refused_op])
-	expect(log.state_of(Q) == QuestLog.STATE_DONE,
-		"quest %d is state %d after OnExit, expected %d" % [Q, log.state_of(Q), QuestLog.STATE_DONE])
+	# BOTH bits, and that is the point of the mask: a finished quest was also
+	# once active. Assignment would have discarded that and read 8.
+	expect(log.state_of(Q) == (1 << QuestLog.STATE_ACTIVE) | (1 << QuestLog.STATE_DONE),
+		"quest %d is state %d after OnExit, expected %d" % [
+			Q, log.state_of(Q),
+			(1 << QuestLog.STATE_ACTIVE) | (1 << QuestLog.STATE_DONE)])
+	expect(log.is_done(Q) and log.is_active(Q),
+		"quest %d lost its active bit when it finished" % Q)
 	# The variable is keyed by the quest id AS A DECIMAL STRING, which is how
 	# the record spells it. A reader that keyed by int would pass every
 	# assertion above and fail this one.
