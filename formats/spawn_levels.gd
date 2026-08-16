@@ -32,11 +32,37 @@ extends RefCounted
 ## chooses between them, so band() returns the first and bands_of() returns all
 ## -- the ambiguity is exposed rather than resolved by a warning nobody reads.
 ##
-## WHAT THIS DOES NOT SAY: how a creature's level is drawn from the band, and
-## whether the same number is the level its SKILLS are known at. Both are
-## needed before the attack and defence ratings can be computed
-## (research/engine/combat-formulas.md), and neither is recovered -- so this
-## class returns the band and does not roll.
+## HOW THE BAND BECOMES A LEVEL -- and it is NOT a draw, which is the part
+## this file used to get wrong. Read off `sub_81806DC`, the only caller being
+## the creature spawn path `sub_8180B22`:
+##
+##     level = hero's own level                  (in a party, the highest)
+##     if band.lo and band.hi:
+##         lo = DiffLo[difficulty] + band.lo
+##         hi = DiffHi[difficulty] + band.hi
+##         if   level <  lo:  level = lo
+##         elif level <= hi:  level = level + rand()%2
+##         else:              level = hi
+##
+## SO THE BAND IS A CLAMP ON THE PLAYER'S LEVEL, not a range to sample. A
+## monster in a sector the player has outgrown is held at `hi`; one in a sector
+## above them is lifted to `lo`; in between it tracks the player and the ONLY
+## randomness in the whole rule is a single `rand()%2`, worth +0 or +1. That
+## is why Sacred's world feels level-scaled, and a port that rolled uniformly
+## across the band would get the difficulty curve wrong everywhere while still
+## producing levels inside the right range -- an error no range check catches.
+##
+## THE TWO DIFFICULTY TABLES ARE NOT READ. They live in the executable's data
+## at 0x8B89BA8 and 0x8B89DAC, not in any shipped file, and their values are
+## not recovered -- so level_for() takes them as arguments and defaults both to
+## zero, which is the identity and is presumably Silver. A caller that needs
+## Gold or Platinum must supply them rather than get a silently wrong number.
+##
+## STILL OPEN: whether this level is also the level at which the creature's
+## SKILLS are known. The skills feed the rating curve
+## (research/engine/combat-formulas.md) and `sub_81F596E` reads their levels
+## out of the creature struct rather than deriving them from the level, so the
+## link is not established here.
 
 const OP_SPAWN_VALUES := 100
 ## The first argument, constant across every record measured. Kept so a tree
@@ -154,3 +180,26 @@ func band_at_cell(cell: Vector2i) -> Vector2i:
 ## sectors; see band().
 func bands_of(cx: int, cy: int) -> Array:
 	return _all.get(key_of(cx, cy), [])
+
+
+## The level a creature spawns at, transcribed from sub_81806DC. See the class
+## doc: the band CLAMPS the hero's level, it is not sampled.
+##
+## `rng` is the caller's, because the +0..1 is a real random draw and a sim
+## that records and replays cannot have a hidden source. `band` of (-1,-1) --
+## what band() returns for a sector that declares none -- leaves the hero's
+## level untouched, which is retail's own `if (lo && hi)` guard.
+##
+## `diff_lo`/`diff_hi` are the two unrecovered difficulty tables; see the class
+## doc for why they are parameters rather than constants.
+static func level_for(hero_level: int, band: Vector2i, rng: RandomNumberGenerator,
+		diff_lo: int = 0, diff_hi: int = 0) -> int:
+	if band.x <= 0 or band.y <= 0:
+		return hero_level
+	var lo := diff_lo + band.x
+	var hi := diff_hi + band.y
+	if hero_level < lo:
+		return lo
+	if hero_level <= hi:
+		return hero_level + rng.randi_range(0, 1)
+	return hi

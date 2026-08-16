@@ -279,3 +279,31 @@ func set_yaw(radians: float) -> void:
 func set_shown(shown: bool) -> void:
 	if node != null:
 		node.visible = shown
+
+
+## THE HERO ANIMATES. Binds the clip Sacred.Rigs picks for this body and starts
+## it looping; returns false when the body has no clip, or the clip refuses to
+## bind, and leaves the rig in its rest pose rather than in a broken one.
+##
+## Why this is a call and not something the constructor does: the clip-to-rig
+## binding is measured, not certain (research row 609 -- some clips splay the
+## skeleton they bind to), so a caller must be able to build the hero and NOT
+## animate it. main.gd's `--noanim` is exactly that, and it makes a capture
+## pair differ in one variable, the same shape as `--creatures-noanim`.
+##
+## rig_placement.gd already exists to survive this: it re-applies the placement
+## pose AFTER the AnimationMixer writes, so animating does not undo update().
+func animate(models: Sacred.Models, rigs) -> bool:
+	var mv := node as ModelView
+	if mv == null or rigs == null:
+		return false
+	var ci: int = rigs.clip_for(model_index)
+	if ci < 0:
+		return false
+	return mv.play_clip(models, ci)
+
+
+## The clip index Sacred.Rigs picked for this body, and how well it scored.
+## Reported rather than trusted -- see Rigs.score_for.
+func clip_score(rigs) -> float:
+	return rigs.score_for(model_index) if rigs != null else 0.0

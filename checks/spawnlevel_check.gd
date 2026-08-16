@@ -104,3 +104,38 @@ func _starts(sl) -> void:
 	expect(float(lowest) / float(total) < 0.25,
 		"%d of %d sectors are the lowest band (%.1f%%) -- hitting it on five starts proves nothing"
 			% [lowest, total, 100.0 * lowest / total])
+
+	# THE CLAMP, and every branch of it. sub_81806DC does not sample the band:
+	# it clamps the HERO's level into it. Each assertion below breaks under a
+	# uniform draw, which would still produce levels inside the band and so
+	# would pass any range check.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 20260816
+	var band := Vector2i(10, 20)
+	# Below the band: lifted to lo, with no randomness at all.
+	for i in 64:
+		expect(Sacred.SpawnLevels.level_for(3, band, rng) == 10,
+			"a level-3 hero in a 10..20 sector does not meet a level-10 monster")
+	# Above the band: held at hi, again with no randomness.
+	for i in 64:
+		expect(Sacred.SpawnLevels.level_for(90, band, rng) == 20,
+			"a level-90 hero in a 10..20 sector does not meet a level-20 monster")
+	# Inside the band: TRACKS THE HERO, +0 or +1 and nothing else. This is the
+	# assertion a uniform draw fails hardest -- it would scatter across 10..20.
+	var seen := {}
+	for i in 512:
+		var lv := Sacred.SpawnLevels.level_for(15, band, rng)
+		expect(lv == 15 or lv == 16, "a level-15 hero inside the band met level %d" % lv)
+		seen[lv] = true
+	expect(seen.size() == 2, "the +0/+1 draw only ever produced %d value(s)" % seen.size())
+	# A sector with no band leaves the hero's level alone, which is retail's
+	# own `if (lo && hi)` guard rather than a convenience.
+	expect(Sacred.SpawnLevels.level_for(15, Vector2i(-1, -1), rng) == 15,
+		"an unbanded sector changed the level")
+	# The Seraphim's own start, with the retail starting level: band (1,4) and a
+	# level-1 hero, so the first monster she meets is level 1 or 2.
+	var start_band: Vector2i = sl.band(STARTS_LOW[0].x, STARTS_LOW[0].y)
+	var first := Sacred.SpawnLevels.level_for(1, start_band, rng)
+	expect(first == 1 or first == 2,
+		"a new Seraphim's first monster is level %d, expected 1 or 2" % first)
+	print("spawnlevel_check\tclamp OK\tstart_band=%s\tfirst_monster_level=%d" % [start_band, first])

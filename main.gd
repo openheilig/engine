@@ -80,6 +80,28 @@ var _retail_start := Vector2i(-1, -1)
 ## quest 74, all at START_CLASS's own start. Built once the player exists, and
 ## null in the fixed-region and probe modes, which spawn no player.
 var _encounter: Encounter = null
+## THE HERO'S ANIMATION, which is the difference between a character and a
+## statue. Sacred.Rigs picks the clip by bone geometry -- the same instrument
+## --creatures uses -- and PlayerView.animate refuses rather than approximating
+## when the pick does not bind.
+##
+## THE SCORE IS PRINTED, not trusted. Rigs.clip_for is a MEASUREMENT (row 609
+## found clips that splay the rig they bind to), so the fact line carries the
+## agreement fraction and --noanim turns the whole thing off.
+func _animate_hero(models: Sacred.Models) -> void:
+	if _player_view == null or _player_view.node == null:
+		return
+	if not _animate_player:
+		print("hero_anim\tskipped\treason=--noanim")
+		return
+	var want := PackedInt32Array([_player_view.model_index])
+	var rigs := Sacred.Rigs.new(models, want)
+	var ok := _player_view.animate(models, rigs)
+	print("hero_anim\tmodel=%s\tclip=%d\tscore=%.3f\tplaying=%s" % [
+		_player_model, rigs.clip_for(_player_view.model_index),
+		_player_view.clip_score(rigs), ok])
+
+
 ## --fight=N resolves the encounter headlessly, N swings at most, so the whole
 ## loop is demonstrable in a run that exits. <= 0 leaves the hostile alone.
 var _fight_swings := 0
@@ -214,6 +236,8 @@ var _show_player := true   ## --noplayer: suppress building the player view enti
 ## chasing the player while nothing player-shaped reaches the frame, which
 ## only PlayerView.set_shown(false) on an otherwise-normal player gives.
 var _hide_player_mesh := false
+## --noanim: build the hero but leave it in its rest pose. See the flag parse.
+var _animate_player := true
 
 # Plan 05-08: crowd benchmark. Opt-in only -- _has_crowd stays false unless
 # --crowd= is literally present, so a bare "0" or a negative value still
@@ -272,6 +296,11 @@ func _ready() -> void:
 	var objects := not ("--noobjects" in argv)
 	_show_player = not ("--noplayer" in argv)
 	_hide_player_mesh = "--hideplayer" in argv
+	# --noanim builds the identical hero rig and SKIPS the clip, so a capture
+	# pair differs in exactly one variable. Same shape as --creatures-noanim,
+	# and it exists because the clip-to-rig binding is MEASURED rather than
+	# certain (row 609): a body whose clip splays it must still be drawable.
+	_animate_player = not ("--noanim" in argv)
 	var force_interior := "--force-interior" in argv
 	for a in argv:
 		if a.begins_with("--walk-route="):
@@ -586,6 +615,7 @@ func _ready() -> void:
 							_player_model, _player_view.model_index,
 							_player_view.vertex_count, _player_view.triangle_count])
 						_dress_player(install, Sacred.Models.new(models_pak), items)
+						_animate_hero(Sacred.Models.new(models_pak))
 			if _show_player or _show_creatures or _show_npcs:
 				_ensure_rig_light()
 			if _show_creatures and models_pak.is_open():
@@ -1554,6 +1584,7 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 					_player_model, _player_view.model_index,
 					_player_view.vertex_count, _player_view.triangle_count])
 				_dress_player(install, Sacred.Models.new(models_pak), items)
+				_animate_hero(Sacred.Models.new(models_pak))
 
 	# Plan 04-02: the sliding path window and its one scripted goal request,
 	# derived from the ACTUAL spawn component -- never a hardcoded cell, so

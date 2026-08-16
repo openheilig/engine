@@ -42,14 +42,34 @@ const FOE_PLACE := "monster107"
 const GIVER_PLACE := "auftrag107"
 const HERO_CLASS := 1           ## Held, the faction matrix's own enum
 
-## ponytail: PLACEHOLDER STATS, every one. Sized only so neither side is
-## certain to win: at equal ratings the recovered formula returns exactly 50.
-## The upgrade path is balance.bin plus the creature-struct offsets named in
-## combat-formulas.md's `## Open`, not a different number here.
+## THE LEVELS ARE NO LONGER INVENTED. The hero's is read from retail's own
+## new-game character (`templates/hero01.ptx`, row 955) and the hostile's from
+## the clamp `Sacred.SpawnLevels.level_for` transcribes (row 956), applied to
+## the start sector's own band. The constants here are only the fallback for an
+## install missing those files.
+const HERO_LEVEL_FALLBACK := 1
+const FOE_LEVEL_FALLBACK := 1
+## Retail's Seraphim, picked by CharacterType rather than by filename: type 1
+## is Seraphim in the executable's class table (sub_815B3A2) and in global.res's
+## slot list, independently. See Sacred.Hero.
+const HERO_TYPE := 1
+const TEMPLATES := 8
+
+## ponytail: THE TWO RATINGS ARE STILL PLACEHOLDERS -- but it is now possible
+## to say exactly WHY, which is the difference between a gap and an excuse.
+##
+## `sub_81F596E` accumulates attack and defence at creature-struct +0xE6 and
+## +0xEA, both initialised to 1.0 by cCreatureHero::CalcResults, and each of
+## the eight skill slots multiplies in through the recovered curve
+## (Combat.skill_rating). A rating is therefore `base x product of skill
+## curves`, and it is the BASE that is unrecovered.
+##
+## For THIS encounter the base is not merely half the answer, it is all of it:
+## a new Seraphim knows Magic Lore and Weapon Lore, balance families MK and WK,
+## and neither carries an AW or a VW triplet. At level 1 no skill she has feeds
+## either rating, so both are entirely base.
 const HERO_AT := 120
-const HERO_LEVEL := 5
 const FOE_PA := 100
-const FOE_LEVEL := 4
 const FOE_HP := 40
 ## The kernel applied to a real attribute, reported so the difference between
 ## "read" and "invented" is visible in the status line rather than only in a
@@ -61,6 +81,14 @@ const FOE_KERNEL_ATTR := 2      ## Creatures.B_GES
 const HERO_DAMAGE := 7
 
 var found := false
+## Read from retail, not chosen. hero_level is the template's; foe_level is the
+## band clamp applied to it; band is the start sector's own.
+var hero_level := HERO_LEVEL_FALLBACK
+var foe_level := FOE_LEVEL_FALLBACK
+var band := Vector2i(-1, -1)
+var hero_class := ""            ## the class name global.res gives HERO_TYPE
+var hero_skills: Array[Dictionary] = []
+var hero_attrs := PackedInt32Array()
 var foe_id: int = 0             ## ActorRegistry id, 0 when nothing spawned
 var foe_cell := Vector2i(-1, -1)
 var foe_body := ""              ## the .GRN the hostile wears
@@ -101,10 +129,12 @@ func _init(install: String, registry: ActorRegistry, items, creatures, factions)
 	log = QuestLog.new()
 	title = _vec.title_of(QUEST)
 	_registry = registry
+	_read_hero(install)
 
 	# The hostile, found by the NAME retail gave its position rather than by a
 	# cell typed here. If the label ever moves, this finds it at its new cell.
 	var sc := Sacred.Startcode.new(dir)
+	_read_level(install, sc)
 	for n in sc.npcs:
 		if n["place"] == GIVER_PLACE:
 			giver_cell = n["cell"]
@@ -118,7 +148,7 @@ func _init(install: String, registry: ActorRegistry, items, creatures, factions)
 		if creatures != null:
 			foe_class = creatures.class_of(n["body"])
 			foe_base = creatures.base_all(n["body"])
-			foe_exp = creatures.experience(n["body"], FOE_LEVEL)
+			foe_exp = creatures.experience(n["body"], foe_level)
 			foe_speed = creatures.speed(n["body"])
 		if factions != null and foe_class != 0:
 			hostile = factions.hostile(HERO_CLASS, foe_class)
@@ -127,6 +157,46 @@ func _init(install: String, registry: ActorRegistry, items, creatures, factions)
 				FOE_HP, FOE_HP)
 		break
 	found = foe_cell.x >= 0
+
+
+## The hero retail would hand a new game. The eight templates are scanned for
+## the one whose CharacterType is HERO_TYPE rather than a filename being
+## assumed: `hero01.ptx` happens to be the Seraphim, but the file ORDER and the
+## type enum are two different things and only the enum is documented.
+func _read_hero(install: String) -> void:
+	for i in TEMPLATES:
+		var path := install.path_join("templates/hero%02d.ptx" % i)
+		if not FileAccess.file_exists(path):
+			continue
+		var h = Sacred.Hero.new(path)
+		if not h.found or h.character_type != HERO_TYPE:
+			continue
+		hero_level = h.level
+		hero_skills = h.skills()
+		hero_attrs = h.attributes()
+		var res = Sacred.Resources.new(install.path_join("scripts/us/global.res"))
+		hero_class = res.slot(h.class_slot())
+		return
+	push_warning("Encounter: no template carries CharacterType %d" % HERO_TYPE)
+
+
+## The hostile's level, which retail derives from the HERO's level clamped into
+## the start sector's band -- not sampled from it. See
+## Sacred.SpawnLevels.level_for.
+##
+## The draw is seeded from the quest id so the demo is reproducible; a live
+## game passes its own generator, which is why level_for takes one.
+func _read_level(install: String, sc) -> void:
+	var cell: Vector2i = sc.start_cell
+	if cell.x < 0:
+		return
+	var sl = Sacred.SpawnLevels.new(install.path_join(TREE))
+	if not sl.found:
+		return
+	band = sl.band_at_cell(cell)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = QUEST
+	foe_level = Sacred.SpawnLevels.level_for(hero_level, band, rng)
 
 
 ## Opens the quest by running its OWN OnEnter bytecode. False when the hook
@@ -154,7 +224,7 @@ func strike(rng: RandomNumberGenerator) -> Dictionary:
 	var foe := _registry.get_actor(foe_id)
 	if foe == null or foe.hp <= 0:
 		return out
-	var r := Combat.resolve(HERO_AT, FOE_PA, HERO_LEVEL, FOE_LEVEL, rng)
+	var r := Combat.resolve(HERO_AT, FOE_PA, hero_level, foe_level, rng)
 	_attacks += 1
 	out["hit"] = r["hit"]
 	out["roll"] = r["roll"]
@@ -191,7 +261,9 @@ func foe_hp() -> int:
 
 ## One tab-separated status line, in the shape main.gd's other fact lines use.
 func status_line() -> String:
-	return "encounter\tquest=%d\ttitle=%s\tnpc=%s@%d,%d\tfoe=%s@%d,%d\tclass=%d\thostile=%s\thp=%d\tswings=%d\thits=%d\tlines=%d\tdone=%s" % [
+	return "encounter\thero=%s\tlvl=%d\tskills=%s\tband=%s\tfoe_lvl=%d\n" % [
+		hero_class, hero_level, hero_skills, band, foe_level] \
+		+ "encounter\tquest=%d\ttitle=%s\tnpc=%s@%d,%d\tfoe=%s@%d,%d\tclass=%d\thostile=%s\thp=%d\tswings=%d\thits=%d\tlines=%d\tdone=%s" % [
 		QUEST, title, giver_body, giver_cell.x, giver_cell.y,
 		foe_body, foe_cell.x, foe_cell.y, foe_class, hostile,
 		foe_hp(), _attacks, _hits, log.lines.size() if log != null else 0, is_complete()] \
