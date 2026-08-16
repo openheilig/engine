@@ -86,3 +86,44 @@ static func resolve(at: int, pa: int, alvl: int, dlvl: int,
 ## points still hold.
 static func stat_kernel(attr: float, bal_stat_off: float = BAL_STAT_OFF) -> float:
 	return (STAT_SPAN - bal_stat_off) * attr / STAT_SPAN + bal_stat_off + 9.0
+
+
+## THE ATTACK AND DEFENCE RATINGS, and the answer is that no BASE ATTRIBUTE
+## becomes either of them. They accumulate from SKILL LEVELS.
+##
+## Read off `sub_81F596E`, the creature stat builder: it dispatches on skill
+## TYPE through a jump table and, for each skill the creature has, feeds that
+## skill's LEVEL into this one shared curve twice, once per balance triplet of
+## the skill's family. Case 8 (Agility, family `W`) computes AW from
+## WoffAW/W__sAW/W__wAW and VW from WoffVW/W__sVW/W__wVW off the SAME level;
+## case 3 (Long-handled Weapons, family `STK`) computes AW and then SP, so the
+## second output's meaning is per-family rather than fixed.
+##
+## `sub_81F55B0`, verbatim:
+##
+##     f(off, S, s, w):
+##         if S < 1: return 0
+##         v = (1 - 1/((S-1)/s + 1)) * (w - off)
+##         return off + 2*v
+##
+## A saturating curve in the skill level: f(1) = off, and f rises towards
+## off + 2*(w - off) without reaching it. `s` is the half-way scale.
+##
+## WHICH SKILLS. Ten balance families carry an AW triplet -- STK Long-handled
+## Weapons, SK Sword Lore, AK Axe Lore, KK Blade Combat, FK Unarmed Combat,
+## BK Dual Wielding, FEK Ranged Combat, W Agility, HR Constitution, and WT
+## which no skill maps to. Exactly TWO carry a VW triplet: W Agility and
+## HP Constitution. So defence comes from Agility and Constitution and from
+## nothing else, and attack comes from the weapon skill in use plus Agility and
+## Constitution.
+##
+## `VWFakBoss` (2.0) and `VWFakChamp` (1.5) multiply the defence rating; they
+## are in the same table and are not applied here, because what marks a
+## creature boss or champion is not recovered.
+static func skill_rating(off: float, level: float, s: float, w: float) -> float:
+	# Retail's own guard, and it is a floor rather than a clamp: an untrained
+	# skill contributes NOTHING, not `off`.
+	if level < 1.0:
+		return 0.0
+	var v := (1.0 - 1.0 / ((level - 1.0) / s + 1.0)) * (w - off)
+	return off + v + v

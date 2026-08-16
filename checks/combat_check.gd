@@ -30,6 +30,7 @@ func _init() -> void:
 	_strictness()
 	_determinism()
 	_kernel()
+	_ratings()
 	print("combat_check OK to_hit(100,100,10,10)=%d floor=%d ceiling=%d" % [
 		Combat.to_hit(100, 100, 10, 10),
 		Combat.to_hit(1, 10000, 1, 10000),
@@ -138,3 +139,68 @@ func _kernel() -> void:
 		var v := Combat.stat_kernel(s2)
 		expect(v > prev, "the kernel fell from %.3f to %.3f" % [prev, v])
 		prev = v
+
+
+## THE RATING CURVE and the balance triplets that feed it.
+##
+## The load-bearing assertion is the LAST one: exactly two families carry a VW
+## triplet. That is the whole answer to "which attribute becomes PA" -- none
+## does, and defence comes from Agility and Constitution. If a future edit
+## added a family to VW because it looked symmetric with AW, this fails.
+func _ratings() -> void:
+	# Algebra first, independent of any file. f(1) = off for every triplet,
+	# because the (S-1) term vanishes -- a curve that returned `off` for S < 1
+	# too would pass every rate check and fail this pair.
+	for off in [4.0, 7.0, 13.0]:
+		expect(absf(Combat.skill_rating(off, 1.0, 50.0, 200.0) - off) < 1e-4,
+			"f(1) with off %.1f is %.4f, expected %.1f" % [off, Combat.skill_rating(off, 1.0, 50.0, 200.0), off])
+		expect(Combat.skill_rating(off, 0.99, 50.0, 200.0) == 0.0,
+			"an untrained skill returns %.4f, expected 0" % Combat.skill_rating(off, 0.99, 50.0, 200.0))
+	# Saturating and monotone, approaching off + 2*(w-off) without reaching it.
+	var off2 := 13.0
+	var w2 := 225.0
+	var ceiling := off2 + 2.0 * (w2 - off2)
+	var prev := -1.0
+	for lv in [1.0, 2.0, 10.0, 50.0, 200.0, 5000.0]:
+		var v := Combat.skill_rating(off2, lv, 50.0, w2)
+		expect(v > prev, "the rating fell from %.3f to %.3f" % [prev, v])
+		expect(v < ceiling, "the rating reached %.3f, at or past its %.3f ceiling" % [v, ceiling])
+		prev = v
+	# At the half-way scale the curve is exactly half of its own span.
+	expect(absf(Combat.skill_rating(off2, 1.0 + 50.0, 50.0, w2) - (off2 + (w2 - off2))) < 1e-3,
+		"f(1+s) is not off + (w-off)")
+
+	# Now the file. The triplets must actually be there and be ordered off < w,
+	# or the offsets in Sacred.Balance name the wrong slots.
+	var install := Sacred.find_install()
+	var bal = Sacred.Balance.new(install)
+	expect(bal.found, "bin/balance.bin did not load")
+	for fam in bal.families(Sacred.Balance.AW):
+		var t: Vector3 = bal.triplet(Sacred.Balance.AW, fam)
+		expect(t.x > 0.0 and t.z > t.x,
+			"AW triplet %s is %s, expected 0 < off < w" % [fam, t])
+		expect(t.y > 0.0, "AW triplet %s has a zero scale" % fam)
+	for fam in bal.families(Sacred.Balance.VW):
+		var t: Vector3 = bal.triplet(Sacred.Balance.VW, fam)
+		expect(t.x > 0.0 and t.z > t.x,
+			"VW triplet %s is %s, expected 0 < off < w" % [fam, t])
+	# Named values, so a shifted offset is caught by a number a human can check
+	# against the key map rather than by a range.
+	var w_aw: Vector3 = bal.triplet(Sacred.Balance.AW, "W")
+	var w_vw: Vector3 = bal.triplet(Sacred.Balance.VW, "W")
+	expect(w_aw.is_equal_approx(Vector3(7.0, 50.0, 125.0)),
+		"WoffAW/W__sAW/W__wAW is %s, expected (7, 50, 125)" % w_aw)
+	expect(w_vw.is_equal_approx(Vector3(13.0, 50.0, 225.0)),
+		"WoffVW/W__sVW/W__wVW is %s, expected (13, 50, 225)" % w_vw)
+	expect(absf(bal.f32(Sacred.Balance.VW_FAK_BOSS) - 2.0) < 1e-4, "VWFakBoss is not 2.0")
+	expect(absf(bal.f32(Sacred.Balance.BAL_STAT_OFF) - Combat.BAL_STAT_OFF) < 1e-4,
+		"balance.bin BalStatOff disagrees with the constant Combat ships")
+
+	# THE FINDING. Ten families have an attack rating; exactly TWO have a
+	# defence rating. Defence is Agility and Constitution, and nothing else.
+	expect(Sacred.Balance.AW.size() == 9,
+		"AW families moved: %d, expected 9 that map to a skill" % Sacred.Balance.AW.size())
+	expect(Sacred.Balance.VW.size() == 2,
+		"VW families moved: %d, expected 2 (Agility and Constitution)" % Sacred.Balance.VW.size())
+	expect(Sacred.Balance.VW.has("W") and Sacred.Balance.VW.has("HP"),
+		"the two VW families are no longer Agility and Constitution")

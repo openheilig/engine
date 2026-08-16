@@ -65,6 +65,7 @@ const Wpmod := preload("res://formats/wpmod.gd")
 const Equipment := preload("res://formats/equipment.gd")
 const Sets := preload("res://formats/sets.gd")
 const Vectoren := preload("res://formats/vectoren.gd")
+const Balance := preload("res://formats/balance.gd")
 const Resources := preload("res://formats/resources.gd")
 
 
