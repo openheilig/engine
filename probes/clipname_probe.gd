@@ -16,7 +16,7 @@ func _init() -> void:
 	var clips := 0
 	var named := 0
 	for e in pak.count():
-		if not models.is_motion(e):
+		if models.kind_of(e) != 65:
 			continue
 		clips += 1
 		var nm := models.entry_name(e).to_upper()

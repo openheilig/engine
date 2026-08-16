@@ -297,7 +297,14 @@ func animate(models: Sacred.Models, rigs) -> bool:
 	var mv := node as ModelView
 	if mv == null or rigs == null:
 		return false
-	var ci: int = rigs.clip_for(model_index)
+	# THE RESTING CLIP, not the best-scoring one. Sacred.Rigs picks a mesh's
+	# clip by bone geometry, which answers "whose skeleton is this" and says
+	# nothing about what the clip DOES -- and for several bodies the highest
+	# scorer is an attack, so a hero standing in a meadow swung a sword on a
+	# loop. rest_clip() prefers IDLE, then its fidget variant, then WALK, and
+	# falls back to the overall best so a mesh with no resting clip still
+	# animates rather than freezing.
+	var ci: int = rigs.rest_clip(model_index)
 	if ci < 0:
 		return false
 	return mv.play_clip(models, ci)

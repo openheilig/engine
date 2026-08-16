@@ -36,9 +36,35 @@ const MIN_MATCHED := 20
 ## character pairs 0.04.
 const MIN_SCORE := 0.5
 const CACHE := "user://rigmap.tsv"
+## Bumped when the cache LAYOUT changes, so an older file is discarded rather
+## than half-read. v2 adds the per-action rows.
+const CACHE_VERSION := 2
+
+## THE ACTION IS IN THE CLIP'S NAME, even though the CHARACTER is not.
+##
+## That asymmetry is the whole reason this class exists: `UPI1_WALK_BH.GRN`
+## belongs to `UPIRATE_01.GRN`, so the character prefix is unreliable and has to
+## be measured geometrically. The ACTION half is a different question and the
+## corpus answers it plainly -- censused over all 3421 clips
+## (probes/clipname_probe.gd), the underscore-separated tokens are led by
+## ATTACK 989, IDLE 379, RUN 250, WALK 245, DYING 236, DEFEND 234, SPECIAL 225,
+## CAST 203, HIT 154 and FIDLE 133.
+##
+## Order matters: the first token that appears in a name wins, so the more
+## specific names are listed before the ones they contain.
+const ACTIONS: PackedStringArray = [
+	"FIDLE", "IDLE", "WALK", "RUN", "ATTACK", "DEFEND", "CAST", "DYING",
+	"HIT", "STAB", "TALK", "SPECIAL", "ACTIVATE", "DEACTIVATE",
+]
+## What a standing character should play. IDLE first, then its fidget variant,
+## then walking -- never ATTACK, which is what "best geometric score" happened
+## to pick for some bodies.
+const REST_ACTIONS: PackedStringArray = ["IDLE", "FIDLE", "WALK"]
 
 var _clip: Dictionary[int, int] = {}
 var _score: Dictionary[int, float] = {}
+## mesh entry -> {ACTION: clip entry}. Only actions the mesh actually has.
+var _by_action: Dictionary[int, Dictionary] = {}
 var _pak_size := 0
 var resolved := 0
 var computed := 0
@@ -83,6 +109,9 @@ func _compute(models: Models, todo: PackedInt32Array) -> void:
 			if nm != "" and not d.has(nm):
 				d[nm] = (b["rest"] as Transform3D).origin
 		mesh_local.append(d)
+	var by_action: Array[Dictionary] = []
+	for i in todo.size():
+		by_action.append({})
 	var best := PackedInt32Array()
 	var best_score := PackedFloat32Array()
 	best.resize(todo.size())
@@ -121,8 +150,25 @@ func _compute(models: Models, todo: PackedInt32Array) -> void:
 			if f > best_score[i]:
 				best_score[i] = f
 				best[i] = ci
+			# PER-ACTION best, kept alongside the overall best so a standing
+			# character can be given an idle rather than whatever happened to
+			# score highest. Same threshold: a clip that is not confidently
+			# this character's is not this character's idle either.
+			if f >= MIN_SCORE:
+				var act := action_of(models.entry_name(ci))
+				if act != "":
+					var m: Dictionary = by_action[i]
+					if f > float(m.get(act + ":s", -1.0)):
+						m[act] = ci
+						m[act + ":s"] = f
 	for i in todo.size():
 		computed += 1
+		var m: Dictionary = by_action[i]
+		var clean: Dictionary = {}
+		for k in m:
+			if not (k as String).ends_with(":s"):
+				clean[k] = m[k]
+		_by_action[todo[i]] = clean
 		if best_score[i] >= MIN_SCORE:
 			_clip[todo[i]] = best[i]
 			_score[todo[i]] = best_score[i]
@@ -139,20 +185,66 @@ func _load_cache() -> void:
 	# The header pins the cache to one models.pak. A different install, or
 	# a patched one, invalidates the whole file rather than mixing entries
 	# from two corpora whose entry numbers do not mean the same thing.
-	if f.get_line() != "models.pak\t%d" % _pak_size:
+	if f.get_line() != "models.pak\t%d\tv%d" % [_pak_size, CACHE_VERSION]:
 		return
 	while not f.eof_reached():
 		var parts := f.get_line().split("\t")
-		if parts.size() != 3:
-			continue
-		_clip[int(parts[0])] = int(parts[1])
-		_score[int(parts[0])] = float(parts[2])
+		if parts.size() == 3:
+			_clip[int(parts[0])] = int(parts[1])
+			_score[int(parts[0])] = float(parts[2])
+		elif parts.size() == 4 and parts[0] == "a":
+			# a<TAB>mesh<TAB>ACTION<TAB>clip
+			var e := int(parts[1])
+			if not _by_action.has(e):
+				_by_action[e] = {}
+			(_by_action[e] as Dictionary)[parts[2]] = int(parts[3])
 
 func _save_cache() -> void:
 	var f := FileAccess.open(CACHE, FileAccess.WRITE)
 	if f == null:
 		push_warning("Rigs: cannot write %s -- recomputing on every launch" % CACHE)
 		return
-	f.store_line("models.pak\t%d" % _pak_size)
+	f.store_line("models.pak\t%d\tv%d" % [_pak_size, CACHE_VERSION])
 	for e: int in _clip:
 		f.store_line("%d\t%d\t%f" % [e, _clip[e], _score.get(e, 0.0)])
+	for e: int in _by_action:
+		for act: String in _by_action[e]:
+			f.store_line("a\t%d\t%s\t%d" % [e, act, (_by_action[e] as Dictionary)[act]])
+
+
+## The ACTION a clip's name encodes, or "" when it names none. See ACTIONS for
+## why the action is readable from the name while the character is not.
+static func action_of(clip_name: String) -> String:
+	var up := clip_name.to_upper()
+	for a in ACTIONS:
+		if up.find(a) >= 0:
+			return a
+	return ""
+
+
+## This mesh's clip for one action, or -1. Only clips that already passed the
+## geometric threshold are candidates, so an action this character has no clip
+## for comes back -1 rather than borrowing another character's.
+func clip_for_action(model_entry: int, action: String) -> int:
+	var m: Dictionary = _by_action.get(model_entry, {})
+	return int(m.get(action, -1))
+
+
+## Every action this mesh has a clip for, sorted.
+func actions_of(model_entry: int) -> PackedStringArray:
+	var out := PackedStringArray()
+	for k in _by_action.get(model_entry, {}):
+		out.append(k)
+	out.sort()
+	return out
+
+
+## What a standing character should play: its idle, or the nearest thing it
+## has. Falls back to clip_for() -- the overall best -- so a mesh with no
+## resting clip still animates rather than freezing.
+func rest_clip(model_entry: int) -> int:
+	for a in REST_ACTIONS:
+		var c := clip_for_action(model_entry, a)
+		if c >= 0:
+			return c
+	return clip_for(model_entry)

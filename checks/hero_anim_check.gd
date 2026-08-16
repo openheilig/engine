@@ -38,7 +38,15 @@ extends "res://checks/check.gd"
 ## reaches its constants without instancing the scene root.
 const Main := preload("res://main.gd")
 const AT_BIND := 0.02        ## radians, for "has this bone moved at all"
-const MIN_MOVED := 0.25      ## fraction of bones a real clip must move
+## Fraction of bones a real clip must move at its most animated frame.
+##
+## 0.10, and the number changed when the hero stopped playing whatever scored
+## highest and started playing its IDLE. An idle moves far fewer bones than a
+## walk or an attack -- measured 22..31% across the five bodies, against the
+## 35..86% the best-scoring clips gave. What this assertion protects against is
+## a binder that silently does NOTHING, and that regime is 0%, so the bound
+## belongs between 0 and 22 rather than just under the old numbers.
+const MIN_MOVED := 0.10
 ## Largest allowed bone displacement as a fraction of the rig's own rest
 ## extent. The collapse regime measured 0.77; a working clip sits far below.
 const SPLAY_MAX := 0.40
@@ -77,6 +85,16 @@ func _init() -> void:
 		var want := PackedInt32Array([pv.model_index])
 		var rigs = Sacred.Rigs.new(models, want)
 		var ok := pv.animate(models, rigs)
+		# THE CLIP MUST BE A RESTING ONE. A standing hero playing an attack on
+		# a loop is the failure this replaced, and it passes every other
+		# assertion here -- it binds, it moves bones, it does not splay.
+		var acts: PackedStringArray = rigs.actions_of(pv.model_index)
+		var chosen := rigs.rest_clip(pv.model_index)
+		var chosen_act := Sacred.Rigs.action_of(models.entry_name(chosen)) if chosen >= 0 else ""
+		if acts.has("IDLE") or acts.has("FIDLE") or acts.has("WALK"):
+			expect(Sacred.Rigs.REST_ACTIONS.has(chosen_act),
+				"%s stands playing a %s clip, expected one of %s" % [
+					mesh, chosen_act, Sacred.Rigs.REST_ACTIONS])
 		var mv := pv.node as ModelView
 		if not ok:
 			rows.append("%s\tclip=%d\trefused" % [mesh, rigs.clip_for(pv.model_index)])
@@ -104,9 +122,9 @@ func _init() -> void:
 		expect(splay <= SPLAY_MAX,
 			"%s displaces a bone by %.0f%% of its own extent -- the rig is splaying" % [
 				mesh, 100.0 * splay])
-		rows.append("%s\tclip=%d\tscore=%.3f\tlen=%.2fs\tmoved=%.0f%%\tsplay=%.0f%%\tbind_off=%.3frad" % [
-			mesh, rigs.clip_for(pv.model_index), pv.clip_score(rigs),
-			mv.anim_length, 100.0 * moved, 100.0 * splay, off0])
+		rows.append("%s\tclip=%d\taction=%s\tscore=%.3f\tlen=%.2fs\tmoved=%.0f%%\tsplay=%.0f%%\tbind_off=%.3frad\thas=%s" % [
+			mesh, chosen, chosen_act, pv.clip_score(rigs),
+			mv.anim_length, 100.0 * moved, 100.0 * splay, off0, acts])
 
 	for r in rows:
 		print(r)

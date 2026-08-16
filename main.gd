@@ -238,6 +238,11 @@ var _show_player := true   ## --noplayer: suppress building the player view enti
 var _hide_player_mesh := false
 ## --noanim: build the hero but leave it in its rest pose. See the flag parse.
 var _animate_player := true
+## --nohud suppresses the taskbar. Every capture runbook that asserts an md5 of
+## the world needs the interface out of the frame, and the HUD covers the
+## bottom 92 rows of it.
+var _show_hud := true
+var _hud: Hud = null
 
 # Plan 05-08: crowd benchmark. Opt-in only -- _has_crowd stays false unless
 # --crowd= is literally present, so a bare "0" or a negative value still
@@ -301,6 +306,7 @@ func _ready() -> void:
 	# and it exists because the clip-to-rig binding is MEASURED rather than
 	# certain (row 609): a body whose clip splays it must still be drawable.
 	_animate_player = not ("--noanim" in argv)
+	_show_hud = not ("--nohud" in argv)
 	var force_interior := "--force-interior" in argv
 	for a in argv:
 		if a.begins_with("--walk-route="):
@@ -616,6 +622,7 @@ func _ready() -> void:
 							_player_view.vertex_count, _player_view.triangle_count])
 						_dress_player(install, Sacred.Models.new(models_pak), items)
 						_animate_hero(Sacred.Models.new(models_pak))
+			_build_hud(tex_pak)
 			if _show_player or _show_creatures or _show_npcs:
 				_ensure_rig_light()
 			if _show_creatures and models_pak.is_open():
@@ -3420,3 +3427,25 @@ func _reframe(view: Node3D, mesh_node: MeshInstance3D, yaw_deg: float) -> void:
 		key.light_energy = 2.2
 		key.transform = inv * Transform3D(Basis(), centre).looking_at(
 			centre - dir + Vector3.UP * 0.35, Vector3.UP)
+
+
+## RETAIL'S TASKBAR. Built from texture.pak at the coordinates recovered from
+## cUI_Taskbar2 -- see view/hud.gd. Skipped under --nohud, which every capture
+## runbook that md5s the world wants, because the bar covers the bottom 92 rows
+## of a 768-row frame.
+func _build_hud(tex_pak) -> void:
+	if not _show_hud or tex_pak == null:
+		return
+	_hud = Hud.new(tex_pak)
+	add_child(_hud)
+	if _encounter != null and _encounter.log != null:
+		# The console shows the quest's own opening line, in English, from
+		# global.res -- which is only readable at all since row 954.
+		var res := Sacred.Resources.new(
+			Sacred.find_install().path_join("scripts/us/global.res"))
+		_encounter.log.resolve_with(res)
+		for l in _encounter.log.lines:
+			if String(l["text"]) != "":
+				_hud.show_line(String(l["text"]))
+				break
+	print("hud\tpieces=%d\tmissing=%s" % [_hud.drawn, _hud.missing])
