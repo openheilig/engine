@@ -35,9 +35,15 @@ extends RefCounted
 ## sort-key baseline untouched, exactly like every band mesh and the
 ## sortcube).
 
-## ponytail: the retail Gladiator hero model stands in for "the player" --
-## no class-selection system exists yet (a later phase's job). Named here,
-## not passed in, so every call site draws the same model until one does.
+## FALLBACK ONLY. main.gd passes the body mesh for its START_CLASS
+## (main.gd's CLASS_MODEL), so the drawn hero follows the class whose
+## StartPosition the run spawns at instead of being fixed here. This default
+## survives for the call sites that want *a* hero rig without caring which --
+## the crowd harness and the parity dumps -- and for a class the map has no
+## mesh for, where drawing the wrong body beats drawing none.
+##
+## ponytail: still no class-SELECTION system; START_CLASS is a constant. The
+## upgrade path is a menu that writes it, not a change here.
 const MODEL_NAME := "GLADIATOR.GRN"
 
 ## The built rig, parented into the tree by the caller (main.gd), or null

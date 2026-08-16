@@ -50,6 +50,10 @@ const DOCK_EPS := 0.001
 ## crowd benchmark.
 const ROSTER := 24
 
+## Preloaded by PATH, not by class_name: main.gd is a scene script and this
+## check wants only its CLASS_MODEL constant, never an instance of it.
+const MainScript := preload("res://main.gd")
+
 
 func _init() -> void:
 	super()
@@ -250,9 +254,28 @@ func _init() -> void:
 		"only %d wearer sockets sit 90+ deg from their hand -- if the hand really does stand in, this refusal can be reconsidered" % spread["far"])
 	assert(spread["near"] > spread["far"],
 		"most sockets now disagree with their hand (%d near, %d far)" % [spread["near"], spread["far"]])
+	# main.gd's class -> body-mesh map must actually resolve. It is READ from
+	# main.gd rather than restated here, so a name edited there and nowhere
+	# else fails this gate instead of silently drawing PlayerView's fallback
+	# Gladiator for a Seraphim run. Distinctness matters as much as existence:
+	# seven classes mapping to one mesh satisfies every per-entry lookup and is
+	# exactly what a copy-paste slip produces.
+	var seen_models := {}
+	for cls in MainScript.CLASS_MODEL:
+		var mn: String = MainScript.CLASS_MODEL[cls]
+		var mi := models.index_of(mn)
+		assert(mi >= 0, "main.gd maps %s to %s, which models.pak does not carry" % [cls, mn])
+		assert(models.kind_of(mi) == Sacred.Models.KIND_MESH,
+			"%s (%s) is not a mesh entry -- an animation clip cannot be a body" % [mn, cls])
+		seen_models[mn] = true
+	assert(seen_models.size() == MainScript.CLASS_MODEL.size(),
+		"class body meshes collapsed: %d distinct over %d classes" % [
+			seen_models.size(), MainScript.CLASS_MODEL.size()])
+
 	# SERAPHIM carries Bone_weapon_01 and NOT _02, which is the ordinary case:
 	# only 192 of 1571 entries carry the off-hand socket at all. Its main hand
-	# docks and its off hand is refused.
+	# docks and its off hand is refused. It is also START_CLASS's body, so this
+	# block is now testing the rig the default run actually draws.
 	var sv := PlayerView.new(models, "SERAPHIM.GRN", tp)
 	assert(sv.node != null, "SERAPHIM.GRN did not build")
 	var sskel: Skeleton3D = sv.node.get_node("Skeleton")

@@ -35,6 +35,31 @@ const SECT: int = Sacred.SECT
 ## ponytail: a constant until there is a UI to choose with.
 const START_CLASS := "type_npc_seraphim"
 
+## Script tree -> the class's whole-body mesh in models.pak. These are the
+## short, underscore-free rig names (`SERAPHIM.GRN`, `GLADIATOR.GRN`); the
+## long `SERAPHIM_LEATHER_02.GRN` family beside them is ARMOUR worn over one,
+## which nothing here composes yet.
+##
+## `type_npc_vampirelady` IS ABSENT ON PURPOSE, and the absence is the finding:
+## models.pak carries no vampiress rig under any spelling tried (VAMP, LADY,
+## SUCCU, NOSFE, DRACUL, WEREW). She is an Underworld class, so her mesh is
+## presumably not in this pak at all. A wrong guess here would draw the wrong
+## body silently, so the map has a hole and _apply_retail_start says so.
+const CLASS_MODEL := {
+	"type_npc_daemonin": "DAEMONIA.GRN",
+	"type_npc_darkelve": "DUNKELELVE.GRN",
+	"type_npc_elve": "WALDELFE.GRN",
+	"type_npc_gladiator": "GLADIATOR.GRN",
+	"type_npc_magician": "MAGICIAN.GRN",
+	"type_npc_seraphim": "SERAPHIM.GRN",
+	"type_npc_zwerg": "DWARF.GRN",
+}
+
+## The mesh actually drawn for the player. Set from CLASS_MODEL in
+## _apply_retail_start; falls back to PlayerView's own default so a tree with
+## no mapping still draws a body rather than nothing.
+var _player_model := PlayerView.MODEL_NAME
+
 ## START_CLASS's StartPosition cell, or (-1,-1) when the tree declares none.
 ## Separate from start_cell because start_cell is a Vector2 the camera pans to
 ## and may be moved by other modes, while this stays the exact integer cell the
@@ -527,13 +552,13 @@ func _ready() -> void:
 			var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 			if _show_player:
 				if models_pak.is_open():
-					_player_view = PlayerView.new(Sacred.Models.new(models_pak))
+					_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model)
 					if _player_view.node != null:
 						add_child(_player_view.node)
 						if _hide_player_mesh:
 							_player_view.set_shown(false)
 						print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
-							PlayerView.MODEL_NAME, _player_view.model_index,
+							_player_model, _player_view.model_index,
 							_player_view.vertex_count, _player_view.triangle_count])
 			if _show_player or _show_creatures or _show_npcs:
 				_ensure_rig_light()
@@ -875,14 +900,18 @@ func _region_arg() -> Vector3i:
 ## a walkable cell from the sector it names, so "measured, never hardcoded"
 ## survives. What changes is which sector is searched.
 func _apply_retail_start(install: String) -> void:
+	if CLASS_MODEL.has(START_CLASS):
+		_player_model = CLASS_MODEL[START_CLASS]
+	else:
+		push_warning("start: no body mesh mapped for %s -- drawing %s" % [START_CLASS, _player_model])
 	var sc := Sacred.Startcode.new(install.path_join("bin").path_join(START_CLASS))
 	if sc.start_cell == Sacred.Startcode.NO_CELL:
 		push_warning("start: %s declares no StartPosition -- keeping %s" % [START_CLASS, start_cell])
 		return
 	start_cell = Vector2(sc.start_cell)
 	_retail_start = sc.start_cell
-	print("start\tclass=%s\tcell=%d,%d\tlayer=%d\tsector=%d,%d" % [
-		START_CLASS, sc.start_cell.x, sc.start_cell.y, sc.start_layer,
+	print("start\tclass=%s\tmodel=%s\tcell=%d,%d\tlayer=%d\tsector=%d,%d" % [
+		START_CLASS, _player_model, sc.start_cell.x, sc.start_cell.y, sc.start_layer,
 		sc.start_cell.x / SECT, sc.start_cell.y / SECT])
 
 
@@ -1413,11 +1442,11 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 		_cam.look_at_cell(cell)
 		var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 		if models_pak.is_open():
-			_player_view = PlayerView.new(Sacred.Models.new(models_pak))
+			_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model)
 			if _player_view.node != null:
 				add_child(_player_view.node)
 				print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
-					PlayerView.MODEL_NAME, _player_view.model_index,
+					_player_model, _player_view.model_index,
 					_player_view.vertex_count, _player_view.triangle_count])
 
 	# Plan 04-02: the sliding path window and its one scripted goal request,
@@ -1642,7 +1671,7 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 		var gy := i / side
 		var cell := start_cell + Vector2(float(gx) - half, float(gy) - half) * CROWD_SPACING
 		var t0 := Time.get_ticks_usec()
-		var pv := PlayerView.new(models)
+		var pv := PlayerView.new(models, _player_model)
 		if pv.node == null:
 			build_times_ms.append((Time.get_ticks_usec() - t0) / 1000.0)
 			continue
@@ -1673,7 +1702,7 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 
 	if rigs.is_empty():
 		printerr("crowd\tn=%d\tno rig built -- %s failed to resolve or build" % [
-			_crowd_n, PlayerView.MODEL_NAME])
+			_crowd_n, _player_model])
 		get_tree().quit(1)
 		return
 
