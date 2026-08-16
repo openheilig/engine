@@ -159,7 +159,11 @@ func _init(tex_pak) -> void:
 ## it is added to one, so connecting in the constructor dereferences null.
 func _ready() -> void:
 	_rescale()
-	get_tree().get_root().size_changed.connect(_rescale)
+	# GUARDED: _ready runs again if this node is ever removed and re-added, and
+	# a second connect to the same callable is an error.
+	var vp := get_viewport()
+	if vp != null and not vp.size_changed.is_connected(_rescale):
+		vp.size_changed.connect(_rescale)
 
 
 ## One sub-rect of one sheet, placed at a canvas coordinate. A sheet that does
@@ -219,7 +223,13 @@ func _build_text() -> void:
 	_text.size = Vector2(512, 80)
 	_text.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 	_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_text.add_theme_font_size_override("font_size", 13)
+	# ponytail: THE ONE CHOSEN NUMBER IN THIS FILE, and it is chosen against the
+	# wrong typeface -- Godot's bundled default, not retail's. Every other
+	# constant here carries an address in the binary; this one carries nothing.
+	# It also decides where AUTOWRAP_WORD_SMART breaks, so the console will wrap
+	# in different places than retail until both the font and this are
+	# recovered from the same cUI_ code that gave up the rects.
+	_text.add_theme_font_size_override(&"font_size", 13)
 	_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_root.add_child(_text)
 
@@ -234,7 +244,7 @@ func show_line(text: String) -> void:
 ## stretching -- the HUD's own arithmetic assumes that aspect and nothing in
 ## the recovered layout re-anchors to a screen edge.
 func _rescale() -> void:
-	var win := Vector2(get_tree().get_root().get_visible_rect().size)
+	var win := Vector2(get_viewport().get_visible_rect().size)
 	if win.x <= 0.0 or win.y <= 0.0:
 		return
 	var s := minf(win.x / float(CANVAS.x), win.y / float(CANVAS.y))

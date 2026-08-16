@@ -60,32 +60,48 @@ var yaw := 0.0
 
 ## Runs inside the skeleton's modification phase, i.e. after the mixer. Godot
 ## calls this only when `active` is true and the node has a Skeleton3D parent.
-func _process_modification() -> void:
-	# get_skeleton() is only bound while the skeleton is actually running its
-	# modification phase, so it is null outside a rendered frame. The parent IS
-	# the Skeleton3D by construction (PlayerView adds this as its child), and
-	# falling back to it is what lets a check drive this directly and read the
-	# bones back -- which is the only way to assert that a yaw REACHES the
-	# skeleton rather than merely being stored.
-	var skel := get_skeleton()
-	if skel == null:
-		skel = get_parent() as Skeleton3D
+## The real body. A PUBLIC method rather than the engine virtual, so a headless
+## check can drive the production path instead of a parallel one -- see
+## PlayerView.pose_now.
+func apply(skel: Skeleton3D) -> void:
 	if skel == null:
 		return
+	# THE ARRAYS MUST AGREE. A short root_rest_rotations used to skip the
+	# rotation while still applying the ROTATED position, which leaves skeleton
+	# and vertices disagreeing -- the exact splay class row 758 traced, turned
+	# from a loud index error into a quiet wrong picture. Refuse instead.
+	assert(root_rest_rotations.size() == root_bones.size()
+		and root_rest_origins.size() == root_bones.size(),
+		"RigPlacement: %d bones but %d origins and %d rotations" % [
+			root_bones.size(), root_rest_origins.size(), root_rest_rotations.size()])
+	if root_rest_rotations.size() != root_bones.size():
+		return
+	# Loop-invariant, so it is built once rather than per root bone.
+	var spin := Quaternion(Vector3.BACK, yaw)
+	var scaled := Vector3.ONE * rig_scale
 	for k in root_bones.size():
 		var i: int = root_bones[k]
 		if i < 0 or i >= skel.get_bone_count():
 			continue
-		skel.set_bone_pose_scale(i, Vector3.ONE * rig_scale)
-		if is_zero_approx(yaw):
-			# Untouched path for every caller that never sets a yaw, so a rig
-			# that renders correctly today takes exactly the code it took before
-			# facing existed.
-			skel.set_bone_pose_position(i, root_rest_origins[k] * rig_scale + local_offset)
-			continue
-		var spin := Quaternion(Vector3.BACK, yaw)
-		if k < root_rest_rotations.size():
-			skel.set_bone_pose_rotation(i, spin * root_rest_rotations[k])
+		skel.set_bone_pose_scale(i, scaled)
+		# THE ROTATION IS ALWAYS WRITTEN, including when yaw is zero. There used
+		# to be a fast path here that wrote only the position on a zero yaw, on
+		# the reasoning that a caller which never sets a yaw should take exactly
+		# the code it took before facing existed. That guard tests the VALUE and
+		# not the HISTORY: nothing else writes these bones -- build_animation
+		# binds no track to them -- so once a rig had turned, any later frame
+		# whose yaw fell inside is_zero_approx left the PREVIOUS spin on the
+		# bone. set_yaw(0.0) is public and silently did nothing.
+		skel.set_bone_pose_rotation(i, spin * root_rest_rotations[k])
 		# The rig spins about its own origin, so the rest offset turns with it;
 		# local_offset is world placement and must NOT.
 		skel.set_bone_pose_position(i, spin * (root_rest_origins[k] * rig_scale) + local_offset)
+
+
+## Runs inside the skeleton's modification phase, i.e. after the mixer.
+##
+## `_process_modification_with_delta` and NOT `_process_modification`: the
+## latter is deprecated in Godot 4.7 and still routed for compatibility, so the
+## day that shim goes the rig silently stops being placed.
+func _process_modification_with_delta(_delta: float) -> void:
+	apply(get_skeleton())

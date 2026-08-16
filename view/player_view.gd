@@ -107,6 +107,7 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 	_mesh = mv.get_node_or_null("Skeleton/Mesh") if _skeleton != null else mv.get_node_or_null("Mesh")
 	if _mesh == null or _mesh.mesh == null:
 		push_warning("PlayerView: %s built with no Mesh node -- drawing nothing" % model_name)
+		_skeleton = null        # never leave a pointer into a freed node
 		mv.free()
 		return
 
@@ -358,6 +359,9 @@ const FEET := [["Bip01 L Foot", "Bip01 L Toe0"], ["Bip01 R Foot", "Bip01 R Toe0"
 ## Below this the horizontal part of the toe vector is noise and the angle it
 ## implies is meaningless.
 const FACING_MIN := 0.05
+## The cell-space angle of (1,1), which runs down the screen and therefore
+## towards the viewer. A constant rather than atan2(1,1) recomputed per frame.
+const TOWARDS_VIEWER := PI / 4.0
 
 
 ## The angle this body faces in its own rest pose, in the rig's horizontal
@@ -446,10 +450,10 @@ func face(_cell: Vector2, dir: Vector2) -> bool:
 	# Cell (1,1) is towards the viewer and cell (1,-1) is screen right, so the
 	# cell-space angle between them is -90 degrees. Whichever SENSE of rotation
 	# reproduces that is the one this projection uses.
-	var quarter := _wrap_pi(to_right - to_camera)
+	var quarter := angle_difference(to_camera, to_right)
 	var sense := 1.0 if quarter < 0.0 else -1.0
-	var phi := _wrap_pi(atan2(dir.y, dir.x) - atan2(1.0, 1.0))
-	set_yaw(_wrap_pi(to_camera + sense * phi - rest_yaw_rad))
+	var phi := angle_difference(TOWARDS_VIEWER, atan2(dir.y, dir.x))
+	set_yaw(wrapf(to_camera + sense * phi - rest_yaw_rad, -PI, PI))
 	return true
 
 
@@ -469,14 +473,6 @@ static func _horizon(basis: Basis, world_axis: Vector3) -> float:
 	return atan2(b, a)
 
 
-static func _wrap_pi(a: float) -> float:
-	while a > PI:
-		a -= TAU
-	while a < -PI:
-		a += TAU
-	return a
-
-
 ## The yaw currently applied, in radians. 0.0 when the rig failed to build.
 func yaw() -> float:
 	return _placement.yaw if _placement != null else 0.0
@@ -484,8 +480,15 @@ func yaw() -> float:
 
 ## Applies the current placement and yaw to the skeleton immediately, outside
 ## the normal modification phase. FOR CHECKS ONLY: a gate has no rendered frame
-## to hang a SkeletonModifier3D off, and asserting that a yaw reaches the bones
-## is exactly what cannot be done by reading the variable back.
+## to drive a SkeletonModifier3D, and asserting that a yaw REACHES the bones is
+## exactly what cannot be done by reading the variable back.
+##
+## Calls the modifier's own public apply() rather than its engine virtual. The
+## first version invoked `_process_modification()` directly, which is both
+## deprecated in 4.7 and a parallel path -- when the body moved to
+## `_process_modification_with_delta` that call would have posed NOTHING and the
+## check would have gone green on stale bones. A seam whose failure mode is
+## "silently passes" is worse than no seam.
 func pose_now() -> void:
-	if _placement != null:
-		_placement._process_modification()
+	if _placement != null and _skeleton != null:
+		_placement.apply(_skeleton)
