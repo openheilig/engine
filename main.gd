@@ -76,6 +76,15 @@ var _player_model := PlayerView.MODEL_NAME
 ## file gave, which is what _resolve_spawn tests for walkability.
 var _retail_start := Vector2i(-1, -1)
 
+## The MVP encounter (world/encounter.gd): the hostile, the NPC beside it and
+## quest 74, all at START_CLASS's own start. Built once the player exists, and
+## null in the fixed-region and probe modes, which spawn no player.
+var _encounter: Encounter = null
+## --fight=N resolves the encounter headlessly, N swings at most, so the whole
+## loop is demonstrable in a run that exits. <= 0 leaves the hostile alone.
+var _fight_swings := 0
+const FIGHT_SEED := 20260816
+
 var _cam: IsoCamera
 var _view: SectorView
 var _world: Sacred.World
@@ -448,6 +457,9 @@ func _ready() -> void:
 
 	# Before every mode branch below, because the record/replay and crowd paths
 	# each return without reaching the streaming block and each read start_cell.
+	for a in argv:
+		if a.begins_with("--fight="):
+			_fight_swings = maxi(0, a.trim_prefix("--fight=").to_int())
 	_apply_retail_start(install)
 
 	if figure_name != "":
@@ -552,6 +564,9 @@ func _ready() -> void:
 			_cam.move_click.connect(_on_move_click)
 			if footprints != null:
 				_sim.interior = Interior.new(world, walk, footprints)
+			# World layer, so it is built here rather than beside the rigs: the
+			# hostile is an actor whether or not anything is drawn.
+			_begin_encounter(install, items)
 			print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
 				player_cell.x, player_cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
 			# The models pak is opened whenever ANY rig is wanted, not only when
@@ -948,6 +963,41 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 ## body mesh for that class. Non-fatal: an install whose tree has no such
 ## record keeps the fallback literal, and says so, rather than aborting a run
 ## over a cosmetic default.
+## Builds the MVP encounter and opens its quest. Non-fatal throughout: a run
+## whose install is missing a piece draws the world and says what it could not
+## assemble, rather than aborting.
+##
+## The hostile is spawned into the SAME registry the player is in, so it is a
+## real actor under the same sim rules and not a second, parallel world.
+func _begin_encounter(install: String, items) -> void:
+	if _registry == null:
+		return
+	var creatures := Sacred.Creatures.new(install.path_join("pak"))
+	var factions := Sacred.Factions.new(install)
+	_encounter = Encounter.new(install, _registry, items, creatures, factions)
+	if not _encounter.found:
+		push_warning("encounter: '%s' is not in this tree -- no hostile spawned" % Encounter.FOE_PLACE)
+		_encounter = null
+		return
+	_encounter.begin()
+	print(_encounter.status_line())
+	# --fight=N runs the loop to its end so a headless run can show the whole
+	# thing. Seeded, so two runs of the same command produce the same fight.
+	if _fight_swings > 0:
+		var rng := RandomNumberGenerator.new()
+		rng.seed = FIGHT_SEED
+		var n := 0
+		while n < _fight_swings and not _encounter.is_complete():
+			var r: Dictionary = _encounter.strike(rng)
+			n += 1
+			print("swing\t%d\thit=%s\troll=%d\tchance=%d\thp=%d" % [
+				n, r["hit"], r["roll"], r["chance"], _encounter.foe_hp()])
+		print(_encounter.status_line())
+		for l in _encounter.log.lines:
+			print("questbook\tquest=%d\tkind=%d\tkey=%s" % [
+				int(l["quest"]), int(l["kind"]), str(l["key"])])
+
+
 func _apply_retail_start(install: String) -> void:
 	if CLASS_MODEL.has(START_CLASS):
 		_player_model = CLASS_MODEL[START_CLASS]
@@ -1483,6 +1533,7 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 	_sim.focus_actor_id = _player_id
 	var interior := Interior.new(world, walk, footprints)
 	_sim.interior = interior
+	_begin_encounter(install, items)
 
 	if live_view and _record_path != "":
 		_cam = IsoCamera.new()
