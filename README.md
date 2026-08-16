@@ -9,7 +9,8 @@ this repository. Without a legally obtained copy of the game it does nothing.
 ## Status
 
 Pre-alpha, and honest about it: this is a **world viewer with a simulation
-core**, not a playable game. What runs today:
+core and one scripted fight that finishes**, not a playable game. What runs
+today:
 
 - **World streaming.** Sacred's 100×100 sector grid loads straight out of the
   retail install — terrain mesh, texture arrays, static props, buildings —
@@ -26,13 +27,31 @@ core**, not a playable game. What runs today:
   NPCs across the eight character classes plus 16,021 objects, each with its
   body model, hand items and starting cell; `--npcs` draws them at those cells.
   Placement only — nothing animates or acts.
+- **The hero, where retail starts her.** The Seraphim at cell 3236,2511 with
+  composed armour and hand items, playing an `IDLE` clip, facing driven through
+  the alignment bone above `Bip01`.
+- **One quest that closes.** `world/script.gd` interprets four opcodes of the
+  quest bytecode and *refuses* the ones it does not know rather than skipping
+  them; `world/quest_log.gd` holds quest state; `world/encounter.gd` runs
+  quest 74 end to end against a hostile NPC. `world/combat.gd` implements the
+  recovered to-hit formula and nothing else — the resolution step is undecoded,
+  so there is deliberately no damage formula to be wrong about.
+- **Retail's taskbar.** `view/hud.gd` draws the console, wings, buttons and
+  combat-art arc from retail's own 1887-rect table at retail's own coordinates.
+  The life and mana gauges are **not** drawn: all 46 `cUI_Taskbar2` functions
+  were enumerated and the class references no orb art and computes no fraction.
+  The gap is left visible rather than invented.
+- **Measured numbers, not chosen ones.** AT and PA from skill levels over
+  attribute bases, difficulty scaling for non-heroes, per-sector creature level
+  bands, and sector music *selection* (`formats/sectors.gd`) — selection only,
+  since there is no audio layer to hand the result to.
 
-Several readers have no feature behind them yet: `creature.pak`, the faction
-matrix, `.pax` hero saves, items and armour are decoded and gated, and the
-game system that would consume each one is not written.
+Several readers have no feature behind them yet: the faction matrix, `.pax`
+hero saves, `triggers.pak`, `formats/equipment.gd` and `formats/wpmod.gd` are
+decoded and gated with no production caller.
 
-Not implemented: combat, inventory, skills, quests, dialogue, UI, sound,
-multiplayer, save/load. Do not expect to play anything.
+Not implemented: damage resolution, inventory, skills, dialogue, sound
+playback, multiplayer, save/load. Do not expect to play anything.
 
 ## Start here
 
@@ -54,6 +73,13 @@ You need Godot 4.7 (Forward Plus) and a Sacred Gold install.
 ```
 godot --path . -- --install=/path/to/sacred
 ```
+
+`run.sh` wraps this and needs no arguments — the install is found by
+`Sacred.find_install()`. `./run.sh --checks` runs every gate in `checks/` under
+a timeout (a failed `assert()` hangs rather than exits) and prints
+`PASS=n FAIL=n`; `--layers` runs `parity/verify.gd`; `--flags` lists the flags
+`main.gd` actually parses by reading them out of it. Anything else is passed
+through to the game.
 
 The path is remembered in `user://openheilig.cfg` as `install_path`, so later
 runs need no flag. `main.gd` is the composition root: it resolves the install,
