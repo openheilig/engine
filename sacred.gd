@@ -66,6 +66,7 @@ const Equipment := preload("res://formats/equipment.gd")
 const Sets := preload("res://formats/sets.gd")
 const Vectoren := preload("res://formats/vectoren.gd")
 const Balance := preload("res://formats/balance.gd")
+const SpawnLevels := preload("res://formats/spawn_levels.gd")
 const Resources := preload("res://formats/resources.gd")
 
 
