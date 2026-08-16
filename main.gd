@@ -247,6 +247,31 @@ var _last_heading := Vector2.ZERO
 var _show_hud := true
 var _hud: Hud = null
 
+## RETAIL'S SECTOR-CHANGE PATH (sub_80DB27C), link 6c of research/engine/
+## game-wiring.md. Retail does NOT pick music on sector ENTRY -- sector Enter
+## (sub_80DB06C) runs placements and triggers and selects nothing. A separate
+## path fires only when the player's current sector CHANGES, reads that
+## sector's 256-byte cSectorEnvironment out of world/sectors.keyx, and hands
+## music id + climate + region to the sound engine:
+##
+##     env = world.sectors[id].env
+##     if env.music: cMSS::receive_event(mss, 2, 0, env.region, env.music, climate, ...)
+##     if env.atmo2: sub_84C9342(mss, env.atmo2)
+##
+## THIS PORT HAS NO AUDIO LAYER, so the selection half is wired and the
+## playback half is not. That is deliberate: Sacred.Sectors had a correct
+## reader and a passing gate (sectorenv_check) but ZERO production callers, so
+## the recovered environment never reached a running frame and the wiring
+## table's "yes" for this link was not true of the game. Selecting and
+## reporting it makes the link real and observable now; a sound layer later
+## consumes `_sector_env` instead of re-deriving it.
+##
+## `_sector_now` starts at an impossible sector so the first frame counts as a
+## change and the starting sector's environment is reported like any other.
+var _sectors = null                                  ## Sacred.Sectors
+var _sector_now := Vector2i(-1, -1)
+var _sector_env := {}                                ## the current sector's env
+
 # Plan 05-08: crowd benchmark. Opt-in only -- _has_crowd stays false unless
 # --crowd= is literally present, so a bare "0" or a negative value still
 # reaches the refuse-and-name-it path in _run_crowd() rather than silently
@@ -626,6 +651,7 @@ func _ready() -> void:
 						_dress_player(install, Sacred.Models.new(models_pak), items)
 						_animate_hero(Sacred.Models.new(models_pak))
 			_build_hud(tex_pak)
+			_build_sector_env(install)
 			if _show_player or _show_creatures or _show_npcs:
 				_ensure_rig_light()
 			if _show_creatures and models_pak.is_open():
@@ -688,6 +714,9 @@ func _process(delta: float) -> void:
 				_face_player(p)
 			if _cam != null:
 				_cam.follow_cell(p.cell)
+			# Retail's sector-change path keys off the PLAYER's sector, not the
+			# camera's -- panning the view does not change the music.
+			_update_sector_env(p.cell)
 
 
 ## The ONLY Sim per-frame advance call site outside godot-port/world/ -- a
@@ -3453,6 +3482,50 @@ func _build_hud(tex_pak) -> void:
 				_hud.show_line(String(l["text"]))
 				break
 	print("hud\tpieces=%d\tmissing=%s" % [_hud.drawn, _hud.missing])
+
+
+## Opens world/sectors.keyx once, for the sector-change path. Non-fatal: a run
+## whose install lacks the file draws the world and says the environment is
+## unavailable, matching every other reader here.
+func _build_sector_env(install: String) -> void:
+	var s = Sacred.Sectors.new(install)
+	if not s.found:
+		push_warning("sector-env: world/sectors.keyx unreadable -- no environment selected")
+		return
+	_sectors = s
+	print("sector-env\tready\trecords=%d" % s.count)
+
+
+## RETAIL'S sub_80DB27C, called once per frame from _process. Fires only on a
+## CHANGE of the player's sector, which is retail's own condition -- entering a
+## sector every frame would re-trigger the music on every frame.
+##
+## The cell -> sector conversion lives in Sectors.sector_of, where the
+## truncate-towards-zero trap it avoids is gated by sectorenv_check rather than
+## restated here.
+##
+## A sector whose music id is 0 INHERITS whatever is already playing -- 1892 of
+## the 6050 sectors carry 0, and that is retail's own `if (env->music)` guard,
+## not a decode failure. So `_sector_env` keeps the last non-zero selection and
+## only the reported line shows the raw record.
+func _update_sector_env(cell: Vector2) -> void:
+	if _sectors == null:
+		return
+	var s: Vector2i = Sacred.Sectors.sector_of(cell)
+	if s == _sector_now:
+		return
+	_sector_now = s
+	var env: Dictionary = _sectors.env_of(s.x, s.y)
+	if env.is_empty():
+		# Off the 6050-sector map. Reported rather than ignored: every in-world
+		# sector is present exactly once, so a miss means the coordinate is bad.
+		print("sector-env\t%d,%d\toff-map" % [s.x, s.y])
+		return
+	if int(env["music"]) != 0:
+		_sector_env = env
+	print("sector-env\t%d,%d\tmusic=%d\tclimate=%d\tregion=%d\tatmo2=%d\tplaying=%d" % [
+		s.x, s.y, int(env["music"]), int(env["climate"]), int(env["region"]),
+		int(env["atmo2"]), int(_sector_env.get("music", 0))])
 
 
 ## Turns the hero to face where it is going.

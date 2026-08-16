@@ -84,6 +84,12 @@ const TERRAIN_SHADER: Shader = preload("res://shaders/terrain.gdshader")
 const TERRAIN_MASK_SHADER: Shader = preload("res://shaders/terrain_mask.gdshader")
 const OBJECT_SHADER: Shader = preload("res://shaders/object.gdshader")
 
+## MUST EQUAL the array length in `shaders/object.gdshader`'s
+## `uniform int hidden_buckets[...]`. GLSL cannot read a GDScript const, so the
+## two agree by convention and this is the only place the number is explained.
+## Changing one without the other makes the shader read past its own array.
+const HIDDEN_BUCKET_SLOTS := 64
+
 @export var load_margin := 64.0                    ## cells loaded beyond the viewport
 @export var loads_per_frame := 1
 ## Screen pixels per unit of WldxEntry height. Unknown; 1.0 is a starting guess.
@@ -681,10 +687,16 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy
 		for tile: Dictionary in spr["tiles"]:
 			var tid: int = tile["tex"]
 			if not layer_of.has(tid):
+				# BEFORE the call, not after: _image() INSERTS into _images and
+				# then returns, so `not _images.has(tid)` asked afterwards is
+				# always false and the counter could never leave 0. It read as
+				# a perfect cache in every swap-apply line, which is exactly
+				# what a dead instrument looks like from the outside.
+				var was_cached := _images.has(tid)
 				var img := _image(tid)
 				if img == null:
 					continue
-				if not _images.has(tid):
+				if not was_cached:
 					object_texture_decodes += 1
 				layer_of[tid] = images.size()
 				images.append(img)
@@ -993,6 +1005,28 @@ func apply_swap(states: Dictionary) -> void:
 	# sector share ONE material, so one pass covers them; the uniform is set
 	# per-material to be safe across sectors (each sector builds its own).
 	hidden.sort()
+	# THE COUNT AND THE ARRAY MUST BE CLAMPED TOGETHER. `hidden_buckets` is
+	# declared `uniform int[HIDDEN_BUCKET_SLOTS]` in object.gdshader and the
+	# fragment loop runs to `hidden_bucket_count`, so passing an unclamped count
+	# alongside a clamped array makes the shader index past the end -- garbage
+	# ints compared against real bucket ids, discarding fragments of unrelated
+	# buildings. That is a WRONG PICTURE with no error raised, which is why the
+	# overflow is reported here rather than quietly truncated.
+	#
+	# Truncation itself is not safe either: `hidden.sort()` orders by dense
+	# bucket id, so the survivors are the earliest-registered regions and the
+	# building the player just walked into is exactly the one whose roof stops
+	# being hidden. Interior.derive() registers every footprint it sees and
+	# never retires one, so a town reaches this ceiling.
+	var n := mini(hidden.size(), HIDDEN_BUCKET_SLOTS)
+	if hidden.size() > HIDDEN_BUCKET_SLOTS:
+		push_error("SectorView: %d hidden buckets exceeds the shader's %d slots; %d regions will draw their roofs"
+			% [hidden.size(), HIDDEN_BUCKET_SLOTS, hidden.size() - HIDDEN_BUCKET_SLOTS])
+	# Built once, not per material: every material gets the same contents.
+	var arr := PackedInt32Array()
+	arr.resize(HIDDEN_BUCKET_SLOTS)
+	for i in n:
+		arr[i] = hidden[i]
 	var set_count := 0
 	for sector_key: int in _run_nodes:
 		for run_meta: Dictionary in _run_nodes[sector_key]:
@@ -1000,11 +1034,7 @@ func apply_swap(states: Dictionary) -> void:
 			var mat := node.material_override as ShaderMaterial
 			if mat == null:
 				continue
-			mat.set_shader_parameter(&"hidden_bucket_count", hidden.size())
-			var arr := PackedInt32Array()
-			arr.resize(64)
-			for i in mini(hidden.size(), 64):
-				arr[i] = hidden[i]
+			mat.set_shader_parameter(&"hidden_bucket_count", n)
 			mat.set_shader_parameter(&"hidden_buckets", arr)
 			set_count += 1
 			break   # one material per sector; move to the next sector

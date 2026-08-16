@@ -24,6 +24,10 @@
 !*.tres
 !*.md
 !project.godot
+# Named individually rather than as *.sh: this is the only shell script the
+# engine has any business carrying, and it holds no path into the install --
+# it resolves its own directory and lets Sacred.find_install() do the rest.
+!run.sh
 
 # 3. Belt and braces: regenerable or retail-derived, named so the intent
 #    survives an edit to the rules above.

@@ -47,8 +47,12 @@ varying flat float layer;
 // painter-correct contiguous submission order, and the swap is a uniform update
 // -- no mesh split, no per-run sorting_offset ambiguity, no geometry rebuild.
 varying flat float bucket;
+// HIDDEN_BUCKET_SLOTS in view/sector_view.gd MUST equal this array length. The
+// CPU side clamps hidden_bucket_count to it; a mismatch, or an unclamped count,
+// lets the loop below index past the end of the array.
+#define HIDDEN_BUCKET_SLOTS 64
 uniform int hidden_bucket_count = 0;
-uniform int hidden_buckets[64];
+uniform int hidden_buckets[HIDDEN_BUCKET_SLOTS];
 
 void vertex() {
 	layer = UV2.x;

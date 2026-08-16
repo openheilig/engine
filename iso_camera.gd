@@ -61,6 +61,21 @@ func _ready() -> void:
 		if not InputMap.has_action(action):
 			push_error("IsoCamera: action '%s' missing from the Input Map "
 				% action + "(project.godot [input]). Panning will not work.")
+	# `size` is DERIVED from viewport height (see set_zoom_index), so a resize
+	# invalidates it. Without this the camera keeps snapping to a grid that is
+	# no longer the pixel grid -- follow_cell's whole reason to exist -- and it
+	# does so silently, which is the one failure mode this class is written to
+	# refuse. Guarded because _ready runs again on re-parent and a second
+	# connect to the same callable is an error.
+	var vp := get_viewport()
+	if vp != null and not vp.size_changed.is_connected(_on_viewport_resized):
+		vp.size_changed.connect(_on_viewport_resized)
+	set_zoom_index(zoom_index)
+
+
+## Re-derives `size` from the new viewport height, keeping the current step.
+func _on_viewport_resized() -> void:
+	set_zoom_index(zoom_index)
 
 
 ## Camera panning is visual, not simulation, so it belongs in _process --

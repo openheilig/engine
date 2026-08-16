@@ -60,6 +60,19 @@ static func key_of(sx: int, sy: int) -> Vector2i:
 	return Vector2i(sx, sy)
 
 
+## The sector containing a world cell -- retail's sector-change path needs this
+## and it is the one place the truncation trap above can bite a caller.
+##
+## floori, NOT `int(cell) / SECT`: integer division truncates TOWARDS ZERO, so
+## cells -1 and +1 both give sector 0 and a westward step across the origin is
+## not seen as a change. Every in-world cell is positive and the two agree
+## there, which is exactly why the wrong one survives testing.
+static func sector_of(cell: Vector2) -> Vector2i:
+	return Vector2i(
+		floori(cell.x / float(Sacred.SECT)),
+		floori(cell.y / float(Sacred.SECT)))
+
+
 func _init(install: String) -> void:
 	_b = FileAccess.get_file_as_bytes(install.path_join("world/sectors.keyx"))
 	if _b.size() < HEADER + REC:

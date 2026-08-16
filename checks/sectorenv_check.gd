@@ -49,6 +49,23 @@ func _init() -> void:
 	expect(mapped == SECTORS,
 		"%d sectors resolved to a record, expected %d" % [mapped, SECTORS])
 
+	# THE CELL -> SECTOR BOUNDARY, which the sector-change path in main.gd
+	# depends on. Both arms matter: the positive one is what every in-world
+	# cell exercises, and the NEGATIVE one is the control -- `int(c) / SECT`
+	# truncates towards zero and passes the positive arm alone, so a check
+	# without cells either side of the origin cannot tell the two apart.
+	var sect := Sacred.SECT
+	expect(Sacred.Sectors.sector_of(Vector2(0.0, 0.0)) == Vector2i(0, 0),
+		"cell 0,0 is not sector 0,0")
+	expect(Sacred.Sectors.sector_of(Vector2(sect - 1, sect - 1)) == Vector2i(0, 0),
+		"the last cell of sector 0,0 left it")
+	expect(Sacred.Sectors.sector_of(Vector2(sect, sect)) == Vector2i(1, 1),
+		"the first cell of sector 1,1 is not in it")
+	expect(Sacred.Sectors.sector_of(Vector2(-1.0, -1.0)) == Vector2i(-1, -1),
+		"cell -1,-1 reports sector 0,0 -- integer division truncated towards zero")
+	expect(Sacred.Sectors.sector_of(Vector2(3200.0, 2496.0)) == Vector2i(50, 39),
+		"cell 3200,2496 is not sector 50,39")
+
 	# The named fields, on sectors this project already identifies by other
 	# routes, so a shifted offset is caught by a value a human can check.
 	var start: Dictionary = sec.env_of(START.x, START.y)
