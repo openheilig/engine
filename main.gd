@@ -238,6 +238,9 @@ var _show_player := true   ## --noplayer: suppress building the player view enti
 var _hide_player_mesh := false
 ## --noanim: build the hero but leave it in its rest pose. See the flag parse.
 var _animate_player := true
+## The last direction the hero actually moved. Held while it stands still --
+## see _face_player for why the sim's own heading cannot serve.
+var _last_heading := Vector2.ZERO
 ## --nohud suppresses the taskbar. Every capture runbook that asserts an md5 of
 ## the world needs the interface out of the frame, and the HUD covers the
 ## bottom 92 rows of it.
@@ -682,6 +685,7 @@ func _process(delta: float) -> void:
 		if p != null:
 			if _player_view != null:
 				_player_view.update(p.cell)
+				_face_player(p)
 			if _cam != null:
 				_cam.follow_cell(p.cell)
 
@@ -3449,3 +3453,21 @@ func _build_hud(tex_pak) -> void:
 				_hud.show_line(String(l["text"]))
 				break
 	print("hud\tpieces=%d\tmissing=%s" % [_hud.drawn, _hud.missing])
+
+
+## Turns the hero to face where it is going.
+##
+## `ActorState.heading` is a per-tick movement INTENT, not a facing, and it is
+## zero whenever the actor is standing -- so a character that stopped would
+## snap back to its rest direction on the first idle frame. The last non-zero
+## heading is therefore held, which is what "facing" means and what the heading
+## field on its own cannot say.
+##
+## Nothing here reaches into the sim beyond reading that field: the derivation
+## of the angle lives in PlayerView.face, which asks IsoCamera and SectorView
+## where the direction actually lands rather than assuming a projection.
+func _face_player(p: ActorState) -> void:
+	if p.heading.length_squared() > 0.0:
+		_last_heading = p.heading
+	if _last_heading.length_squared() > 0.0:
+		_player_view.face(p.cell, _last_heading)

@@ -51,6 +51,10 @@ const MODEL_NAME := "GLADIATOR.GRN"
 ## RetailCursor.apply's non-fatal degrade, never a capsule fallback.
 var node: Node3D = null
 var model_index := -1
+## The direction this body FACES in its own rest pose, as an angle in the rig's
+## horizontal plane. NAN when the body is not a biped and facing must be
+## refused rather than guessed. See rest_yaw().
+var rest_yaw_rad := NAN
 var vertex_count := 0
 var triangle_count := 0
 
@@ -108,6 +112,7 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 
 	vertex_count = mv.vertex_count
 	triangle_count = mv.triangle_count
+	rest_yaw_rad = rest_yaw(models, model_index)
 
 	# Scale so the rig's bounding box height equals SectorView's existing
 	# character-proxy constant (SORTCUBE_PX) -- borrowed, not restated, per
@@ -314,3 +319,173 @@ func animate(models: Sacred.Models, rigs) -> bool:
 ## Reported rather than trusted -- see Rigs.score_for.
 func clip_score(rigs) -> float:
 	return rigs.score_for(model_index) if rigs != null else 0.0
+
+
+## --- Facing ----------------------------------------------------------------
+##
+## THE PROBLEM THIS SOLVES. `set_yaw` has existed and been passed 0.0 at every
+## call site since it was written, because nothing established which way a
+## model faces in its own coordinates -- and a wrong constant is 180 or 90
+## degrees wrong on every character in the game, which looks deliberate.
+##
+## Two routes were measured (probes/facing_probe.gd, row 964):
+##
+##   A locomotion clip's ROOT translation -- REFUTED. Sacred's clips are in
+##   place: GLAD_WALK_BH's root nets to exactly zero over the cycle.
+##
+##   `Toe0 - Foot` in the rig's own rest -- the toe is in front of the ankle,
+##   so this is a forward vector whose SIGN is fixed by anatomy rather than
+##   chosen. Measured in MESH space the seven class bodies disagreed badly
+##   (worst pairwise dot 0.46) and split into two families.
+##
+## THE SPLIT WAS THE ALIGNMENT BONE, and finding it is what made this usable.
+## The chain above `Bip01` is `__Root -> Root -> Bip01` on some bodies and
+## `__Root -> Bip01` on others, and its NET rotation about the vertical is
+## exactly 0 or -90 degrees -- quantised, never anything between:
+##
+##   GLADIATOR, SERAPHIM, WALDELFE   Root spins +90, Bip01 spins -90 -> net 0
+##   MAGICIAN, DUNKELELVE            no Root at all                  -> net -90
+##   DWARF                           Root spins 0                    -> net -90
+##   DAEMONIA                        Bip01 spins -0.8                -> net ~0
+##
+## Re-measured in BIP01's own frame the same seven bodies agree at worst dot
+## 0.9556, and every forward comes out +X with the residual being nothing but
+## each body's own toe splay. So they are ONE rig convention differing by one
+## rotation, and that is what licenses treating the mesh-space angle as a
+## per-model constant: it already contains the alignment, so nothing has to be
+## special-cased per family.
+const FEET := [["Bip01 L Foot", "Bip01 L Toe0"], ["Bip01 R Foot", "Bip01 R Toe0"]]
+## Below this the horizontal part of the toe vector is noise and the angle it
+## implies is meaningless.
+const FACING_MIN := 0.05
+
+
+## The angle this body faces in its own rest pose, in the rig's horizontal
+## plane, or NAN when it is not a biped.
+##
+## Both feet are averaged so a splayed stance cancels. The rigs are Z-UP (see
+## rig_placement.gd: a humanoid's rest bbox is ~107 on Z against ~10-19
+## horizontally), so the horizontal components are X and Y and the vertical --
+## which for a toe-minus-ankle vector is the LARGER part, the ankle being well
+## above the ball of the foot -- is discarded.
+static func rest_yaw(models: Sacred.Models, entry: int) -> float:
+	if entry < 0:
+		return NAN
+	var bones: Array = models.bones(entry)
+	var xf: Array[Transform3D] = []
+	var byname: Dictionary = {}
+	for i in bones.size():
+		var local: Transform3D = bones[i]["rest"]
+		var p: int = int(bones[i]["parent"])
+		xf.append(local if p < 0 or p >= i else xf[p] * local)
+		var nm: String = (bones[i]["name"] as PackedByteArray).get_string_from_utf8()
+		if nm != "" and not byname.has(nm):
+			byname[nm] = i
+	var fwd := Vector3.ZERO
+	var n := 0
+	for pair in FEET:
+		if byname.has(pair[0]) and byname.has(pair[1]):
+			fwd += xf[int(byname[pair[1]])].origin - xf[int(byname[pair[0]])].origin
+			n += 1
+	if n == 0:
+		return NAN
+	fwd /= float(n)
+	if Vector2(fwd.x, fwd.y).length() < FACING_MIN:
+		return NAN
+	return atan2(fwd.y, fwd.x)
+
+
+## True when this body can be turned. A caller that gets false draws it facing
+## its rest direction, which is what it did before facing existed.
+func can_face() -> bool:
+	return _placement != null and not is_nan(rest_yaw_rad)
+
+
+## Turns the rig to face a CELL-SPACE direction.
+##
+## WHY THIS DOES NOT USE THE WORLD DISPLACEMENT, which was the first attempt
+## and is wrong in a way worth keeping: this world is ALREADY PROJECTED. The
+## terrain is built at cell-to-screen coordinates with a depth that exists only
+## to sort (SectorView's `pz = (x+y) * DEPTH_STEP`), so a cell step maps to a
+## world displacement whose two horizontal components are `+-HW` on screen and
+## a few thousandths of depth. Normalising that throws the depth away, and the
+## four cardinal directions collapse onto two facings -- east and south both
+## read "screen right". facing_check caught exactly that.
+##
+## SO THE CELL GRID IS THE GROUND PLANE, treated as the square grid it is, and
+## the only thing that has to be recovered is how the rig's own horizontal axes
+## sit against the camera. Both of those ARE derivable from the node's basis,
+## with no constant chosen here:
+##
+##   TOWARDS_CAMERA  the rig-horizontal angle whose world image points most
+##                   directly at the viewer. Cell direction (1,1) runs down the
+##                   screen -- `screen_y = (cx + cy) * HH` -- so a character
+##                   walking that way walks towards the viewer and must show
+##                   its front.
+##   SCREEN_RIGHT    the rig-horizontal angle whose world image points along
+##                   world +X. Cell direction (1,-1) runs that way, and which
+##                   of the two possible senses of rotation matches it is what
+##                   fixes the handedness.
+##
+## Both are measured off the basis at call time rather than written down, so a
+## change to how ModelView orients a rig moves the facing with it.
+##
+## Returns false and turns nothing for a zero direction or a body with no
+## measurable rest facing.
+func face(_cell: Vector2, dir: Vector2) -> bool:
+	if not can_face() or dir.length_squared() <= 0.0 or node == null:
+		return false
+	var basis := node.transform.basis
+	# The rig-horizontal angle that points at the viewer, and the one that
+	# points along screen +X. `_horizon` walks the rig's own horizontal circle
+	# and reports where a given world axis is most closely matched.
+	var to_camera := _horizon(basis, Vector3(0.0, 0.0, -1.0))
+	var to_right := _horizon(basis, Vector3(1.0, 0.0, 0.0))
+	if is_nan(to_camera) or is_nan(to_right):
+		return false
+	# Cell (1,1) is towards the viewer and cell (1,-1) is screen right, so the
+	# cell-space angle between them is -90 degrees. Whichever SENSE of rotation
+	# reproduces that is the one this projection uses.
+	var quarter := _wrap_pi(to_right - to_camera)
+	var sense := 1.0 if quarter < 0.0 else -1.0
+	var phi := _wrap_pi(atan2(dir.y, dir.x) - atan2(1.0, 1.0))
+	set_yaw(_wrap_pi(to_camera + sense * phi - rest_yaw_rad))
+	return true
+
+
+## The rig-horizontal angle whose world image best matches `world_axis`.
+## NAN when the rig's horizontal plane is degenerate in that direction, which
+## would make the angle meaningless rather than merely imprecise.
+static func _horizon(basis: Basis, world_axis: Vector3) -> float:
+	# A rig-horizontal direction at angle t is (cos t, sin t, 0) -- the rigs are
+	# Z-up, see rig_placement.gd. Its world image is linear in cos t and sin t,
+	# so the best t has a closed form rather than needing a search.
+	var wx := basis * Vector3(1.0, 0.0, 0.0)
+	var wy := basis * Vector3(0.0, 1.0, 0.0)
+	var a := wx.dot(world_axis)
+	var b := wy.dot(world_axis)
+	if Vector2(a, b).length() < FACING_MIN:
+		return NAN
+	return atan2(b, a)
+
+
+static func _wrap_pi(a: float) -> float:
+	while a > PI:
+		a -= TAU
+	while a < -PI:
+		a += TAU
+	return a
+
+
+## The yaw currently applied, in radians. 0.0 when the rig failed to build.
+func yaw() -> float:
+	return _placement.yaw if _placement != null else 0.0
+
+
+## Applies the current placement and yaw to the skeleton immediately, outside
+## the normal modification phase. FOR CHECKS ONLY: a gate has no rendered frame
+## to hang a SkeletonModifier3D off, and asserting that a yaw reaches the bones
+## is exactly what cannot be done by reading the variable back.
+func pose_now() -> void:
+	if _placement != null:
+		_placement._process_modification()

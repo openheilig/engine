@@ -61,7 +61,15 @@ var yaw := 0.0
 ## Runs inside the skeleton's modification phase, i.e. after the mixer. Godot
 ## calls this only when `active` is true and the node has a Skeleton3D parent.
 func _process_modification() -> void:
+	# get_skeleton() is only bound while the skeleton is actually running its
+	# modification phase, so it is null outside a rendered frame. The parent IS
+	# the Skeleton3D by construction (PlayerView adds this as its child), and
+	# falling back to it is what lets a check drive this directly and read the
+	# bones back -- which is the only way to assert that a yaw REACHES the
+	# skeleton rather than merely being stored.
 	var skel := get_skeleton()
+	if skel == null:
+		skel = get_parent() as Skeleton3D
 	if skel == null:
 		return
 	for k in root_bones.size():
