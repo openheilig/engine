@@ -19,7 +19,27 @@ extends Node3D
 
 const SECT: int = Sacred.SECT
 
-@export var start_cell := Vector2(3232.0, 3232.0)  ## middle of sector 50,50
+## Where the default run opens. Overwritten in _ready() by the class tree's own
+## StartPosition record (Startcode.start_cell) -- for START_CLASS below that is
+## cell 3236,2511, sector 50,39, which is retail's new-game spawn for that
+## class rather than a cell anyone chose. The literal here is the FALLBACK for
+## an install whose tree carries no such record, and it is deliberately the old
+## sector-50,50 centre so a missing record degrades to the previously shipped
+## behaviour instead of to (0,0).
+@export var start_cell := Vector2(3232.0, 3232.0)  ## fallback: middle of sector 50,50
+
+## The class whose new-game spawn the default run uses. One name, here, rather
+## than a cell copied into the source: the nine base trees each declare a
+## different StartPosition and the port has no class-selection screen yet, so
+## this is the placeholder that a selection screen replaces.
+## ponytail: a constant until there is a UI to choose with.
+const START_CLASS := "type_npc_seraphim"
+
+## START_CLASS's StartPosition cell, or (-1,-1) when the tree declares none.
+## Separate from start_cell because start_cell is a Vector2 the camera pans to
+## and may be moved by other modes, while this stays the exact integer cell the
+## file gave, which is what _resolve_spawn tests for walkability.
+var _retail_start := Vector2i(-1, -1)
 
 var _cam: IsoCamera
 var _view: SectorView
@@ -390,6 +410,10 @@ func _ready() -> void:
 	print("  sim\ttick %d Hz\tr_sim %.0f\tr_render %.0f\tr_load %.0f\tordered %s" % [
 		_tick_hz, Sim.R_SIM, Sim.R_RENDER, Sim.R_LOAD,
 		Sim.R_SIM < Sim.R_RENDER and Sim.R_RENDER < Sim.R_LOAD])
+
+	# Before every mode branch below, because the record/replay and crowd paths
+	# each return without reaching the streaming block and each read start_cell.
+	_apply_retail_start(install)
 
 	if figure_name != "":
 		await _show_figure(install, figure_name, figure_stage, anim_name, figure_yaw, figure_surface)
@@ -843,10 +867,40 @@ func _region_arg() -> Vector3i:
 ## `--spawn=cx,cy` (a debugging override, not part of the falsifiable path)
 ## skips derivation entirely; component/sectors read 0 in that case, since
 ## no scan ran.
+## Moves start_cell to START_CLASS's own StartPosition record. Non-fatal: an
+## install whose tree has no such record keeps the fallback literal, and says
+## so, rather than aborting a run over a cosmetic default.
+##
+## The cell is used as a SEED, not as the spawn -- _resolve_spawn still derives
+## a walkable cell from the sector it names, so "measured, never hardcoded"
+## survives. What changes is which sector is searched.
+func _apply_retail_start(install: String) -> void:
+	var sc := Sacred.Startcode.new(install.path_join("bin").path_join(START_CLASS))
+	if sc.start_cell == Sacred.Startcode.NO_CELL:
+		push_warning("start: %s declares no StartPosition -- keeping %s" % [START_CLASS, start_cell])
+		return
+	start_cell = Vector2(sc.start_cell)
+	_retail_start = sc.start_cell
+	print("start\tclass=%s\tcell=%d,%d\tlayer=%d\tsector=%d,%d" % [
+		START_CLASS, sc.start_cell.x, sc.start_cell.y, sc.start_layer,
+		sc.start_cell.x / SECT, sc.start_cell.y / SECT])
+
+
 func _resolve_spawn(walk: Walkable) -> Dictionary:
 	if _has_spawn_override:
 		var cls := walk.class_at(floori(_spawn_override.x), floori(_spawn_override.y))
 		return {"cell": _spawn_override, "class": cls, "component": 0, "sectors": 0, "bbox": Rect2i()}
+	# Retail's own StartPosition, used AS the spawn rather than as a search
+	# seed. derive_spawn exists because nothing said where a character begins;
+	# now something does, and "the largest walkable component within 121
+	# sectors" is a worse answer than the cell the shipped game uses. Guarded
+	# on walkability, because a cell retail accepts is not automatically open
+	# under this port's navmesh -- if it is closed the derivation below still
+	# runs and the run still produces a player.
+	if _retail_start != Vector2i(-1, -1) and walk.is_open(_retail_start.x, _retail_start.y):
+		var rc := Vector2(_retail_start) + Vector2(0.5, 0.5)
+		return {"cell": rc, "class": walk.class_at(_retail_start.x, _retail_start.y),
+			"component": 0, "sectors": 0, "bbox": Rect2i()}
 	var centre := Vector2i(int(start_cell.x) / SECT, int(start_cell.y) / SECT)
 	var best := walk.derive_spawn(centre)
 	if best.is_empty():

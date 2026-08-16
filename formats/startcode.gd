@@ -56,6 +56,13 @@ const VARIANT := -2    ## u32 sentinel 0xfffffffe -> string, else a fixed payloa
 const OP_NPC := 1
 const OP_OBJ := 8
 const OP_PLACE := 23
+## StartPosition -- the class's NEW-GAME SPAWN, and there is exactly one record
+## of it per tree. The name is retail's own: the binary ships the script
+## compiler's keyword tables (name strings, a pointer array, then a parallel
+## u32 opcode array), and 45 is what `StartPosition` binds to. Seven opcodes
+## named earlier by unrelated routes all agree with that table, so the pairing
+## is read rather than guessed -- rows 938, 939.
+const OP_START := 45
 
 const SENTINEL := 0xfffffffe
 const NO_CELL := Vector2i(-1, -1)
@@ -108,6 +115,18 @@ var npcs: Array[Dictionary] = []
 ## most of funkcode's op8 records are not here.
 var objects: Array[Dictionary] = []
 
+## Where a NEW CHARACTER of this class begins, from the tree's single opcode-45
+## record. NO_CELL when the tree carries none. The nine base trees each declare
+## a different cell -- which is why the classes start in different regions --
+## while all ten addon/ trees share one Underworld cell (row 939).
+##
+## `start_layer` is the record's third int32 and is ABSENT in five of the nine
+## base trees, so it defaults to 0 rather than being required: gladiator and
+## netscriptcamp write two ints, seraphim writes three. A reader that demanded
+## three would reject more than half the shipped files.
+var start_cell := NO_CELL
+var start_layer := 0
+
 var _unresolved := 0
 
 
@@ -127,12 +146,13 @@ func _init(dir: String) -> void:
 		if length < 4 or off + length > b.size():
 			push_error("Startcode: bad record length %d at %d" % [length, off])
 			return
-		if opcode == OP_PLACE or opcode == OP_NPC or opcode == OP_OBJ:
+		if opcode == OP_PLACE or opcode == OP_NPC or opcode == OP_OBJ or opcode == OP_START:
 			var args := _read_args(b, off + 4, off + length)
 			if args.is_empty():
 				return          # _read_args already reported why
 			match opcode:
 				OP_PLACE: _read_place(args)
+				OP_START: _read_start(args)
 				_: pending.append({"op": opcode, "args": args})
 		off += length
 	for rec in pending:
@@ -213,6 +233,26 @@ func _read_place(args: Array) -> void:
 	# position in the world and would resolve silently.
 	if label != "" and xy.size() >= 2:
 		places[label] = Vector2i(xy[0], xy[1])
+
+
+## The single opcode-45 record: two or three bare int32 and nothing else.
+## A second record would mean the reading is wrong -- there is one new-game
+## spawn per class -- so it warns and keeps the first rather than letting a
+## later record overwrite the one that was checked.
+func _read_start(args: Array) -> void:
+	var v: Array[int] = []
+	for a in args:
+		if a[0] == 0x0b:
+			v.append((a[1] as PackedByteArray).decode_s32(0))
+	if v.size() < 2:
+		push_warning("Startcode: StartPosition record carries %d ints, not 2 or 3" % v.size())
+		return
+	if start_cell != NO_CELL:
+		push_warning("Startcode: a second StartPosition record at %s -- keeping %s"
+			% [Vector2i(v[0], v[1]), start_cell])
+		return
+	start_cell = Vector2i(v[0], v[1])
+	start_layer = v[2] if v.size() > 2 else 0
 
 
 func _read_npc(args: Array) -> Dictionary:

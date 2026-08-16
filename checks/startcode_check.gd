@@ -44,6 +44,24 @@ const EXPECT := {
 	"type_npc_zwerg": [319, 2003, 1425, 226],
 }
 
+## class -> [cell_x, cell_y, layer] from the tree's single opcode-45
+## StartPosition record, the per-class new-game spawn (row 939). Nine distinct
+## cells for nine classes is the finding: if a future reader collapsed them --
+## by keeping the last record instead of the first, or by mistaking a nearby
+## opcode for 45 -- the values would repeat and this table would notice.
+## `layer` is absent in most trees and reads 0 there, which is the DEFAULT and
+## not a measurement; only seraphim (1) and vampirelady (2) state one.
+const START := {
+	"type_npc_daemonin": [352, 1722, 0],
+	"type_npc_darkelve": [3442, 2698, 0],
+	"type_npc_elve": [3440, 2703, 0],
+	"type_npc_gladiator": [3790, 349, 0],
+	"type_npc_magician": [3292, 2508, 0],
+	"type_npc_seraphim": [3236, 2511, 1],
+	"type_npc_vampirelady": [3500, 2477, 2],
+	"type_npc_zwerg": [3470, 2779, 0],
+}
+
 ## The world's real cell extent. Sector grid is 100x128 and row 804 places
 ## script content out to cell 10112,7296, so this is a sanity bound on the
 ## coordinate DECODE (a wrong stride or an unsigned read blows straight past
@@ -80,6 +98,13 @@ func _init() -> void:
 			printerr("%s: counts %s, expected %s" % [cls, got, want])
 			ok = false
 
+		# 5. Exactly one StartPosition per tree, at the cell retail ships.
+		var ws: Array = START[cls]
+		var gs := [sc.start_cell.x, sc.start_cell.y, sc.start_layer]
+		if gs != ws:
+			printerr("%s: StartPosition %s, expected %s" % [cls, gs, ws])
+			ok = false
+
 		# 2. Placement is closed: no created thing lacks a world cell.
 		if sc.unresolved() != 0:
 			printerr("%s: %d named positions do not resolve" % [cls, sc.unresolved()])
@@ -113,6 +138,20 @@ func _init() -> void:
 			shared.append(b)
 	if not shared.is_empty():
 		printerr("body and main-hand names overlap: %s" % [shared])
+		ok = false
+
+	# 6. The eight start cells are all DIFFERENT. This is the assertion that
+	#    survives if the table above were ever "corrected" to match a wrong
+	#    reader: a reader that finds the wrong opcode, or keeps a later record,
+	#    tends to return the SAME value for every tree, and eight equal cells
+	#    would still satisfy every per-class comparison if the table were
+	#    updated to agree with them. Distinctness is what a collapsed reading
+	#    cannot fake.
+	var seen := {}
+	for cls in CLASSES:
+		seen[Vector2i(START[cls][0], START[cls][1])] = true
+	if seen.size() != CLASSES.size():
+		printerr("start cells collapsed: %d distinct over %d classes" % [seen.size(), CLASSES.size()])
 		ok = false
 
 	# 4. THE INTERNAL NEGATIVE CONTROL, and it must be an INFORMATIVE one.
