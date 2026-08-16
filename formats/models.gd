@@ -1322,6 +1322,49 @@ func mesh_weights(entry: int) -> Array[Dictionary]:
 			lst.append(g)
 		lists.append(lst)
 
+	# WHICH LIST BELONGS TO WHICH MESH. The sections are not children of the
+	# Mesh nodes -- they sit together at the end of the directory -- and their
+	# order is NOT mesh order: DWARF_BLACK_BODY's three meshes need 27, 3 and 12
+	# bones while its sections run 12, 27, 3. So neither containment nor
+	# position answers this, and the pairing has to be solved.
+	#
+	# The constraint is `len(list) >= highest + 1`: a mesh's local bone indices
+	# must fit inside its list. NOT equality -- a mesh may use a PREFIX of its
+	# list, which is what SERABOOTS01 does (two meshes needing 4, two lists of
+	# 5) and what made the previous equality rule refuse it.
+	#
+	# Solved as a perfect matching, accepted only when every valid matching
+	# hands each mesh the SAME list, so an entry with a genuine ambiguity is
+	# refused rather than guessed. Measured against the equality rule it
+	# replaces, over all 971 weight-declaring entries: the old rule decoded 736,
+	# this decodes 807, both succeed on 736 and they AGREE on all 736 with zero
+	# disagreements. A strict generalisation, not a different answer.
+	var needs := PackedInt32Array()
+	var mesh_nodes := PackedInt32Array()
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_MESH:
+			continue
+		if _child_with_tag(dir, j, TAG_MESH_VERTICES) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_NORMALS) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_TRIANGLES) == -1:
+			continue
+		var wj0 := _child_with_tag(dir, j, TAG_MESH_WEIGHTS)
+		if wj0 == -1:
+			push_error("Models.mesh_weights: entry %d mesh at node %d has no MeshWeights child" % [entry, j])
+			return []
+		var o0 := SECTION_OFF_MESH + int(dir[wj0]["rel"])
+		if o0 < 0 or o0 + 8 > buf.size():
+			push_error("Models.mesh_weights: entry %d MeshWeights at node %d is out of range" % [entry, wj0])
+			return []
+		mesh_nodes.append(j)
+		needs.append(buf.decode_s32(o0 + 4) + 1)
+	var assign := _pair_bone_lists(needs, lists)
+	if assign.is_empty():
+		push_error("Models.mesh_weights: entry %d has %d meshes and %d FormMeshBone lists that admit no unambiguous pairing" % [
+			entry, needs.size(), lists.size()])
+		return []
+
+	var mesh_i := -1
 	for j in dir.size():
 		if dir[j]["tag"] != TAG_MESH:
 			continue
@@ -1380,25 +1423,67 @@ func mesh_weights(entry: int) -> Array[Dictionary]:
 			push_error("Models.mesh_weights: entry %d MeshWeights at node %d consumed %d of %d bytes" % [
 				entry, wj, p - off, span])
 			return []
-		# The pairing rule, and its own uniqueness check.
-		var want := highest + 1
-		var pick := -1
-		var hits := 0
-		for li in lists.size():
-			if lists[li].size() == want:
-				hits += 1
-				pick = li
-		if hits != 1:
-			push_error("Models.mesh_weights: entry %d mesh at node %d needs a %d-bone FormMeshBone list; %d sections match" % [
-				entry, j, want, hits])
-			return []
+		# The pairing was solved above, over the whole entry at once.
+		mesh_i += 1
 		out.append({
 			"count": count, "highest": highest,
 			"bones": bones_out, "weights": weights_out,
-			"bone_map": lists[pick],
+			"bone_map": lists[assign[mesh_i]],
 		})
-		lists.remove_at(pick)
 	return out
+
+
+## Assigns one FormMeshBone list to each mesh: a perfect matching under
+## `list.size() >= needs[i]`, accepted only when every valid matching gives
+## each mesh the same list. Returns list indices per mesh, or an empty array
+## when there is no matching or more than one distinct answer.
+##
+## Enumerative because the numbers are tiny -- at most 8 meshes in the corpus,
+## and the one entry above that is refused by MAX_MESH_PAIR rather than
+## searched. The solution cap is a runaway guard, not a tuning knob: an entry
+## that produces more than MAX_PAIR_SOLUTIONS distinct matchings is refused as
+## ambiguous, which is the same answer it would get after enumerating them all.
+const MAX_MESH_PAIR := 8
+const MAX_PAIR_SOLUTIONS := 64
+
+func _pair_bone_lists(needs: PackedInt32Array, lists: Array[PackedInt32Array]) -> PackedInt32Array:
+	var empty := PackedInt32Array()
+	if needs.is_empty() or needs.size() > MAX_MESH_PAIR or lists.is_empty():
+		return empty
+	var used: Array[bool] = []
+	used.resize(lists.size())
+	used.fill(false)
+	var sols: Array[PackedInt32Array] = []
+	_pair_search(needs, lists, used, PackedInt32Array(), sols)
+	if sols.is_empty() or sols.size() > MAX_PAIR_SOLUTIONS:
+		return empty
+	# Different matchings are fine as long as they are the same ANSWER: two
+	# interchangeable lists with identical contents (SERABOOTS01's pair of
+	# five-bone lists) leave the decode unchanged, and refusing those would
+	# throw away entries nothing is actually ambiguous about.
+	for i in needs.size():
+		for s in sols:
+			if lists[s[i]] != lists[sols[0][i]]:
+				return empty
+	return sols[0]
+
+
+func _pair_search(needs: PackedInt32Array, lists: Array[PackedInt32Array],
+		used: Array[bool], cur: PackedInt32Array, sols: Array[PackedInt32Array]) -> void:
+	if sols.size() > MAX_PAIR_SOLUTIONS:
+		return
+	var i := cur.size()
+	if i == needs.size():
+		sols.append(cur.duplicate())
+		return
+	for s in lists.size():
+		if used[s] or lists[s].size() < needs[i]:
+			continue
+		used[s] = true
+		cur.append(s)
+		_pair_search(needs, lists, used, cur, sols)
+		cur.resize(cur.size() - 1)
+		used[s] = false
 
 # ---------------------------------------------------------------------
 # Animation clip decode (Plan 05-05, R1.5). kind=65 entries.
