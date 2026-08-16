@@ -50,7 +50,19 @@ const WIDTH := {
 ## 410), which is what identifies the pair. So vectoren.bin is the script's
 ## PROCEDURE TABLE, and it is what turns the spawn records from a flat list
 ## into placement.
-const VEC_HDR := 88        ## u32 count, then padding to the first record
+## 88 is NOT "the header plus padding" -- it is 4 + 84, i.e. the u32 count plus
+## ONE WHOLE RECORD. Record 0 is an all-zero sentinel (offset 0, length 0), so
+## starting here skips it, which is right for this class: `_procs` is keyed by
+## funkcode OFFSET and a zero-length record contributes nothing but a spurious
+## match at offset 0.
+##
+## THE REAL BASE IS 4, and it matters the moment anyone treats a vectoren value
+## as an INDEX rather than walking the table. vectoren's own quest section holds
+## section-1 indices, and resolving each quest's +0x10c and asking whether the
+## symbol is literally `QIS_Trigger<that quest id>` gives 285/285 at base 4 and
+## 0/285 at base 88 -- where it lands one record early, on SelfTriggerQuest<id>,
+## every time. Measured 2026-08-16; see research/formats/install-inventory.md.
+const VEC_HDR := 88        ## count + record 0 -- an OFFSET walk, not an index base
 const VEC_REC := 84
 const VEC_NAME := 64
 
