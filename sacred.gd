@@ -62,6 +62,8 @@ const Creatures := preload("res://formats/creatures.gd")
 const Rigs := preload("res://formats/rigs.gd")
 const Armour := preload("res://formats/armour.gd")
 const Wpmod := preload("res://formats/wpmod.gd")
+const Equipment := preload("res://formats/equipment.gd")
+const Sets := preload("res://formats/sets.gd")
 const Resources := preload("res://formats/resources.gd")
 
 
