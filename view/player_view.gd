@@ -285,6 +285,31 @@ func _style(mesh: MeshInstance3D) -> void:
 		# the right INPUT and the ramp is what would bring the top end down.
 		#
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		# NO DEPTH TEST, BECAUSE A CHARACTER IS A UNIT, NOT TERRAIN (row 1014).
+		#
+		# The rig is true 3D: placed at the cell, the Seraphim's body spans
+		# world z 268.8..310.1 -- 826 DEPTH_STEPs -- while her own floor quad
+		# sits at 287.4, through her waist. With the depth test on, every
+		# pixel of her behind that plane loses, and what survives is the thin
+		# dark cross-section the port drew for days (row 1006's "narrow trunk"
+		# was a MEASUREMENT OF THIS ARTEFACT, not of her geometry). The 2005
+		# engine never depth-tests a character against the ground: units draw
+		# whole, in painter's order.
+		#
+		# So the character opts out of the z-buffer and takes its ordering
+		# entirely from the transparent queue's sort -- node global position
+		# plus the sorting_offset update() maintains -- which is the exact
+		# regime the object sprites already live in. Terrain is opaque and
+		# drawn first, so she stands ON the floor; walls and props are
+		# transparent-queue and sort against her baseline, so they still
+		# occlude her when she walks behind them.
+		#
+		# ponytail: pieces of ONE body no longer depth-test against each
+		# other either -- intra-body overlap is submission order. At 133 px
+		# that reads fine; if a pose ever shows a hand behind the chest it
+		# should be in front of, the upgrade is a vertex-shader z-compress
+		# about the baseline, not turning the test back on.
+		mat.no_depth_test = true
 		# ...AND THE RAMP, WHICH IS THE OTHER HALF OF THAT MECHANISM.
 		#
 		# sub_41B5B0 indexes three 256-entry per-channel tables with its
@@ -594,16 +619,19 @@ func face(_cell: Vector2, dir: Vector2) -> bool:
 	# The rig-horizontal angle that points at the viewer, and the one that
 	# points along screen +X. `_horizon` walks the rig's own horizontal circle
 	# and reports where a given world axis is most closely matched.
-	# WORLD +Z, NOT -Z. IsoCamera sits at Vector3(p.x, p.y, 1000.0) and is never
-	# rotated, so it looks along its own local -Z, i.e. down the world -Z axis --
-	# which means the direction FROM the world TOWARDS it is +Z. SectorView says
-	# the same independently: it lays terrain at `pz = (x + y) * DEPTH_STEP`, so
-	# the cells that are nearer the viewer (larger x+y, drawn lower on screen by
-	# `sy = -(x+y) * HH`) sit at LARGER z. This read -1 and turned every body a
-	# clean 180 degrees, front to the wall -- the horizontal part of the posed
-	# forward is identical under both signs, only its z flips, which is exactly
-	# the shape a facing bug of this kind has.
-	var to_camera := _horizon(basis, Vector3(0.0, 0.0, 1.0))
+	# -Z, CALIBRATED BY RENDER, and the calibration story matters because this
+	# sign has now been "corrected" once in each direction (rows 1007/1014).
+	# The camera-axis argument says towards-the-viewer is +Z 	(camera at
+	# z=+1000, unrotated, terrain depth growing with x+y), and the posed
+	# Toe0-Foot vector agrees with it -- and BOTH are the wrong ground truth:
+	# rendering the dressed body at each yaw and looking for the FACE (red
+	# lips, necklace -- unmistakable, unlike the bare figure whose forward
+	# pigtails read as a face from behind) shows the front at exactly the yaw
+	# this -Z axis produces, on the same frame retail shows its front. The
+	# composed toe vector points BEHIND these rigs' visual front, so any
+	# facing rule derived from it lands 180 degrees off the pixels. The render
+	# is the parity target; the render wins.
+	var to_camera := _horizon(basis, Vector3(0.0, 0.0, -1.0))
 	var to_right := _horizon(basis, Vector3(1.0, 0.0, 0.0))
 	if is_nan(to_camera) or is_nan(to_right):
 		return false

@@ -157,25 +157,26 @@ func _init() -> void:
 		# (4b) WHICH WAY ROUND THE WHOLE SET SITS. Every assertion above is
 		# RELATIVE -- distinct headings, opposites 180 apart, equal quarter
 		# steps -- and every one of them survives turning all four directions
-		# through 180 degrees together. That is not a hypothetical: face() read
-		# world -Z as "towards the camera" when it is +Z, so the hero spawned
-		# with her back to the player for weeks while this check passed.
-		#
-		# So anchor it. Face the seeded direction, cell (1,1), which runs down
-		# the screen (`sy = -(x+y) * HH`) and therefore towards the viewer, then
-		# ask the BODY where its front ended up. The toe sits in front of the
-		# ankle, so the sign of (Toe0 - Foot) is fixed by anatomy rather than by
-		# any convention chosen here -- it is the same signal rest_yaw trusts.
-		# IsoCamera sits at z = +1000 unrotated and SectorView lays nearer cells
-		# at larger z, so a body facing the player has forward.z > 0.
+		# through 180 degrees together. So the absolute side is anchored here,
+		# and the anchor's own history is the warning label: it was first
+		# written the other way round (rows 1007/1014). The camera-axis
+		# argument (camera at z=+1000, towards-the-viewer = +Z) plus "the toe
+		# sits in front of the ankle" both concluded forward.z > 0 -- and the
+		# RENDER refuted them: drawn at the yaw face() produces for cell
+		# (1,1), the dressed body shows its FACE on the same frame retail
+		# does, and the composed Toe0-Foot vector on these rigs points BEHIND
+		# that visual front. So the calibrated convention, fixed by pixels
+		# against retail and not by anatomy reasoning, is forward.z < 0 when
+		# facing the viewer. This assertion pins face() to THAT calibration;
+		# if it ever fires, re-render before re-reasoning.
 		pv.face(cell, Vector2(1.0, 1.0))
 		pv.pose_now()
 		var fwd := _posed_forward(pv)
 		expect(not is_nan(fwd.z), "the test body has no foot bones to read a facing off")
 		if not is_nan(fwd.z):
-			expect(fwd.z > 0.0,
-				"facing cell (1,1) leaves the body's forward at z=%.3f; towards the "
-				% fwd.z + "viewer is +z, so the character is turned away from the player")
+			expect(fwd.z < 0.0,
+				"facing cell (1,1) leaves the composed toe-forward at z=%.3f; the render-calibrated "
+				% fwd.z + "convention (row 1014) is z < 0 towards the viewer, so the character is turned away")
 
 		# (5) THE ROTATION MUST REACH THE MESH. Everything above tests a number;
 		# this drives rig_placement itself and reads a bone back out, so a yaw
