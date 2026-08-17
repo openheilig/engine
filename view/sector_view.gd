@@ -66,25 +66,27 @@ const BAND_TIE_EPS := 0.001
 ## base_pos comment in _build_objects for why the split exists at all.
 ##
 ## SWEPT, not chosen. Whole-frame delta against retail's own spawn capture --
-## same script, same millisecond, pixels differing by >24 out of 786432:
+## same script, same millisecond, any-nonzero-difference pixels of 786432:
 ##
-##    96  20.66%     160  17.73%     320  17.73%
-##   128  19.85%     192  17.73%     no threshold, every sprite   18.06%
-##                   256  17.73%     no height at all, corner     20.67%
+##     0 (no height, corner)  17.53%      256  14.24%
+##   128                      15.77%      400  16.85%
+##   192                      14.24%      no threshold, every sprite  21.42%
 ##
-## The curve is FLAT from 160 to 320 because only two sprites in this scene
-## sit anywhere near that span -- the chapel's 460-wide interior shell and
-## CW_Tree at 344 -- and every threshold in it classifies both the same way.
-## It falls off below 160 because the widest genuine UPRIGHT present, Busch 41
-## at 158, starts being misread as a structure and loses its foot.
+## A real minimum with a floor two values wide, not a plateau: below it the
+## uprights lose their foot, above it CW_Tree at 344 and the chapel's 460-wide
+## interior shell start being sorted at a foot that spans half a room, and
+## giving EVERY sprite its height is the worst of the three.
 ##
-## 256 is the midpoint of the plateau rather than an edge of it: the value
-## least likely to reclassify something when a scene with other art is
-## measured. That the plateau is flat is itself the warning -- this scene
-## brackets the threshold, it does not pin it.
+## (These numbers are the SECOND sweep. The first, taken while the anchor bug
+## above still displaced every non-zero-anchor sprite, showed a flat 160..320
+## plateau and no minimum -- the placement error was masking the very signal
+## the sweep was looking for. Re-measure this constant after anything that
+## moves sprites.)
 const STRUCTURE_W := 256
 
-## REFUTED, and recorded so it is not tried again. The width test above lets a
+## REFUTED, and recorded so it is not tried again. (Measured BEFORE the anchor
+## fix in _build_objects, so the absolute numbers are the old baseline; the
+## ordering between them is the finding.) The width test above lets a
 ## wine rack move forward over the candles standing ON its own shelves, so the
 ## obvious next rule was "only give the height to a genuine UPRIGHT, something
 ## far taller than it is wide". It loses at every ratio measured -- same frame,
@@ -97,6 +99,7 @@ const STRUCTURE_W := 256
 ## So squat objects gain more from being sorted at their foot than the candles
 ## lose by being covered. The candle occlusion is real and still open; it is
 ## just not what an aspect ratio fixes.
+
 ## --sortcube=CX,CY marker-cube side length in screen pixels -- one retail cell
 ## width (IsoCamera.HW * 2), so the proxy reads at the same scale a character
 ## sprite would.
@@ -860,8 +863,27 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy
 			continue
 		var quads_before: int = run["pos"].size()
 		var size: Vector2i = spr["size"]
-		var anchor: Vector2i = spr["anchor"]
-		var origin := Vector2(p.x + anchor.x, p.y - anchor.y)
+		# THE PLACEMENT IS THE TILE ORIGIN. The tiles' dst rects are already
+		# in the sprite's own pixel frame, so they go down at p and nowhere
+		# else; retail adds nothing to them.
+		#
+		# This read `p + (anchor.x, -anchor.y)` and that was the single
+		# largest error left in the frame -- 23.97% -> 14.24% whole-frame
+		# delta against retail's spawn capture when it came out (row 1017).
+		# mixed.pak's header dx/dy is not a hotspot to apply: measured across
+		# the corpus it is exactly the NEGATION of the tiles' own minimum dst
+		# corner -- Bench 2 anchor (0,-7) with dst starting at y 7, Bench 1
+		# (0,-36) starting at 36, MINI_BLUE_4 (-4,0) starting at x 4, and
+		# (0,0) on every sprite whose tiles already start at the corner. So
+		# applying it CANCELS the offset the dst rects carry, re-seating each
+		# sprite on its bounding box instead of on its authored frame. Every
+		# chapel structure has a zero anchor, which is why the walls and the
+		# floor lined up perfectly while the benches sat 7 pixels high and the
+		# small props drifted a few pixels each -- the error was invisible
+		# exactly where it was zero.
+		#
+		# What dx/dy IS for is unrecovered; it is not needed to place a sprite.
+		var origin := p
 		var pz := ((-p.y + size.y) / HH) * DEPTH_STEP + 2.0
 		# The swap bucket id: (region_key, class). region_key >= 0 identifies
 		# the building; the class bit (0 = exterior/roof, 1 = interior) picks

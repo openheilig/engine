@@ -61,23 +61,59 @@ const PIECES := [
 	{"id": 90, "sheet": "GUI_MAIN_01", "rect": Rect2i(136, 0, 33, 33), "at": Vector2i(434, 729)},
 	{"id": 92, "sheet": "GUI_MAIN_01", "rect": Rect2i(170, 0, 33, 33), "at": Vector2i(558, 729)},
 	{"id": 94, "sheet": "GUI_MAIN_01", "rect": Rect2i(204, 0, 33, 33), "at": Vector2i(594, 705)},
-	# Single-player's collect toggle, and the unnamed static at the right edge.
+	# Single-player's collect toggle.
 	{"id": 135, "sheet": "GUI_MAIN_01", "rect": Rect2i(184, 230, 35, 25), "at": Vector2i(496, 743)},
-	{"id": 82, "sheet": "GUI_MAIN_01", "rect": Rect2i(0, 0, 33, 33), "at": Vector2i(898, 686)},
+	# GONE: id 82, a 33x33 button this file placed at (898, 686) and called
+	# "the unnamed static at the right edge". Retail's spawn frame draws bare
+	# cobblestones there -- the button belongs to some other window's state,
+	# not to the taskbar at rest, and 33x33 of interface over open ground is a
+	# thing the two-engine compare charges for. Put back only with a retail
+	# frame that shows it.
 	# The two small icons flanking the console.
 	{"id": 40, "sheet": "GUI_MAIN_03", "rect": Rect2i(240, 201, 15, 17), "at": Vector2i(424, 690)},
 	{"id": 41, "sheet": "GUI_MAIN_03", "rect": Rect2i(238, 183, 17, 17), "at": Vector2i(586, 690)},
 ]
 
-## The five combat-art slots, ids 177..181. They form a shallow arc dipping UP
-## at the centre, and the centre one sits at x 497 + 15 = 512, which is exactly
+## THE PORTRAIT WINDOW, top right -- the hero's frame and the bar under it.
+##
+## Not from the gfx table but from a PIXEL MATCH, and it is exact: the whole
+## 95x107 block at GUI_MAIN_02's own origin, laid at (928, 17), reproduces
+## retail's frame ring, its horned finial and the leafwork down its right side
+## to the pixel. 95x107 is the size this file's header already named as the
+## two "orb-looking" elements of that sheet -- it was right about the size and
+## wrong about the window.
+##
+## THE INTERIOR IS TRANSPARENT AND STAYS THAT WAY. Retail renders the hero's
+## bust live inside the ring; the port has no render-to-texture for it yet, so
+## the frame is drawn and the middle shows the world through. That is the
+## honest partial: the frame is transcribed, the portrait is missing, and
+## nothing here invents a face.
+const PORTRAIT := [
+	{"sheet": "GUI_MAIN_02", "rect": Rect2i(0, 0, 95, 107), "at": Vector2i(932, 15)},
+]
+
+## The five potion slots, ids 177..181. They form a shallow arc dipping UP at
+## the centre, and the centre one sits at x 497 + 15 = 512, which is exactly
 ## half of 1024 -- the arithmetic checks itself.
+##
+## THE RECT IS THE SLOT'S CONTENTS, NOT THE SLOT. Column 129 of GUI_MAIN_05
+## holds five DIFFERENT potions stacked vertically -- red, blue, green, purple,
+## amber -- and taking one per slot down the column drew the belt as though the
+## hero carried a full rainbow of them. Retail's spawn frame carries ONE, and
+## the four it does not carry show a single shared EMPTY flask at (195, 65).
+##
+## Measured, not guessed: matching retail's own 31x31 at each of these five
+## screen positions against every GUI sheet returns (129,65) for the first and
+## (195,65) for all four others, at a mean per-channel error under 1.0 -- which
+## is the art, not a resemblance. The positions above are confirmed by the same
+## match.
+const POTION_EMPTY := Rect2i(195, 65, 31, 31)
 const ART_SLOTS := [
 	{"id": 177, "rect": Rect2i(129, 65, 31, 31), "at": Vector2i(435, 667)},
-	{"id": 178, "rect": Rect2i(129, 98, 31, 31), "at": Vector2i(465, 653)},
-	{"id": 179, "rect": Rect2i(129, 131, 31, 31), "at": Vector2i(497, 649)},
-	{"id": 180, "rect": Rect2i(129, 164, 31, 31), "at": Vector2i(530, 653)},
-	{"id": 181, "rect": Rect2i(129, 197, 31, 31), "at": Vector2i(560, 667)},
+	{"id": 178, "rect": POTION_EMPTY, "at": Vector2i(465, 653)},
+	{"id": 179, "rect": POTION_EMPTY, "at": Vector2i(497, 649)},
+	{"id": 180, "rect": POTION_EMPTY, "at": Vector2i(530, 653)},
+	{"id": 181, "rect": POTION_EMPTY, "at": Vector2i(560, 667)},
 ]
 const ART_SHEET := "GUI_MAIN_05"
 
@@ -156,6 +192,8 @@ func _init(tex_pak) -> void:
 	var cache: Dictionary = {}
 	for p in PIECES:
 		_blit(tex_pak, cache, p["sheet"], p["rect"], p["at"])
+	for w in PORTRAIT:
+		_blit(tex_pak, cache, w["sheet"], w["rect"], w["at"])
 	for a in ART_SLOTS:
 		_blit(tex_pak, cache, ART_SHEET, a["rect"], a["at"])
 	_wings(tex_pak, cache)

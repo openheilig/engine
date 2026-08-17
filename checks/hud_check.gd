@@ -44,7 +44,23 @@ func _init() -> void:
 		pieces += 1
 	for a in Hud.ART_SLOTS:
 		_bounds(a["rect"], a["at"], "art slot %d" % int(a["id"]))
-	expect(pieces >= 9, "only %d taskbar pieces are described" % pieces)
+	expect(pieces >= 8, "only %d taskbar pieces are described" % pieces)
+	# THE PORTRAIT WINDOW IS ALLOWED OFF THE RIGHT EDGE, and only there. Its
+	# 95-wide frame starts at 932, so three columns of the leafwork fall past
+	# 1024 -- retail clips them exactly the same way, which is visible in its
+	# own capture. So this asserts the weaker true property: the piece reads
+	# inside its sheet, starts on screen, and overlaps the canvas.
+	for w in Hud.PORTRAIT:
+		var wr: Rect2i = w["rect"]
+		var wa: Vector2i = w["at"]
+		expect(wr.position.x >= 0 and wr.position.y >= 0
+			and wr.end.x <= SHEET and wr.end.y <= SHEET,
+			"portrait piece reads %s, outside its %dx%d sheet" % [wr, SHEET, SHEET])
+		expect(wa.x >= 0 and wa.y >= 0 and wa.x < CANVAS.x and wa.y < CANVAS.y,
+			"portrait piece at %s does not start on the canvas" % wa)
+		expect(wa.y + wr.size.y <= CANVAS.y,
+			"portrait piece at %s runs off the BOTTOM, which retail never does" % wa)
+	expect(not Hud.PORTRAIT.is_empty(), "the portrait window is not described")
 
 	# THE CONSOLE IS CENTRED. Retail computes x = 512 - W/2 rather than storing
 	# a literal, so this is the arithmetic and not a measurement.
@@ -94,7 +110,8 @@ func _init() -> void:
 	# The wings CARRY THE SLOTS -- one rail tile per slot per side -- so the
 	# count is derived from SLOTS rather than from a fixed screen span.
 	var wings := Hud.SLOTS * 2
-	var want := Hud.PIECES.size() + Hud.ART_SLOTS.size() + Hud.SLOTS * 2 + 1 + wings
+	var want := Hud.PIECES.size() + Hud.PORTRAIT.size() + Hud.ART_SLOTS.size() \
+		+ Hud.SLOTS * 2 + 1 + wings
 	expect(hud.drawn == want,
 		"the HUD placed %d pieces, expected %d (%d of them wing tiles)" % [
 			hud.drawn, want, wings])
