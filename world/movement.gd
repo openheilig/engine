@@ -7,14 +7,27 @@ extends RefCounted
 ## Sacred.slot_uv and IsoCamera.cell_to_world/world_to_cell already use for
 ## a coordinate-space function that owns no data of its own.
 
-## ponytail: 4.0 cells/sec is UNMEASURED -- no retail capture of Sacred's
-## own player speed exists yet (same placeholder posture sim.gd's TICK_HZ
-## comment states this class about its own 30 Hz). The upgrade path is a
-## retail capture through install/shim/autopilot.c, the same route that
-## measured IsoCamera's three ZOOM_SCALES steps. Do not read this as a
-## recovered constant. It replaces the deleted Sim.STEP_CELLS_PER_TICK,
-## which was itself a placeholder never meant to survive Phase 4.
-const CELLS_PER_TICK := 4.0 / float(Sim.TICK_HZ)
+## MEASURED from retail on 2026-08-17 (row 1013), replacing the 4.0 placeholder
+## that made the port's hero cover ground ~2.7x faster than the game it copies.
+##
+## The measurement, run twice through install/shim/autopilot.c: load the
+## harness save, click-walk the hero along a single iso axis over open grass,
+## capture the framebuffer every 500 ms, and phase-correlate consecutive
+## frames -- the camera tracks the player, so its total scroll IS the walk.
+## Two independent runs of the same route landed at (277,139) and (275,138)
+## screen px net -- a pure 2:1 iso-axis ratio, 5.77 cells at the 48 px/cell
+## x-step -- over ~4.1 s of visible motion: 1.4-1.6 cells/s. The zoom step
+## was pinned from the same frames by sprite height (~133 px = the
+## nominal-zoom humanoid). 1.5 is the midpoint.
+##
+## KNOWN LIMITS, stated rather than hidden: the walking interval is bracketed
+## by 500 ms sampling (about +-0.15 cells/s), the camera follows with a
+## catch-up dead-zone so only TOTALS are trusted and never per-window rates,
+## and memory reads could not confirm it -- the heap layout is not
+## reproducible across runs, so SACRED_WATCH's row-812 offset read the click
+## DESTINATION here, not the player. A tighter number wants a per-run offset
+## re-derivation inside one process life.
+const CELLS_PER_TICK := 1.5 / float(Sim.TICK_HZ)
 
 
 ## Moves `from` by `delta`, resolved one axis at a time -- x against the

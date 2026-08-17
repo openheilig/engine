@@ -22,13 +22,16 @@ extends "res://checks/check.gd"
 ## reinstated or if positional pairing were adopted.
 const WANT_DECLARE := 971
 
-## 802 until the geometric tiebreaker landed in Models._pair_by_geometry. The
-## strict rule accepts a matching only when EVERY valid matching hands each mesh
-## the same list; the tiebreaker resolves the ties it refused by scoring mean
-## vertex-to-bone distance. Measured, as the assert message below demands: 1349
-## entries decided by the strict rule alone, 139 ties then broken geometrically
-## with 0 disagreements against it, 118 of which became entries that now decode.
-const WANT_DECODE := 920
+## 802 until the geometric tiebreaker landed in Models._pair_by_geometry, 920
+## until the FILE'S OWN pairing was found (row 1009): each FormMesh's payload
+## int is a 1-based all-mesh reference, so the pairing stopped being a search.
+## Measured, as the assert message below demands: the reference decides all
+## 1567 entries with pair inputs, agrees with the strict rule on every one of
+## the 1349 it decides alone (bonepair_check enforces both), and turns the 79
+## entries BOTH fallbacks refused -- DUNKELELVE.GRN among them -- into decodes.
+## 971 declare, 955 decode; the 16 remaining refusals are weight-stream
+## defects, not pairing ones.
+const WANT_DECODE := 955
 
 ## The entry that refutes POSITIONAL pairing. Three meshes needing 27, 3 and 12
 ## bones, whose sections appear in the directory as 12, 27, 3 -- so a reader

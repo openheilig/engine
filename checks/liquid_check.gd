@@ -56,6 +56,15 @@ func _init() -> void:
 		var n: float = mat.get_shader_parameter(&"frame_count")
 		expect(n > 1.0, "liquid %d (%s) has %d frame(s); an animation needs more than one"
 			% [id, LiquidScript.MATERIALS[id], int(n)])
+		# THE ORDER PIN (row 1011). The pak carries exactly two 20-frame sets,
+		# and the binary's initialiser hardcodes 0x14 at records 6 and 7 -- so
+		# the shipped frame counts land on those indices only under the true
+		# record order. Row 1008's table was one slot off (it missed the second
+		# adjacent B_WATER block) and every OTHER assertion here passed anyway;
+		# this is the one that would have caught it.
+		expect((int(n) == 20) == (id == 6 or id == 7),
+			"liquid %d (%s) has %d frames; only records 6 (C_LAVA) and 7 (A_SCHWEFEL) are 20-frame sets, so the table order is off" % [
+				id, LiquidScript.MATERIALS[id], int(n)])
 		frames.append("%s=%d" % [LiquidScript.MATERIALS[id], int(n)])
 
 	# (3) the marker, counted straight off the file rather than through the
@@ -99,6 +108,30 @@ func _init() -> void:
 	var got: int = mi.get_meta("liquid_quads", 0)
 	expect(got == want, "sector %s has %d liquid cells but emitted %d liquid quad(s)"
 		% [SEA, want, got])
+
+	# (4c) THE PER-SECTOR MATERIAL ID (row 1010): keyx record bytes 736/737,
+	# the embedded environment block's +0xF7/+0xF8. Every record must index
+	# the 14-entry table -- one out-of-range byte means the offset drifted,
+	# and the fallback would silently paint that sector B_WATER.
+	var kf := FileAccess.open(install.path_join("world/sectors.keyx"), FileAccess.READ)
+	expect(kf != null, "sectors.keyx did not open")
+	if kf != null:
+		kf.seek(4)
+		var nrec := kf.get_32()
+		kf.seek(256)
+		var keys := kf.get_buffer(nrec * 768)
+		var out_of_range := 0
+		for i in nrec:
+			if keys[i * 768 + 736] >= 14 or keys[i * 768 + 737] >= 14:
+				out_of_range += 1
+		expect(out_of_range == 0,
+			"%d of %d keyx records carry a liquid id outside 0..13 -- the environment-block offset moved" % [
+				out_of_range, nrec])
+	# The open sea reads B_WATER through the public path -- id 0, the value
+	# measured on this exact sector when the offset was found.
+	expect(world.liquid_id(SEA.x, SEA.y, 9) == 0,
+		"sea sector %s reads liquid id %d for nibble 9, expected 0 (B_WATER)" % [
+			SEA, world.liquid_id(SEA.x, SEA.y, 9)])
 
 	# (5) the depth ordering, from the constants rather than from the mesh: the
 	# liquid bump must clear every overlay the same cell can stack and still

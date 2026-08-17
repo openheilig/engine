@@ -1312,7 +1312,12 @@ func mesh_weights(entry: int) -> Array[Dictionary]:
 		return []
 	var needs: PackedInt32Array = inputs["needs"]
 	var lists: Array[PackedInt32Array] = inputs["lists"]
-	var assign := _pair_bone_lists(needs, lists)
+	# The FILE states the pairing (row 1009): each FormMesh's payload int names
+	# its mesh. Read that first; the matching below survives as a fallback for
+	# a file whose reference is malformed -- which no retail entry is.
+	var assign := _pair_by_reference(buf, dir, needs, lists)
+	if assign.is_empty():
+		assign = _pair_bone_lists(needs, lists)
 	if assign.is_empty():
 		# The size constraint ties on left/right symmetric pieces -- two boots,
 		# two same-size lists holding one leg each -- so geometry breaks it.
@@ -1463,6 +1468,70 @@ func _pair_inputs(entry: int, buf: PackedByteArray, dir: Array) -> Dictionary:
 			return {}
 		needs.append(buf.decode_s32(o0 + 4) + 1)
 	return {"needs": needs, "lists": lists}
+
+
+## The pairing as the FILE states it (row 1009). Each FormMesh node
+## (0xCA5E0C03) -- the parent its FormMeshBoneSection actually hangs under --
+## carries one payload int32: the 1-BASED index of the Mesh node its bone list
+## belongs to, counted over ALL Mesh nodes in directory order, drawable or not.
+##
+## Found on DUNKELELVE.GRN (entry 402), the one body whose tie neither counting
+## nor geometry could break: its two size-10 lists compete for the meshes
+## needing 9 and 10, spatially inseparable (score ratio 1.026 against the 1.15
+## margin), and the payloads [7 3 4 6 2 5 1] answer it outright. Validated over
+## the corpus before being trusted: on ALL 971 skinned entries the payloads are
+## unique, in range, and hand every drawable mesh a list satisfying
+## `size >= highest+1`; on ALL 807 entries the matching below decides on its
+## own, the two agree by content. Zero disagreements is what promotes this from
+## a reading of one entry to the rule.
+##
+## Returns list indices per mesh (same shape as _pair_bone_lists), or empty when
+## the reference is missing or malformed -- then the matching takes over.
+func _pair_by_reference(buf: PackedByteArray, dir: Array, needs: PackedInt32Array,
+		lists: Array[PackedInt32Array]) -> PackedInt32Array:
+	var empty := PackedInt32Array()
+	# Payload per FormMesh, in directory order -- the same order _pair_inputs
+	# collects the sections in, which is what lets the two arrays line up.
+	var pay := PackedInt32Array()
+	for j in dir.size():
+		if dir[j]["tag"] == TAG_FORM_MESH:
+			pay.append(buf.decode_s32(SECTION_OFF_MESH + int(dir[j]["rel"])))
+	if pay.size() != lists.size():
+		return empty
+	# 0-based all-mesh index of each drawable mesh, in the drawable order that
+	# `needs` uses. The payload's index space is ALL Mesh nodes: six retail
+	# entries carry non-drawable meshes and their sections reference those too.
+	var drawable_all := PackedInt32Array()
+	var all_i := -1
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_MESH:
+			continue
+		all_i += 1
+		if _child_with_tag(dir, j, TAG_MESH_VERTICES) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_NORMALS) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_TRIANGLES) == -1:
+			continue
+		drawable_all.append(all_i)
+	var total := all_i + 1
+	var seen := {}
+	var assign := PackedInt32Array()
+	assign.resize(needs.size())
+	assign.fill(-1)
+	for k in pay.size():
+		# Unique and in range, or the whole reference is distrusted -- a file
+		# with one bad payload should not have its other six believed.
+		if pay[k] < 1 or pay[k] > total or seen.has(pay[k]):
+			return empty
+		seen[pay[k]] = true
+		var i := drawable_all.find(pay[k] - 1)
+		if i >= 0:
+			assign[i] = k
+	for i in needs.size():
+		# Every drawable mesh must be named, and handed a list its local
+		# indices fit inside -- the same constraint the matching enforces.
+		if assign[i] < 0 or lists[assign[i]].size() < needs[i]:
+			return empty
+	return assign
 
 
 ## Assigns one FormMeshBone list to each mesh: a perfect matching under
@@ -1622,6 +1691,7 @@ func pairing_verdicts(entry: int) -> Dictionary:
 	return {
 		"needs": needs,
 		"lists": lists,
+		"reference": _pair_by_reference(buf, dir, needs, lists),
 		"strict": _pair_bone_lists(needs, lists),
 		"geometric": _pair_by_geometry(entry, needs, lists),
 	}

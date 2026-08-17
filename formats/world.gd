@@ -9,6 +9,12 @@ var _by_key: Dictionary[int, int] = {}   ## gy*100+gx -> record index
 var _off := PackedInt64Array()
 var _csize := PackedInt64Array()
 var _dsize := PackedInt64Array()
+## The two per-sector liquid material ids out of the record's embedded
+## environment block (Common.KEY_LIQ9/KEY_LIQ10, row 1010) -- kept as two
+## bytes per record rather than the whole block, because nothing else in the
+## block is decoded yet.
+var _liq9 := PackedByteArray()
+var _liq10 := PackedByteArray()
 
 func _init(world_dir: String) -> void:
 	var kf := FileAccess.open(world_dir.path_join("sectors.keyx"), FileAccess.READ)
@@ -24,12 +30,16 @@ func _init(world_dir: String) -> void:
 	_off.resize(n)
 	_csize.resize(n)
 	_dsize.resize(n)
+	_liq9.resize(n)
+	_liq10.resize(n)
 	for i in n:
 		var base := i * Common.KEY_REC
 		_by_key[keys.decode_u32(base + Common.KEY_COORD)] = i
 		_off[i] = keys.decode_u32(base + Common.KEY_OFF)
 		_csize[i] = keys.decode_u32(base + Common.KEY_CSIZE)
 		_dsize[i] = keys.decode_u32(base + Common.KEY_DSIZE)
+		_liq9[i] = keys[base + Common.KEY_LIQ9]
+		_liq10[i] = keys[base + Common.KEY_LIQ10]
 
 func is_open() -> bool:
 	return _f != null
@@ -57,6 +67,18 @@ func entries(gx: int, gy: int) -> PackedByteArray:
 	var d := sector(gx, gy)
 	return PackedByteArray() if d.is_empty() else d.slice(
 		Common.NAME, Common.NAME + Common.SECT * Common.SECT * Common.CELL)
+
+## The sector's liquid material id for one of the two liquid cell nibbles
+## (WldxEntry +0x1f high nibble 9 or 10) -- an index into the 14-entry
+## animated-liquid material table, or -1 if the sector is absent. Retail
+## keeps two ids per sector because 22 sectors really do carry two different
+## liquids at once (water shore against a lava flow).
+func liquid_id(gx: int, gy: int, nibble: int) -> int:
+	var i: int = _by_key.get(gy * 100 + gx, -1)
+	if i < 0:
+		return -1
+	return _liq10[i] if nibble == 10 else _liq9[i]
+
 
 ## Tile ids of one sector, row-major, 64x64. Empty if the sector is absent.
 ## The stream's leading 32-byte name is deliberately ignored: it is a stale

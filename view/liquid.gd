@@ -9,61 +9,70 @@ extends RefCounted
 ## water. Walkable.is_liquid already knew which cells those were; only the
 ## drawing was missing.
 ##
-## THE TABLE IS MEASURED, NOT GUESSED (row 1008). The 14 materials are built by
-## an unrolled initialiser in the retail binary -- sub_83A6572 in the Linux
-## build this install pairs with -- as 14 blocks 0x63 bytes apart, each one
-## sprintf-ing a "%s%.2d.TGA" format string and storing the decoded frames to
-## `[edi + esi*4 + 0x9118 + k*0xD8]`. Block 0 stores at 0x9118 and block 13 at
-## 0x9C10, and 0x9C10 - 0x9118 = 0xAF8 = 13 * 0xD8 exactly, so block order IS
-## record order and the names below are read straight off that sequence.
+## THE TABLE IS MEASURED, NOT GUESSED (rows 1008/1011). The 14 materials are
+## built by an unrolled initialiser in the retail binary -- sub_83A6572 in the
+## Linux build this install pairs with -- as 14 blocks, each storing a count to
+## record +0xC8, flag bytes to +0xCC and +0xD4, an alpha multiplier to +0xD0,
+## then sprintf-ing "%s%.2d.TGA" per frame into `[0x9118 + k*0xD8 + i*4]`.
+## Record order is push order, read off the count stores that bracket every
+## block. TWO ADJACENT B_WATER BLOCKS open the sequence -- row 1008's table
+## missed the second one and came out shifted; the frame counts pin the truth,
+## because the pak's two 20-frame sets (C_LAVA, A_SCHWEFEL) land exactly on
+## the records whose +0xC8 says 0x14 only under this order. It also restores
+## row 669's original names, wrongly called shifted in between.
 ##
-## Corroboration: each block also writes two flag bytes, at record +0xCC and
-## +0xD4. The +0xCC flag comes out 1 for exactly idx 0,1,2,3,10,11 -- the same
-## six indices row 669 recovered independently from the WINDOWS build. Two
-## separately-compiled binaries agreeing on the record order is what makes this
-## a reading rather than an inference. (Row 669's NAMES are shifted one slot
-## against this; its flag indices are right. Trust the indices.)
-##
-## ponytail: the +0xCC flag is not acted on here. Row 669 reads it as "this
-## liquid is reflective" and gates a mirrored grey pass on it, but that pass is
-## a second surface with its own geometry, and the first thing to fix is that
-## water is not drawn at all.
+## Corroboration: the +0xCC flag is 1 for exactly idx 0,1,2,3,10,11 -- the six
+## indices row 669 recovered independently from the WINDOWS build, and under
+## this order they are all waters bar E_WATER and the last B_WATER, exactly as
+## row 669's own parenthetical describes.
 
 const Pak := preload("res://formats/pak.gd")
 const LIQUID_SHADER: Shader = preload("res://shaders/liquid.gdshader")
 
-## Record k's TGA stem, from the initialiser described above. B_WATER appears at
-## three indices, which is why texture.pak carries 12 liquid image sets for 14
-## records -- and it is also the only string with three xrefs into that
-## function, so the repeat is confirmed from the other side too.
+## Per-record fields, from the initialiser described above.
+##   stem        the TGA family; B_WATER holds three slots (0, 1, 13), which is
+##               also its three xrefs into the function.
+##   +0xCC       REFLECTIVE -- gates retail's pass-1 mirrored ambient quad.
+##   +0xD0       ALPHA MULTIPLIER, applied to the cell's SIGNED corner bytes
+##               (+0x10..13, which on liquid cells hold DEPTH: the open sea is
+##               -20, shallows rise to 0) and clamped to 0..255. Negative
+##               multiplier times negative depth = opaque water that fades out
+##               at the shoreline. -255 means opaque at any depth at all.
+##   +0xD4       set on every lava and the schwefel -- "hot", unconsumed here.
 const MATERIALS := [
-	"B_WATER",     # 0
-	"C_WATER",     # 1
-	"D_WATER",     # 2
-	"A_LAVA",      # 3
-	"B_LAVA",      # 4
-	"C_LAVA",      # 5
-	"A_SCHWEFEL",  # 6
-	"D_LAVA",      # 7
-	"E_WATER",     # 8
-	"F_WATER",     # 9
-	"G_WATER",     # 10
-	"E_LAVA",      # 11
-	"B_WATER",     # 12
-	"B_WATER",     # 13
+	"B_WATER",     # 0   reflective  alpha -12
+	"B_WATER",     # 1   reflective  alpha -12
+	"C_WATER",     # 2   reflective  alpha -12
+	"D_WATER",     # 3   reflective  alpha -12
+	"A_LAVA",      # 4               alpha -255  hot
+	"B_LAVA",      # 5               alpha -255  hot
+	"C_LAVA",      # 6               alpha -255  hot   (20 frames)
+	"A_SCHWEFEL",  # 7               alpha -255  hot   (20 frames)
+	"D_LAVA",      # 8               alpha -255  hot
+	"E_WATER",     # 9               alpha -255
+	"F_WATER",     # 10  reflective  alpha -24
+	"G_WATER",     # 11  reflective  alpha -12
+	"E_LAVA",      # 12              alpha -255  hot
+	"B_WATER",     # 13              alpha -12
 ]
+const ALPHA_MULT := [-12, -12, -12, -12, -255, -255, -255, -255, -255, -255,
+	-24, -12, -255, -12]
+const REFLECTIVE := [true, true, true, true, false, false, false, false,
+	false, false, true, true, false, false]
 
 ## Frames are numbered from 00 and run until the next number is absent; the sets
-## measured in texture.pak are 50 frames except C_LAVA and A_SCHWEFEL at 20.
-## Capped so a pak whose numbering does not terminate cannot spin here.
+## measured in texture.pak are 50 frames except C_LAVA and A_SCHWEFEL at 20 --
+## the same counts the initialiser hardcodes at record +0xC8, which is the
+## agreement that pinned the record order. Capped so a pak whose numbering does
+## not terminate cannot spin here.
 const FRAME_MAX := 64
 
-## Animation rate. ponytail: NOT measured. The material record has more fields
-## than the frame array and the flags -- one of them is very likely a delay --
-## but nothing here has traced them, and a still surface reads as more broken
-## than a slightly-wrong-speed one. 12 fps runs a 50-frame set in ~4.2 s.
-## Measure it against retail before treating this number as parity.
-const FPS := 12.0
+## Animation cadence, measured from the frame-selection arithmetic in the draw
+## (sub_80E3EB2): frame = ((ms >> 1) & 0x3FF) * count / 1024, i.e. the WHOLE
+## frame set loops once every 2048 ms whatever its length -- 50 frames run at
+## ~24.4 fps, the two 20-frame sets at ~9.8 fps. Not a per-record field; the
+## record has no delay, only the count.
+const CYCLE_MS := 2048.0
 
 ## Liquid images are 128x128 (terrain tiles are 256x256), and the surface tiles
 ## in SCREEN space -- this is a 2D game, and the quads' own vertex positions are
@@ -122,37 +131,25 @@ func _build(id: int) -> ShaderMaterial:
 	mat.shader = LIQUID_SHADER
 	mat.set_shader_parameter(&"frames", tex)
 	mat.set_shader_parameter(&"frame_count", float(images.size()))
-	mat.set_shader_parameter(&"fps", FPS)
+	mat.set_shader_parameter(&"cycle_ms", CYCLE_MS)
 	return mat
 
 
-## The liquid material id for one sector.
+## The liquid material id for one sector, straight from the file (row 1010).
 ##
-## THIS IS THE ONE PIECE STILL UNSOURCED, and it is deliberately isolated here
-## rather than smeared through the mesh builder. Retail's consumer is exact and
-## was read at sub_80E3EB2:
-##
-##     mov eax, [edi+17Ch]    ; sector -> a per-sector block
-##     mov cl,  [eax+0F7h]    ; id used where cell[0x1F] & 0xF0 == 0x90
-##     mov bl,  [eax+0F8h]    ; id used where cell[0x1F] & 0xF0 == 0xA0
-##     record = 0x9118 + idx*0xD8
-##
-## so the id is PER SECTOR, and there are two of them selected by the same
-## nibble that marks the cell as liquid at all. What is NOT known is which file
-## that block is loaded from. Two candidates were tested against a condition
-## stated before looking, and both were refused:
-##
-##   - sectors.keyx records are 768 bytes and +0xF7/+0xF8 fall in the unclaimed
-##     gap between csize and dsize -- but those bytes are 0 in ALL 6050 records,
-##     so they carry nothing.
-##   - the wldx stream's tail past the 4096-entry grid -- but that tail is the
-##     REGION TABLE (formats/regions.gd reads it at the same offset), and read
-##     as an id it yields values up to 209, far outside the table's 0..13.
-##
-## Until the block is found this returns 0. That is not arbitrary: B_WATER holds
-## three of the fourteen slots (0, 12 and 13), more than any other material, 0
-## is what a zero-initialised field reads as, and the overworld liquid this
-## fixes is water. It WILL be wrong on lava, which is confined to specific maps.
-## One function, one line, when the source turns up.
-func material_id(_gx: int, _gy: int, _nibble: int) -> int:
-	return 0
+## Retail's consumer (sub_80E3EB2) reads sector->[0x17C]+0xF7 for nibble-9
+## cells and +0xF8 for nibble-10 cells. The block at [0x17C] turned out to be
+## a 0x100-byte slice of the sector's own keyx RECORD -- bytes 0x1E9..0x2E8,
+## memcpy'd out by the 768-byte-record loader sub_80EF4EE -- so the two ids
+## are keyx record bytes 736 and 737, which World.liquid_id reads. Measured
+## over all 1360 liquid sectors before being wired: every value is in 0..13,
+## the sea reads B_WATER, the underworld reads lava, and 22 sectors carry two
+## DIFFERENT liquids at once, which is why the format keeps two bytes.
+func material_id(world: Sacred.World, gx: int, gy: int, nibble: int) -> int:
+	if world == null:
+		return 0
+	var id := world.liquid_id(gx, gy, nibble)
+	# A malformed id falls back to B_WATER rather than to nothing: retail data
+	# never exceeds the table, so this path is for a modded or truncated keyx,
+	# where flat water beats a hole in the world.
+	return id if id >= 0 and id < MATERIALS.size() else 0

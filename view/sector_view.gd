@@ -346,16 +346,26 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 	var bcol := PackedColorArray()
 	var bcus := PackedFloat32Array()
 	var bidx := PackedInt32Array()
-	# Third surface: the animated liquid pass (row 1008). Retail draws liquid
-	# over the ordinary ground rather than instead of it, so the bed tile stays
-	# in the first surface and this rides just above it -- which is also why the
-	# open sea looked like flat grey-tan ground before this existed, its bed
-	# being one repeated ISO00 tile across all 4096 cells.
+	# Liquid surfaces: the animated liquid pass (rows 1008/1010). Retail draws
+	# liquid over the ordinary ground rather than instead of it, so the bed
+	# tile stays in the first surface and this rides just above it -- which is
+	# also why the open sea looked like flat grey-tan ground before this
+	# existed, its bed being one repeated ISO00 tile across all 4096 cells.
+	# TWO accumulators, not one and not a map: the two liquid nibbles select
+	# two per-sector ids (keyx record bytes 736/737, resolved once here --
+	# they cannot vary within a sector) and 22 retail sectors really carry two
+	# different liquids at once. Packed arrays are value types, so a map of
+	# them cannot be appended to in place; two named sets can.
+	var lid9: int = _liquid.material_id(_world, gx, gy, 9) if _liquid != null else -1
+	var lid10: int = _liquid.material_id(_world, gx, gy, 10) if _liquid != null else -1
 	var lpos := PackedVector3Array()
 	var luv := PackedVector2Array()
 	var lcol := PackedColorArray()
 	var lidx := PackedInt32Array()
-	var lid := -1
+	var lpos2 := PackedVector3Array()
+	var luv2 := PackedVector2Array()
+	var lcol2 := PackedColorArray()
+	var lidx2 := PackedInt32Array()
 
 	for i in Sacred.SECT * Sacred.SECT:
 		var cell := i * Sacred.CELL
@@ -382,34 +392,53 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 		# from the same byte on purpose so the two never drift apart.
 		var nib := cells[cell + 0x1f] >> 4
 		if (nib == 9 or nib == 10) and _liquid != null:
-			var mid: int = _liquid.material_id(gx, gy, nib)
-			# One material per sector mesh. The two nibbles select two DIFFERENT
-			# per-sector ids in retail, so a sector could in principle need two
-			# surfaces; every id resolves the same today, and splitting on a
-			# distinction that carries no data yet would be geometry written for
-			# a case that cannot occur. Take the first and note a real conflict.
-			if lid < 0:
-				lid = mid
-			if mid == lid:
-				var lz := pz + LIQUID_Z
-				var lv := lpos.size()
-				lpos.append_array(PackedVector3Array([
-					Vector3(px, py + HH + _h(cells, cell, 1), lz),    # N
-					Vector3(px + HW, py + _h(cells, cell, 2), lz),    # E
-					Vector3(px, py - HH + _h(cells, cell, 3), lz),    # S
-					Vector3(px - HW, py + _h(cells, cell, 0), lz)]))  # W
-				# Screen-space UV, so one image spans a fixed 128 px however big
-				# the cell is and neighbouring cells continue the same wave
-				# instead of restarting it. The corners are lattice points shared
-				# with the neighbours, so the seam is exact.
-				for q: Vector3 in [
-						Vector3(px, py + HH, 0.0), Vector3(px + HW, py, 0.0),
-						Vector3(px, py - HH, 0.0), Vector3(px - HW, py, 0.0)]:
-					luv.append(Vector2(q.x, -q.y) / LiquidScript.TEX_PX)
-				for c in [1, 2, 3, 0]:
-					var ls := cells.decode_u8(cell + 0x14 + c) / 255.0
-					lcol.append(Color(ls, ls, ls))
-				lidx.append_array(PackedInt32Array([lv, lv + 1, lv + 2, lv, lv + 2, lv + 3]))
+			# The second set only exists when the sector's two ids actually
+			# differ; a nibble-10 cell in a one-liquid sector joins the first.
+			var second: bool = nib == 10 and lid10 != lid9
+			var lz := pz + LIQUID_Z
+			var lv := lpos2.size() if second else lpos.size()
+			# FLAT, no _h: on liquid cells the corner bytes hold DEPTH (open
+			# sea -20, shallows rising to 0), which shapes the BED below --
+			# the water surface itself sits at the water table. Feeding the
+			# depth into the vertex heights sank the surface into its own bed.
+			var quad_liquid := PackedVector3Array([
+				Vector3(px, py + HH, lz),    # N
+				Vector3(px + HW, py, lz),    # E
+				Vector3(px, py - HH, lz),    # S
+				Vector3(px - HW, py, lz)])   # W
+			# Screen-space UV, so one image spans a fixed 128 px however big
+			# the cell is and neighbouring cells continue the same wave
+			# instead of restarting it. The corners are lattice points shared
+			# with the neighbours, so the seam is exact.
+			var uv_liquid := PackedVector2Array()
+			for q: Vector3 in [
+					Vector3(px, py + HH, 0.0), Vector3(px + HW, py, 0.0),
+					Vector3(px, py - HH, 0.0), Vector3(px - HW, py, 0.0)]:
+				uv_liquid.append(Vector2(q.x, -q.y) / LiquidScript.TEX_PX)
+			# RGB is the cell's per-corner light, as everywhere. ALPHA is
+			# retail's depth fade (row 1011): the material's +0xD0 multiplier
+			# times the SIGNED corner depth byte, clamped to 0..255 -- a
+			# negative multiplier over negative depth reads opaque on the open
+			# sea and thins to nothing at the shoreline.
+			var lmult: int = LiquidScript.ALPHA_MULT[lid10 if second else lid9]
+			var col_liquid := PackedColorArray()
+			for c in [1, 2, 3, 0]:
+				var ls := cells.decode_u8(cell + 0x14 + c) / 255.0
+				var d8 := cells.decode_u8(cell + 0x10 + c)
+				var depth := d8 - 256 if d8 > 127 else d8
+				var la := clampi(lmult * depth, 0, 255) / 255.0
+				col_liquid.append(Color(ls, ls, ls, la))
+			var idx_liquid := PackedInt32Array([lv, lv + 1, lv + 2, lv, lv + 2, lv + 3])
+			if second:
+				lpos2.append_array(quad_liquid)
+				luv2.append_array(uv_liquid)
+				lcol2.append_array(col_liquid)
+				lidx2.append_array(idx_liquid)
+			else:
+				lpos.append_array(quad_liquid)
+				luv.append_array(uv_liquid)
+				lcol.append_array(col_liquid)
+				lidx.append_array(idx_liquid)
 		var stack := _tile_stack(cells, cell)
 		for si in stack.size() / 2:
 			var tile_id := stack[si * 2]
@@ -548,22 +577,31 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 		# overlays paint OVER the props standing on them and wash them out.
 		bmat.render_priority = -1
 		mi.set_surface_override_material(1, bmat)
-	if not lidx.is_empty():
-		var lmat: ShaderMaterial = _liquid.material_for(lid)
-		# Only when the frames actually decoded. A liquid surface with no
-		# material would draw untextured white over the sea, which is a worse
-		# picture than the bed tile this is here to cover.
-		if lmat != null:
+	if not lidx.is_empty() or not lidx2.is_empty():
+		var lquads := 0
+		var lids := PackedInt32Array()
+		for set in ([[lid9, lpos, luv, lcol, lidx], [lid10, lpos2, luv2, lcol2, lidx2]]):
+			if (set[4] as PackedInt32Array).is_empty():
+				continue
+			var lmat: ShaderMaterial = _liquid.material_for(set[0])
+			# Only when the frames actually decoded. A liquid surface with no
+			# material would draw untextured white over the sea, which is a
+			# worse picture than the bed tile this is here to cover.
+			if lmat == null:
+				continue
 			var larr := []
 			larr.resize(Mesh.ARRAY_MAX)
-			larr[Mesh.ARRAY_VERTEX] = lpos
-			larr[Mesh.ARRAY_TEX_UV] = luv
-			larr[Mesh.ARRAY_COLOR] = lcol
-			larr[Mesh.ARRAY_INDEX] = lidx
+			larr[Mesh.ARRAY_VERTEX] = set[1]
+			larr[Mesh.ARRAY_TEX_UV] = set[2]
+			larr[Mesh.ARRAY_COLOR] = set[3]
+			larr[Mesh.ARRAY_INDEX] = set[4]
 			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, larr)
 			mi.set_surface_override_material(mesh.get_surface_count() - 1, lmat)
-			mi.set_meta("liquid_quads", lidx.size() / 6)
-			mi.set_meta("liquid_material", lid)
+			lquads += (set[4] as PackedInt32Array).size() / 6
+			lids.append(set[0])
+		if lquads > 0:
+			mi.set_meta("liquid_quads", lquads)
+			mi.set_meta("liquid_materials", lids)
 	mi.set_meta("quads", (idx.size() + bidx.size()) / 6)
 	mi.set_meta("layers", images.size())
 	if _objects:

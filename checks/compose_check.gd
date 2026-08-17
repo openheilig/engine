@@ -58,17 +58,15 @@ const MainScript := preload("res://main.gd")
 ## one does not. The remaining gap is a decoder gap rather than a naming error
 ## -- see the block in _init that pins it.
 ##
-## RAISED FROM 5 TO 6 deliberately, which is the direction that block asks for:
-## MAGICIAN.GRN now builds, so leaving the constant at 5 made the check fire on
-## a REPAIR and abort the file before its own URIEL assertions at the tail ever
-## ran. DUNKELELVE.GRN is still short, and still in the same place: entry 402
-## has 7 meshes and 7 FormMeshBone lists that admit no unambiguous pairing
-## (needs=[1,9,5,2,11,10,39] against list sizes=[39,5,2,10,10,11,1] -- the two
-## 10s are the ambiguity), so Models.mesh_weights refuses it. Measured from this
-## check's own run, not assumed: an earlier note here had the two names the
-## wrong way round.
-const CLASS_BODIES_BUILD := 6
-const CLASS_BODIES_UNBUILT: Array[String] = ["DUNKELELVE.GRN"]
+## RAISED FROM 5 TO 6 when MAGICIAN.GRN's build was repaired, and FROM 6 TO 7
+## on 2026-08-17 (row 1009), both in the direction that block asks for.
+## DUNKELELVE.GRN's refusal was the two size-10 FormMeshBone lists competing
+## for the meshes needing 9 and 10, which no counting or geometric rule could
+## separate -- and the file states the answer itself, in each FormMesh's
+## payload int, a 1-based all-mesh reference Models._pair_by_reference now
+## reads. All seven mapped class bodies build.
+const CLASS_BODIES_BUILD := 7
+const CLASS_BODIES_UNBUILT: Array[String] = []
 
 ## Uriel's Legacy (bin/sets.bin record 6) on its own Seraphim: all seven
 ## garments bind, one blade docks in the main hand and the second is refused

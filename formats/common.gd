@@ -18,6 +18,17 @@ const KEY_COORD := 32     ## u32 gy*100+gx -- authoritative, unlike the in-strea
 const KEY_OFF := 236      ## u32 byte offset into sectors.wldx
 const KEY_CSIZE := 240    ## u32 compressed size
 const KEY_DSIZE := 264    ## u32 decompressed size
+## The sector's 0x100-byte ENVIRONMENT block, embedded in the keyx record
+## (row 1010). Retail's 768-byte-record loader (sub_80EF4EE) memcpy's record
+## bytes 0x1E9..0x2E8 into a per-sector slice hung off the runtime sector at
+## +0x17C; the animated-liquid draw then reads the block's +0xF7 (for cells
+## whose +0x1f high nibble is 9) and +0xF8 (nibble 10) as indices into the
+## 14-material liquid table. Measured over all 1360 liquid sectors: every
+## value is in 0..13, the sea reads B_WATER, the underworld reads lava, and
+## 22 sectors carry two DIFFERENT liquids at once -- which is why two bytes.
+const KEY_ENV := 489
+const KEY_LIQ9 := KEY_ENV + 0xF7    ## = 736
+const KEY_LIQ10 := KEY_ENV + 0xF8   ## = 737
 
 
 ## zlib stream -> bytes.
