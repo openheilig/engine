@@ -16,7 +16,7 @@ preloads each of these under its old name, so `Sacred.Pak`, `Sacred.SECT` and
 | `world.gd` | `sectors.keyx` + `sectors.wldx`. keyx is the shipped index: no scan, no cache. |
 | `texture.gd` | ARGB4444 decode, the 18-diamond terrain atlas geometry `slot_uv()` resolves, and `find_model_texture()` — a creature skin is one whole image, found in `texture.pak` by STEM because the `.GRN`'s authoring names say `.bmp` where the pak says `.tga`. |
 | `statics.gd` | Placed static art. |
-| `mixed.gd` | The mixed object/name archive. |
+| `mixed.gd` | `pak/mixed.pak` — the sprite table `static.pak`'s type id indexes. `size_of()` peeks the 16-byte header so a sector can be painter-ordered without decoding its art twice. **Do not apply the header's `dx,dy`**: it is the negation of the sprite's minimum tile `dst` corner, so adding it cancels an offset the tiles already carry (row 1017). |
 | `regions.gd` | Region grids and cell classes — what walkability is derived from. |
 | `footprints.gd` | Correspondence between region footprints and placed art. |
 | `items.gd` | Item and levelled-object records. |
