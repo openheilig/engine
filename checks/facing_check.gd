@@ -154,6 +154,29 @@ func _init() -> void:
 		# A zero direction must be refused, not silently treated as east.
 		expect(not pv.face(cell, Vector2.ZERO), "a zero direction was accepted")
 
+		# (4b) WHICH WAY ROUND THE WHOLE SET SITS. Every assertion above is
+		# RELATIVE -- distinct headings, opposites 180 apart, equal quarter
+		# steps -- and every one of them survives turning all four directions
+		# through 180 degrees together. That is not a hypothetical: face() read
+		# world -Z as "towards the camera" when it is +Z, so the hero spawned
+		# with her back to the player for weeks while this check passed.
+		#
+		# So anchor it. Face the seeded direction, cell (1,1), which runs down
+		# the screen (`sy = -(x+y) * HH`) and therefore towards the viewer, then
+		# ask the BODY where its front ended up. The toe sits in front of the
+		# ankle, so the sign of (Toe0 - Foot) is fixed by anatomy rather than by
+		# any convention chosen here -- it is the same signal rest_yaw trusts.
+		# IsoCamera sits at z = +1000 unrotated and SectorView lays nearer cells
+		# at larger z, so a body facing the player has forward.z > 0.
+		pv.face(cell, Vector2(1.0, 1.0))
+		pv.pose_now()
+		var fwd := _posed_forward(pv)
+		expect(not is_nan(fwd.z), "the test body has no foot bones to read a facing off")
+		if not is_nan(fwd.z):
+			expect(fwd.z > 0.0,
+				"facing cell (1,1) leaves the body's forward at z=%.3f; towards the "
+				% fwd.z + "viewer is +z, so the character is turned away from the player")
+
 		# (5) THE ROTATION MUST REACH THE MESH. Everything above tests a number;
 		# this drives rig_placement itself and reads a bone back out, so a yaw
 		# applied about the wrong axis -- which for a Z-up rig would tip the
@@ -232,6 +255,30 @@ func _spread(angles: Array[float]) -> float:
 		for j in range(i + 1, angles.size()):
 			worst = maxf(worst, absf(_wrap(angles[i] - angles[j])))
 	return worst
+
+
+## Where the POSED body actually points, in world space: the mean of
+## (Toe0 - Foot) over both feet, mapped through the rig node's basis.
+##
+## Uses _posed for the same reason everything else here does -- an unprocessed
+## skeleton's get_bone_global_pose() is stale. Returns a NAN z if neither foot
+## pair resolves, so the caller can tell "no answer" from "wrong answer".
+func _posed_forward(pv: PlayerView) -> Vector3:
+	var skel := pv.node.get_node_or_null("Skeleton") as Skeleton3D
+	if skel == null:
+		return Vector3(NAN, NAN, NAN)
+	var acc := Vector3.ZERO
+	var n := 0
+	for pair in [["Bip01 L Foot", "Bip01 L Toe0"], ["Bip01 R Foot", "Bip01 R Toe0"]]:
+		var a := skel.find_bone(pair[0])
+		var b := skel.find_bone(pair[1])
+		if a < 0 or b < 0:
+			continue
+		acc += _posed(skel, b) - _posed(skel, a)
+		n += 1
+	if n == 0:
+		return Vector3(NAN, NAN, NAN)
+	return (pv.node.transform.basis * (acc / float(n))).normalized()
 
 
 ## A bone's global position, composed from the skeleton's POSES rather than read

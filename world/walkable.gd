@@ -58,9 +58,16 @@ const _UNCOVERED := 0
 
 var _world: Sacred.World
 var _region_cache: Dictionary = {}   ## sector key (gy*100+gx) -> Sacred.Regions or null (a cached miss)
-## sector key -> PackedByteArray of the sector's 64x64 WldxEntry byte-26 values
-## (terrain walkability per the retail canWalk rule), or null for an absent sector.
+## sector key -> PackedByteArray of the sector's 64x64 WldxEntry byte-26 values.
+## See _terrain_open: byte 26 is NOT the walkability field this cache was built
+## for, and the rule reading it is unsupported. Kept, with that stated, because
+## deleting it would silently open the whole outdoor world instead.
 var _terrain_cache: Dictionary = {}
+## sector key -> PackedByteArray of the sector's 64x64 WldxEntry +0x1f HIGH
+## nibbles, the animated-liquid material selector (row 669). Separate cache from
+## the byte-26 plane because the two are read on different code paths and one of
+## them is going away once outdoor walkability is actually found.
+var _liquid_cache: Dictionary = {}
 
 
 func _init(world: Sacred.World) -> void:
@@ -194,10 +201,52 @@ func _regions_for(gx: int, gy: int) -> Sacred.Regions:
 	return regions
 
 
-## The retail terrain walkability of one WORLD cell: true when no region grid
-## covers it and the WldxEntry byte 26 says the ground is open (not 1, not 4,
-## per the retail canWalk rule). False for cells outside the world or in an
-## absent sector -- the house accessor rule again.
+## Outdoor walkability of one WORLD cell, used where no region grid covers it.
+##
+## THE BYTE-26 RULE BELOW IS UNSUPPORTED AND THIS COMMENT SAYS SO RATHER THAN
+## REPEATING WHAT IT USED TO CLAIM. It was taken from Armalion's canWalk
+## (sub_4B0220) and credited here to "the retail canWalk rule". Three
+## measurements, 2026-08-17, all against the retail data and binary this port
+## actually targets:
+##
+##   1. BYTE 26 IS A TERRAIN HEIGHT CORNER, NOT A WALKABILITY ENUM. Offsets
+##      +0x18, +0x19, +0x1a and +0x1b are statistically indistinguishable over
+##      36,864 start-area cells -- min -6, max 78, mean 0.062, sd 1.357 and 26
+##      distinct values, ALL FOUR IDENTICAL -- and +0x1a correlates with its
+##      neighbour +0x1b at r = +0.86. That is exactly the "signed per-corner
+##      second height" research/formats/world-sectors.md documents at
+##      +0x18..0x1b, and 26 == 0x1a is inside that span.
+##   2. RETAIL NEVER READS IT THIS WAY. A byte-pattern search of the 1.0.02
+##      Linux binary for `cmp byte ptr [reg+0x1A], 1` and `..., 4` returns ZERO
+##      hits, while the control `cmp byte ptr [reg+0x1A], <anything>` returns
+##      matches -- so the search works and the idiom is simply absent.
+##   3. EVEN ARMALION SAYS MORE THAN THIS. sub_4B0220 is
+##      `byte26 != 1 && byte26 != 4 && *(int*)cell >= 0`, and then DISCARDS that
+##      answer entirely when `*(DWORD*)cell & 4`, substituting a static-object
+##      chain lookup. The port implements two of the three terms and none of the
+##      second branch. (The missing `>= 0` term is harmless: 0 of 110,592 cells
+##      have a negative tile id.)
+##
+## The cost is measured, not estimated: this rule opens 96.9% of all cells, the
+## region grids cover only 26.55% of the start area, and 96.06% of the walkable
+## ground the port offers therefore comes from a comparison against terrain
+## height. That is the reported "hero walks randomly against the actual map".
+##
+## It is LEFT IN PLACE rather than deleted or inverted. Blocking every uncovered
+## cell strands the player in the 2026-08-13 way this file's header describes;
+## finding retail's real outdoor walkability is open research, tracked in
+## research/open-questions.md. What this function does NOT do any more is claim
+## a provenance it does not have.
+##
+## LIQUID IS BLOCKED, and that part IS retail-grounded. Row 669 recovered the
+## animated-liquid system from disassembly -- 14 materials, a reflection flag,
+## quest-gated water -- selected by +0x1f's HIGH nibble, 9 and 10. Corroborated
+## geometrically before it was trusted: the 514 such cells in the start block
+## form exactly THREE connected bodies of 356, 121 and 37 cells with ZERO
+## isolated singles, which is a river system and not a mis-read nibble. Blocking
+## them does not strand the hero -- the start cell is not liquid and the flood
+## fill from it saturates the probe's 60,000-cell bound both with and without
+## the block, so no reachability is measurably lost.
 func _terrain_open(cx: int, cy: int) -> bool:
 	if _world == null:
 		return false
@@ -212,8 +261,51 @@ func _terrain_open(cx: int, cy: int) -> bool:
 	var ly := cy - sy * Sacred.SECT
 	if lx < 0 or ly < 0 or lx >= Sacred.SECT or ly >= Sacred.SECT:
 		return false
+	if is_liquid(cx, cy):
+		return false
 	var b := bytes[ly * Sacred.SECT + lx]
 	return b != 1 and b != 4
+
+
+## True when this cell carries one of the 14 animated liquid materials (row
+## 669): +0x1f high nibble 9 or 10. Public because the renderer needs the same
+## answer this walkability path does, and two independent readings of one nibble
+## is how a field drifts out of agreement with itself.
+func is_liquid(cx: int, cy: int) -> bool:
+	if _world == null:
+		return false
+	var sx := int(floor(float(cx) / float(Sacred.SECT)))
+	var sy := int(floor(float(cy) / float(Sacred.SECT)))
+	if sx < 0 or sy < 0 or sx >= 100 or sy >= 100:
+		return false
+	var nibbles := _liquid_nibbles_for(sx, sy)
+	if nibbles.is_empty():
+		return false
+	var lx := cx - sx * Sacred.SECT
+	var ly := cy - sy * Sacred.SECT
+	if lx < 0 or ly < 0 or lx >= Sacred.SECT or ly >= Sacred.SECT:
+		return false
+	var h := nibbles[ly * Sacred.SECT + lx]
+	return h == 9 or h == 10
+
+
+## WldxEntry +0x1f HIGH nibble for every cell of one sector, row-major, or an
+## empty array if the sector is absent. Same shape and caching posture as
+## _terrain_bytes_for below, including caching the miss.
+func _liquid_nibbles_for(gx: int, gy: int) -> PackedByteArray:
+	var key := gy * 100 + gx
+	if _liquid_cache.has(key):
+		return _liquid_cache[key]
+	var out := PackedByteArray()
+	if _world != null and _world.has_sector(gx, gy):
+		var stream := _world.sector(gx, gy)
+		if not stream.is_empty():
+			var n := Sacred.SECT * Sacred.SECT
+			out.resize(n)
+			for i in n:
+				out[i] = stream[32 + i * Sacred.CELL + 0x1f] >> 4
+	_liquid_cache[key] = out
+	return out
 
 
 ## WldxEntry byte 26 for every cell of one sector, in row-major order, or an

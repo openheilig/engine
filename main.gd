@@ -238,9 +238,14 @@ var _show_player := true   ## --noplayer: suppress building the player view enti
 var _hide_player_mesh := false
 ## --noanim: build the hero but leave it in its rest pose. See the flag parse.
 var _animate_player := true
-## The last direction the hero actually moved. Held while it stands still --
-## see _face_player for why the sim's own heading cannot serve.
-var _last_heading := Vector2.ZERO
+## (There is deliberately no `_last_heading` here any more. Holding the last
+## non-zero heading in the SCENE SCRIPT could not work: nothing in an ordinary
+## run ever writes ActorState.heading -- click-to-move goes through
+## Sim._path_delta, which by design never stores its direction back -- so the
+## held value never left its seed and the hero faced one fixed direction for a
+## whole session. The held facing now lives on ActorState.facing, written by
+## Sim._step_actor from the delta the body actually moved. See that field's
+## header for the seed and its derivation.)
 ## --nohud suppresses the taskbar. Every capture runbook that asserts an md5 of
 ## the world needs the interface out of the frame, and the HUD covers the
 ## bottom 92 rows of it.
@@ -640,7 +645,13 @@ func _ready() -> void:
 			var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 			if _show_player:
 				if models_pak.is_open():
-					_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model)
+					# texture.pak, exactly as the creature and NPC builds below
+					# pass it. Without it PlayerView documents its own result as
+					# "clay", and clay is what the hero was: measured on the same
+					# model, 0 coloured pixels in the world against 1364 once the
+					# pak is passed. Every other rig in the world already got it;
+					# the player was the one rig that did not.
+					_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model, tex_pak)
 					if _player_view.node != null:
 						add_child(_player_view.node)
 						if _hide_player_mesh:
@@ -682,6 +693,14 @@ func _ready() -> void:
 		"\tmarkers on" if markers else ""])
 	if _probe_ticks > 0:
 		await _actor_probe(_probe_ticks, _probe_route)
+	elif Drive.wanted(OS.get_cmdline_user_args() + OS.get_cmdline_args()):
+		# --drive=/--shots= hand the streamed world to drive.gd, which owns the
+		# timeline, the captures and the quit. Without this branch those flags
+		# are parsed by nobody, _maybe_screenshot() sees no --shot= and returns
+		# at once, and the process streams forever at 99% CPU until an outer
+		# timeout kills it with no PNG written -- which is exactly how this
+		# harness broke.
+		await Drive.run(self, OS.get_cmdline_user_args() + OS.get_cmdline_args())
 	else:
 		await _maybe_screenshot()
 
@@ -1012,6 +1031,7 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 	# them made the first version of this line report "unresolved=3" for a set
 	# in which every member resolved.
 	var unresolved := 0
+	var skipped := 0
 	var hand := 1
 	for rec in members:
 		var nm: String = items.name_of(rec)
@@ -1019,14 +1039,39 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 		if nm == "" or e < 0:
 			unresolved += 1
 			continue
+		# WINGS ARE IN THE SET AND RETAIL DOES NOT DRAW THEM. Measured against a
+		# retail new-game frame: the Seraphim wears helmet, armour, belt,
+		# shoulder, gloves and boots and carries the sword -- eight of set 6's
+		# nine members -- and has no wings at all, while the port drew two large
+		# dark spread wings over her because its only test was "declares vertex
+		# weights", which SeraWings01.grn does.
+		#
+		# Skipped on the DECODED CATEGORY, not on the name. items.pak +0x2e sorts
+		# the corpus into ~27 kinds (Sacred.Items.category_of), and 25 is wings:
+		# seven records in 32,768, every one a SeraWings*. The eight members that
+		# ARE drawn carry ordinary equipment categories -- chest 6, helm 17,
+		# boots 18, belt 19, shoulder 21, arms 22, and 5/13 for the two blades.
+		# Corroborated sideways: every armour category is 100% skinned and every
+		# prop category 100% rigid across 908 and 300-odd records respectively.
+		#
+		# THIS IS A STOPGAP AND THE COMMENT SAYS SO. Armalion's cCreature dresses
+		# from THIRTEEN EQUIPMENT SLOTS (PC_EQUIPMENT_MAX), dispatching on
+		# equipment_getSlotType: worn for slots 0,1,2,3,7, bone-attached for
+		# 4,5,6,9,10,11,12, and NEITHER for slot 8 alone. A set is a matched item
+		# family, not an outfit; the port reads one as an outfit because it has
+		# no slot model yet. When it grows one, wings land in whatever slot type
+		# 0 turns out to be and this special case goes away.
+		if items.category_of(rec) == Sacred.Items.CATEGORY_WINGS:
+			skipped += 1
+			continue
 		if models.has_mesh_weights(e):
 			_player_view.wear(models, nm, items.texture_of(rec))
 		else:
 			_player_view.equip(models, nm, hand, items.texture_of(rec))
 			hand += 1
-	print("dress\tset=%d\tmembers=%d\tworn=%d\tarmed=%d\tworn_refused=%d\tarm_refused=%d\tunresolved=%d" % [
+	print("dress\tset=%d\tmembers=%d\tworn=%d\tarmed=%d\tworn_refused=%d\tarm_refused=%d\tunresolved=%d\tskipped=%d" % [
 		START_SET, members.size(), _player_view.worn(), _player_view.equipped(),
-		_player_view.worn_refused(), _player_view.equipped_refused(), unresolved])
+		_player_view.worn_refused(), _player_view.equipped_refused(), unresolved, skipped])
 
 
 ## Moves start_cell to START_CLASS's own StartPosition record, and picks the
@@ -3211,11 +3256,40 @@ func _supported_route_cell(t: int) -> Vector2i:
 ## at all: they rendered as near-black silhouettes. That is why --creatures
 ## produced figures a pixel diff could find but an eye could not.
 ##
-## Deliberately a light and NOT an Environment: ambient would need a
+## Deliberately lights and NOT an Environment: ambient would need a
 ## WorldEnvironment, whose background mode repaints the area outside the map,
-## and several gates assert frame md5s. A key alone cannot touch a pixel that
-## no lit material covers. The unlit side of a rig therefore stays dark, which
-## is ModelView's own documented trade-off when it has no fill.
+## and several gates assert frame md5s. A light cannot touch a pixel that no lit
+## material covers, so both of these are invisible to terrain by construction --
+## everything SectorView draws is SHADING_MODE_UNSHADED, and the bare-wall patch
+## against retail stayed 100.00% bit-identical across this change.
+##
+## THE FILL IS THE SECOND HALF OF THAT ARGUMENT, not a preference. With the key
+## alone the shaded side of every rig fell to near-black -- ModelView's own
+## documented trade-off when it has no fill, and it is why the hero read as a
+## silhouette in the world while --figure= showed her properly. ModelView's
+## preview buys the fill with an ambient Environment, which this scene may not
+## have; one more directional light from the opposite side buys it without one.
+##
+## CALIBRATED AGAINST RETAIL IN THE SAME ROOM, not chosen by eye. Driving retail
+## to the Seraphim's campaign start (analysis/tools/drive/menu.sh new) and
+## measuring both engines' hero over the same pixels of Silver Creek's
+## cathedral:
+##
+##            brightness p50   p90    saturation p50
+##   retail        87          168        0.20
+##   key only      46          102        0.35   <- unlit shaded side
+##   key + fill    85          119        0.20
+##
+## The median and the colour land on retail. What is still short is the HIGHLIGHT
+## end -- p90 119 against 168 -- which a fill cannot supply by construction: it
+## lifts shadow, it does not add speculars. That gap is the key's business, or
+## retail's own character shading, and it wants its own measurement rather than
+## more fill (raising this further only drags saturation below retail's 0.20).
+const FILL_ENERGY := 1.25
+## The fill leans blue the way ModelView's ambient fill does, so a rig in the
+## world reads as the same material --grn= shows rather than a warmer one.
+const FILL_COLOR := Color(0.55, 0.60, 0.72)
+
 func _ensure_rig_light() -> void:
 	if has_node("RigKey"):
 		return
@@ -3227,6 +3301,18 @@ func _ensure_rig_light() -> void:
 	key.transform = Transform3D(Basis(), Vector3.ZERO).looking_at(
 		ModelView.LIGHT_DIR.normalized(), Vector3.UP)
 	add_child(key)
+
+	var fill := DirectionalLight3D.new()
+	fill.name = "RigFill"
+	fill.light_energy = FILL_ENERGY
+	fill.light_color = FILL_COLOR
+	# Straight opposite the key: the surfaces the key grazes are exactly the
+	# ones this has to reach. Shadows stay off (the default) -- a fill that
+	# cast them would carve a second set of shadows into retail art the key
+	# already cannot touch.
+	fill.transform = Transform3D(Basis(), Vector3.ZERO).looking_at(
+		-ModelView.LIGHT_DIR.normalized(), Vector3.UP)
+	add_child(fill)
 
 
 ## --figure=NAME --stage=STAGE -- the STAGED single-model viewer.
@@ -3530,17 +3616,23 @@ func _update_sector_env(cell: Vector2) -> void:
 
 ## Turns the hero to face where it is going.
 ##
-## `ActorState.heading` is a per-tick movement INTENT, not a facing, and it is
-## zero whenever the actor is standing -- so a character that stopped would
-## snap back to its rest direction on the first idle frame. The last non-zero
-## heading is therefore held, which is what "facing" means and what the heading
-## field on its own cannot say.
+## READS `facing`, NOT `heading`, and an earlier version of this function read
+## `heading` and was therefore dead code in every ordinary session. `heading` is
+## a per-tick movement INTENT: it is written only by the recording path
+## (_advance_sim), the actor probe, the creature demo and replay, so in a normal
+## new game it is identically Vector2.ZERO -- click-to-move moves the hero
+## through Sim._path_delta, which by explicit design never stores its direction
+## back (world/sim.gd). Gating on it meant face() was never called AT ALL, even
+## while the hero walked, and the rig stayed in its mesh rest orientation --
+## side-on for the Seraphim.
 ##
-## Nothing here reaches into the sim beyond reading that field: the derivation
-## of the angle lives in PlayerView.face, which asks IsoCamera and SectorView
-## where the direction actually lands rather than assuming a projection.
+## `ActorState.facing` is the sim's own held answer to "which way is this body
+## turned", written from the delta it actually moved, seeded towards the viewer.
+## No hold is needed here: the hold lives in the sim, where every actor gets it.
+##
+## Nothing here reaches into the sim beyond reading that one field: the
+## derivation of the angle lives in PlayerView.face, which asks IsoCamera and
+## SectorView where the direction actually lands rather than assuming a
+## projection.
 func _face_player(p: ActorState) -> void:
-	if p.heading.length_squared() > 0.0:
-		_last_heading = p.heading
-	if _last_heading.length_squared() > 0.0:
-		_player_view.face(p.cell, _last_heading)
+	_player_view.face(p.cell, p.facing)

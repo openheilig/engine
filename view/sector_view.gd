@@ -80,6 +80,17 @@ const IMAGE_CACHE_EVICT := 192   ## a quarter, dropped oldest-first
 
 ## preload, not load: _build_sector runs per streamed sector, which is a hot
 ## path, and load() would hit ResourceLoader every time.
+## Preloaded by PATH and with no class_name, the same way player_view.gd takes
+## rig_placement.gd: a newly added global class is not in the script-class cache
+## for a `--path` run until the project is reimported.
+const LiquidScript := preload("res://view/liquid.gd")
+
+## Z bump for the animated liquid surface, in the same per-cell budget the
+## floor.pak overlays spend OVERLAY_Z out of. Above every overlay (8 * 0.1 =
+## 0.8 of the step) so the water covers its own bed, and still under the full
+## DEPTH_STEP that reaches the NEXT cell's ground.
+const LIQUID_Z := DEPTH_STEP * 0.9
+
 const TERRAIN_SHADER: Shader = preload("res://shaders/terrain.gdshader")
 const TERRAIN_MASK_SHADER: Shader = preload("res://shaders/terrain_mask.gdshader")
 const OBJECT_SHADER: Shader = preload("res://shaders/object.gdshader")
@@ -97,6 +108,9 @@ const HIDDEN_BUCKET_SLOTS := 64
 
 var _cam: IsoCamera
 var _tex_pak: Sacred.Pak
+## Owns the animated liquid materials and their frame decoding, cached across
+## sectors -- a 50-frame set is 50 decodes and the sea spans hundreds of them.
+var _liquid: RefCounted
 var _tiles: Sacred.Tiles
 var _world: Sacred.World
 var _floor: Sacred.Pak                    ## world/floor.pak, the overlay-tile layer; null = don't draw it
@@ -178,6 +192,7 @@ func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacr
 		footprints: Sacred.Footprints = null) -> void:
 	_cam = cam
 	_tex_pak = tex_pak
+	_liquid = LiquidScript.new(tex_pak)
 	_tiles = tiles
 	_world = world
 	_statics = statics
@@ -331,6 +346,16 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 	var bcol := PackedColorArray()
 	var bcus := PackedFloat32Array()
 	var bidx := PackedInt32Array()
+	# Third surface: the animated liquid pass (row 1008). Retail draws liquid
+	# over the ordinary ground rather than instead of it, so the bed tile stays
+	# in the first surface and this rides just above it -- which is also why the
+	# open sea looked like flat grey-tan ground before this existed, its bed
+	# being one repeated ISO00 tile across all 4096 cells.
+	var lpos := PackedVector3Array()
+	var luv := PackedVector2Array()
+	var lcol := PackedColorArray()
+	var lidx := PackedInt32Array()
+	var lid := -1
 
 	for i in Sacred.SECT * Sacred.SECT:
 		var cell := i * Sacred.CELL
@@ -351,6 +376,40 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 		# tile, on the alpha-tested surface. A non-zero mask goes to the second
 		# surface, where the art supplies the colour and the mask supplies the
 		# alpha -- retail's exact combine (row 703).
+		# LIQUID, before the tile stack: it is per CELL, not per tile, and it does
+		# not replace the ground. WldxEntry +0x1f's high nibble marks it -- 9 and
+		# 10, the same two values Walkable.is_liquid blocks movement on, read
+		# from the same byte on purpose so the two never drift apart.
+		var nib := cells[cell + 0x1f] >> 4
+		if (nib == 9 or nib == 10) and _liquid != null:
+			var mid: int = _liquid.material_id(gx, gy, nib)
+			# One material per sector mesh. The two nibbles select two DIFFERENT
+			# per-sector ids in retail, so a sector could in principle need two
+			# surfaces; every id resolves the same today, and splitting on a
+			# distinction that carries no data yet would be geometry written for
+			# a case that cannot occur. Take the first and note a real conflict.
+			if lid < 0:
+				lid = mid
+			if mid == lid:
+				var lz := pz + LIQUID_Z
+				var lv := lpos.size()
+				lpos.append_array(PackedVector3Array([
+					Vector3(px, py + HH + _h(cells, cell, 1), lz),    # N
+					Vector3(px + HW, py + _h(cells, cell, 2), lz),    # E
+					Vector3(px, py - HH + _h(cells, cell, 3), lz),    # S
+					Vector3(px - HW, py + _h(cells, cell, 0), lz)]))  # W
+				# Screen-space UV, so one image spans a fixed 128 px however big
+				# the cell is and neighbouring cells continue the same wave
+				# instead of restarting it. The corners are lattice points shared
+				# with the neighbours, so the seam is exact.
+				for q: Vector3 in [
+						Vector3(px, py + HH, 0.0), Vector3(px + HW, py, 0.0),
+						Vector3(px, py - HH, 0.0), Vector3(px - HW, py, 0.0)]:
+					luv.append(Vector2(q.x, -q.y) / LiquidScript.TEX_PX)
+				for c in [1, 2, 3, 0]:
+					var ls := cells.decode_u8(cell + 0x14 + c) / 255.0
+					lcol.append(Color(ls, ls, ls))
+				lidx.append_array(PackedInt32Array([lv, lv + 1, lv + 2, lv, lv + 2, lv + 3]))
 		var stack := _tile_stack(cells, cell)
 		for si in stack.size() / 2:
 			var tile_id := stack[si * 2]
@@ -489,6 +548,22 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 		# overlays paint OVER the props standing on them and wash them out.
 		bmat.render_priority = -1
 		mi.set_surface_override_material(1, bmat)
+	if not lidx.is_empty():
+		var lmat: ShaderMaterial = _liquid.material_for(lid)
+		# Only when the frames actually decoded. A liquid surface with no
+		# material would draw untextured white over the sea, which is a worse
+		# picture than the bed tile this is here to cover.
+		if lmat != null:
+			var larr := []
+			larr.resize(Mesh.ARRAY_MAX)
+			larr[Mesh.ARRAY_VERTEX] = lpos
+			larr[Mesh.ARRAY_TEX_UV] = luv
+			larr[Mesh.ARRAY_COLOR] = lcol
+			larr[Mesh.ARRAY_INDEX] = lidx
+			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, larr)
+			mi.set_surface_override_material(mesh.get_surface_count() - 1, lmat)
+			mi.set_meta("liquid_quads", lidx.size() / 6)
+			mi.set_meta("liquid_material", lid)
 	mi.set_meta("quads", (idx.size() + bidx.size()) / 6)
 	mi.set_meta("layers", images.size())
 	if _objects:

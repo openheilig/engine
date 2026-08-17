@@ -21,6 +21,40 @@ var id: int = 0            ## assigned by ActorRegistry.spawn(); read-only by co
 var record_id: int = 0     ## reference into the record store (plan 02) -- never a copy of its fields
 var cell: Vector2 = Vector2.ZERO   ## continuous cell-space position; source of truth, per R3.2
 var heading: Vector2 = Vector2.ZERO   ## per-tick movement intent (Phase 4), not a bare facing -- Sim._step_actor scales it by Movement.CELLS_PER_TICK and sweeps it against the navmesh each tick
+## Which way the body is TURNED, as opposed to which way it was told to go.
+##
+## A SEPARATE FIELD FROM `heading`, not a reuse of it, because the two are
+## genuinely different quantities and Sim._step_actor says so in its own header:
+## `heading` is a per-tick INTENT that path-following deliberately overrides
+## without ever writing back, and it is Vector2.ZERO the instant an actor stands
+## still. A renderer reading `heading` therefore sees zero for a whole ordinary
+## session -- click-to-move never sets it, and there is no keyboard path yet --
+## and a character that merely stopped walking would snap back to its mesh rest
+## orientation. `facing` is written by _step_actor from the delta the body
+## ACTUALLY moved, after the path override is resolved, and then HELD. Because
+## it is the sim's own deterministic quantity, click-to-move, scripted intent
+## and replay all turn an actor identically.
+##
+## SEEDED TOWARDS THE VIEWER (PI/4 = cell (1,1)) rather than at zero, because an
+## actor who has not moved yet still has to face somewhere, and zero previously
+## meant "do not turn the rig at all" -- which left it in its MODEL REST
+## orientation, side-on for the Seraphim, for the whole first stretch of every
+## new game. Measured against retail's Seraphim campaign start (analysis/tools/
+## drive/menu.sh route `new`, t=34000): retail draws her frontal, mirror-symmetry
+## axis at the mask centre, IoU 0.668 -- against 0.376 with the axis 69% across
+## for the port's rest pose.
+##
+## PI/4 IS DERIVED, NOT CHOSEN, and is the same angle view/player_view.gd pins as
+## PlayerView.TOWARDS_VIEWER (spelled as the literal here because world/ may not
+## name a view type -- parity/verify.gd enforces that): the isometric projection
+## is px=(x-y)*HW, which forces x=y for a screen-vertical facing, and
+## py=-(x+y)*HH against sector_view's mz=(-p.y/HH), which forces x+y>0 for the
+## near side. (1,1) is the unique solution.
+##
+## ponytail: one class, one capture. This is the retail-facing default for a
+## standing start; it is not evidence about other classes, respawns or interiors,
+## and the moment the actor moves the sim overwrites it.
+var facing: Vector2 = Vector2.from_angle(PI / 4.0)
 var hp: int = 0
 var hp_max: int = 0
 var flags: int = 0

@@ -55,17 +55,34 @@ const ROSTER := 24
 const MainScript := preload("res://main.gd")
 
 ## Of main.gd's seven mapped class bodies, how many actually BUILD, and which
-## two do not. Both are decoder gaps rather than naming errors -- see the block
-## in _init that pins them.
-const CLASS_BODIES_BUILD := 5
-const CLASS_BODIES_UNBUILT: Array[String] = ["DUNKELELVE.GRN", "MAGICIAN.GRN"]
+## one does not. The remaining gap is a decoder gap rather than a naming error
+## -- see the block in _init that pins it.
+##
+## RAISED FROM 5 TO 6 deliberately, which is the direction that block asks for:
+## MAGICIAN.GRN now builds, so leaving the constant at 5 made the check fire on
+## a REPAIR and abort the file before its own URIEL assertions at the tail ever
+## ran. DUNKELELVE.GRN is still short, and still in the same place: entry 402
+## has 7 meshes and 7 FormMeshBone lists that admit no unambiguous pairing
+## (needs=[1,9,5,2,11,10,39] against list sizes=[39,5,2,10,10,11,1] -- the two
+## 10s are the ambiguity), so Models.mesh_weights refuses it. Measured from this
+## check's own run, not assumed: an earlier note here had the two names the
+## wrong way round.
+const CLASS_BODIES_BUILD := 6
+const CLASS_BODIES_UNBUILT: Array[String] = ["DUNKELELVE.GRN"]
 
-## Uriel's Legacy (bin/sets.bin record 6) on its own Seraphim: five garments
-## bind, two are refused because their vertex weights do not decode
-## (SERABOOTS01, SERASHOULDER01), one blade docks in the main hand and the
-## second is refused because SERAPHIM names no off-hand socket.
-const URIEL_WORN := 5
-const URIEL_WORN_REFUSED := 2
+## Uriel's Legacy (bin/sets.bin record 6) on its own Seraphim: all seven
+## garments bind, one blade docks in the main hand and the second is refused
+## because SERAPHIM names no off-hand socket.
+##
+## WAS 5 WORN / 2 REFUSED, the two refusals being SERABOOTS01 and SERASHOULDER01
+## "because their vertex weights do not decode". They decode now -- the garment
+## total is unchanged at 7, so nothing appeared or vanished, two pieces simply
+## moved from the refused column to the worn one. Raised deliberately, the same
+## way CLASS_BODIES_BUILD above was: this file's own convention is that a decoder
+## repair must move the pinned number by hand, never silently. Only the BINDING
+## is measured here; that the two now look right on the body is UNVERIFIED.
+const URIEL_WORN := 7
+const URIEL_WORN_REFUSED := 0
 const URIEL_ARMED := 1
 const URIEL_ARM_REFUSED := 1
 ## THE CONTROL. Offered the same seven garments, a body they were not cut for

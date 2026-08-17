@@ -262,6 +262,15 @@ func tick_once(reg: ActorRegistry, focus: Vector2) -> void:
 ## same way) -- driven through the same Movement.sweep collision sweep every
 ## other actor uses, so path-following gets identical collision behaviour to
 ## keyboard/scripted movement rather than a second movement code path.
+##
+## `a.facing` IS written back, unlike `a.heading`, and it is written from the
+## RESOLVED delta -- i.e. after the path override above, not from the intent.
+## That is the whole reason it is a second field: the resolved delta is the only
+## quantity here that describes the direction the body actually travelled, so
+## click-to-move (which never touches heading), scripted intent and replay all
+## turn an actor the same way. Held across a zero delta, because a character
+## that stopped walking is still facing where it stopped, not at its mesh rest
+## orientation -- see world/actor_state.gd's `facing` header for the seed.
 func _step_actor(a: ActorState) -> void:
 	a.ticks_simulated += 1
 	if walk == null:
@@ -269,6 +278,8 @@ func _step_actor(a: ActorState) -> void:
 	var delta := a.heading * Movement.CELLS_PER_TICK
 	if path_window != null and a.id == focus_actor_id and path_window.has_goal():
 		delta = _path_delta(a)
+	if delta.length_squared() > 0.0:
+		a.facing = delta
 	a.cell = Movement.sweep(a.cell, delta, walk)
 
 

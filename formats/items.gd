@@ -52,6 +52,16 @@ const REC_MIN := 0x40
 ## 0.012.
 const TEXTURE_OFF := 0x08
 
+## The item CATEGORY byte. Decoded 2026-08-17; see category_of below for the
+## value table and how each value was named. REC_MIN is 0x40, so every record
+## this reader accepts is long enough to carry it.
+const CATEGORY_OFF := 0x2e
+
+## Category 25, the whole of which is SeraWings01/02/05 and four siblings -- 7
+## records in a 32,768-record corpus. Named as a constant because _dress_player
+## skips it, and a bare 25 at that call site would read as a magic number.
+const CATEGORY_WINGS := 25
+
 ## items.pak RECORD INDEX -> mixed.pak sprite id (the record's +0x10 field).
 ## static.pak +0x04 is an items.pak record index, NOT a mixed.pak index --
 ## Resacred's chain is PakStatic.itemTypeId -> PakItemType.mixedId ->
@@ -98,6 +108,9 @@ var _lvl_of: Dictionary[int, int] = {}       ## items record -> its own level
 ## record -> a name, never name -> record.
 var _name: Dictionary[int, String] = {}
 
+## items record -> the +0x2e item category. See category_of for the decode.
+var _category: Dictionary[int, int] = {}
+
 func _init(pak: Pak) -> void:
 	# Level-AND form (_0U1_) or single-level form (_1_), then a part number
 	# that may carry a letter suffix (_00A) or a part-range (_11U21). The
@@ -109,6 +122,7 @@ func _init(pak: Pak) -> void:
 		if r.size() < REC_MIN:
 			continue
 		_sprite[i] = r.decode_u32(SPRITE_OFF)
+		_category[i] = r[CATEGORY_OFF]
 		var tex := r.decode_u32(TEXTURE_OFF)
 		if tex != 0:
 			_texture[i] = tex
@@ -179,6 +193,40 @@ func name_of(record: int) -> String:
 ## texture name", which is exactly what retail does when the override is zero.
 func texture_of(record: int) -> int:
 	return _texture.get(record, -1)
+
+
+## ITEM CATEGORY -- what KIND of thing this record is, not which slot it fills.
+##
+## Decoded 2026-08-17 by censusing every byte of the 128-byte record against the
+## six Seraphim garments, whose body parts are known: only `+0x20` (a running
+## index, 160..165 -- rejected) and this byte took six distinct values there. The
+## corpus then names every value on its own, because Daemonia's armour family is
+## spelled out part by part:
+##
+##     3  hero/creature BODY   477  SERAPHIM.GRN, GLADIATOR.GRN, MAGICIAN.GRN
+##     5  one-hand weapon      240  daem_schwert01.grn
+##     6  chest armour         308  Daemonia_Armor01_Body.grn
+##     8  ring                  91  Ring1_Edel.grn
+##    13  shield                42  SHIELD_KITE.GRN
+##    16  scroll               143  17 helm 129, 18 boots 97, 19 belt 127
+##    20  amulet               156  21 shoulder 68, 22 arms 107, 23 legs 81
+##    24  gloves                42  27 arrow 10, 29 barding 26, 33 dwarf cannon 4
+##    25  WINGS                  7  SeraWings01/02/05 -- the whole category
+##
+## The weighted/rigid split corroborates it without being used to derive it:
+## every armour category is 100% skinned (6, 17, 18, 19, 21, 22, 23, 24 -- 908
+## records, 0 rigid) and every prop category is 100% rigid (8, 9, 10, 13, 16, 27).
+## A field invented to explain one set would not also sort the corpus that way.
+##
+## NOT A SLOT INDEX. Armalion's `cCreature` carries `PC_EQUIPMENT_MAX == 13`
+## slots and dispatches on `equipment_getSlotType(eslot)`, which returns 1 for
+## slots 0,1,2,3,7 (worn, via `grnWearEquipment`), 2 for 4,5,6,9,10,11,12
+## (attached to a bone, via `attachEquipment` -- `getSlotAttachBoneName` maps
+## 9/10 to `Bip01 L/R Hand` and 5/6 to `Bip01 L/R Finger31`), and 0 for slot 8
+## alone, which is neither. This byte has ~27 values, so it feeds that mapping
+## rather than being it. Recovering the category-to-slot table is open work.
+func category_of(record: int) -> int:
+	return _category.get(record, -1)
 
 
 ## Every items.pak record naming `mesh`, in record order. One mesh is named by

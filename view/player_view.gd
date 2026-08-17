@@ -69,6 +69,47 @@ var _root_rest_origins: Array[Vector3] = []
 var _root_rest_rotations: Array[Quaternion] = []
 ## Reference rig height in model units -- see the scale block in setup().
 const REF_HEIGHT := 73.0
+
+## RETAIL'S OWN DRAWN HEIGHT for a REF_HEIGHT-unit humanoid, in pixels at the
+## middle zoom step. This is the measurement the scale block in setup() has been
+## asking for in comment form ("no retail capture has measured an actual
+## character height yet"), and it replaces the borrowed SectorView.SORTCUBE_PX,
+## which is a DEPTH-SORT PROXY BOX and was never a claim about character size.
+## SORTCUBE_PX is deliberately left alone: sector_view builds its sort cube from
+## it and that sorting is verified, so repurposing it would move two things at
+## once.
+##
+## HOW IT WAS MEASURED, and how far it can be trusted. The port's projection is
+## exactly one world unit to one pixel here -- ortho size 768 over a 768-px
+## viewport -- which is confirmed rather than assumed: at the old scale of
+## 96.0/73.0 = 1.3151 a 74.3-unit SERAPHIM.GRN predicts 97.7 px drawn, and the
+## rendered figure measured 97. So the scale is the only free variable, and
+## retail pins it. Against the retail campaign-start capture of the same frame,
+## same cell 3236,2511, same 1024x768:
+##
+##     landmark            port (scale 1.3151)   retail     implied scale
+##     shoulder -> sole            77 px          110 px        1.879
+##     belt     -> sole            62 px           83 px        1.761
+##
+## Two landmarks rather than overall height because retail's hair rises into the
+## stone wall behind her, so the top of that silhouette cannot be segmented from
+## the floor, and her drop shadow -- which the port does not draw at all --
+## contaminates the bottom. Both landmarks are interior to the body and clear of
+## each. 1.82 is their mean; 133.0 = 1.82 * 73.
+##
+## ponytail: ONE CLASS, ONE FRAME, and the two landmarks disagree by 6%, so read
+## this as +/-4% rather than exact. It is a relative calibration turned absolute,
+## not a recovered constant. Row 797's warning still stands: this factor is
+## GLOBAL and preserves each model's own units, so it must not be re-tuned to
+## close the separate wolf/elf ratio gap -- re-measure that ratio as a check.
+const RETAIL_HUMANOID_PX := 133.0
+
+## Retail's character light ramp evaluated at FULL light (index 255) with the
+## brightness setting at maximum, i.e. 191/255 on red and green and 213/255 on
+## blue. Derived in the material loop in setup(), where the table builder and its
+## four float constants are transcribed; spelled as a constant here so the call
+## site is not three magic fractions.
+const RETAIL_LIGHT_FULL := Color(191.0 / 255.0, 191.0 / 255.0, 213.0 / 255.0)
 ## Preloaded by PATH rather than referenced by class_name -- see the note at
 ## the top of rig_placement.gd.
 const RigPlacementScript := preload("res://view/rig_placement.gd")
@@ -143,7 +184,7 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 	# residual 0.56 against 0.66 is unexplained (reading error, the wolves' idle
 	# crouch, or a real per-species scale). Do NOT tune REF_HEIGHT to close that
 	# gap; re-measure the ratio as a CHECK instead.
-	_scale = SectorView.SORTCUBE_PX / REF_HEIGHT
+	_scale = RETAIL_HUMANOID_PX / REF_HEIGHT
 
 	# Transparent pass, like the object sprites this is sorted against
 	# (_build_sortcube's constraint 2); depth_draw_mode still writes the
@@ -157,12 +198,7 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 	# passed with that live, because nothing in checks/ built a PlayerView; the
 	# gate that does is checks/compose_check.gd, added with this fix.
 	_mesh.sorting_use_aabb_center = false
-	for s in _mesh.get_surface_override_material_count():
-		var mat: StandardMaterial3D = _mesh.get_surface_override_material(s)
-		if mat == null:
-			continue
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_OPAQUE_ONLY
+	_style(_mesh)
 
 	if _skeleton != null:
 		for i in _skeleton.get_bone_count():
@@ -186,6 +222,111 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 
 	node = mv
 
+
+
+## Applies the character material model to every surface of `mesh`.
+##
+## SEPARATE FROM setup() BECAUSE GARMENTS ARRIVE LATER. attach_skinned builds
+## each worn piece as its OWN ModelView with its own MeshInstance3D, and
+## _dress_player runs after this class is constructed, so a loop that ran once
+## over the body mesh reached the body and nothing else. Measured: with the ramp
+## on the body alone, hero-pixel p75 and p90 moved onto retail (1.500 -> 1.188
+## and 1.241 -> 0.980) while p10 through p50 did not move AT ALL, because those
+## darker pixels are the garments and they were still lit by the old model.
+##
+## Transparent pass, like the object sprites this is sorted against
+## (_build_sortcube's constraint 2); depth_draw_mode still writes the depth
+## buffer so opaque terrain occludes/is occluded correctly, mirroring the
+## sortcube's own material exactly.
+##
+## PER SURFACE, not material_override. ModelView built ONE material for the
+## whole mesh until the material chain landed and now builds one per draw batch,
+## so material_override is null and reading it crashed every rig this class
+## builds -- every NPC, every creature, the player. Two gated commits passed with
+## that live, because nothing in checks/ built a PlayerView; the gate that does
+## is checks/compose_check.gd.
+func _style(mesh: MeshInstance3D) -> void:
+	if mesh == null:
+		return
+	for s in mesh.get_surface_override_material_count():
+		var mat: StandardMaterial3D = mesh.get_surface_override_material(s)
+		if mat == null:
+			continue
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_OPAQUE_ONLY
+		# UNSHADED, BECAUSE RETAIL DOES NOT LIGHT CHARACTERS WITH LIGHTS.
+		#
+		# Sacred's character lighting is a SCALAR LOOKUP, recovered from the Windows
+		# retail build's sub_41B5B0: it starts from a base ambient of 32/255,
+		# accumulates a contribution per nearby light source attenuated by distance,
+		# clamps the total to 255, and uses that ONE number to index three 256-entry
+		# per-channel colour ramps, whose output then modulates the mesh. There is no
+		# surface normal anywhere in it -- no diffuse term, no specular, no light
+		# direction. The port was instead lighting the hero with two DirectionalLight3Ds
+		# (main.gd:_ensure_rig_light), which is a different model and produced a
+		# harsh, directionally-shaded figure where retail draws a flat modulated one.
+		#
+		# The terrain path already works retail's way and already matches: sector_view
+		# draws unshaded and multiplies by the cell's own +0x14 light byte, and over
+		# ten floor patches chosen clear of the hero and furniture SIX come out
+		# byte-identical to retail, with 71.35% of the whole frame inside 12/255.
+		# Applying the same model to the character is consistency, not a new guess.
+		#
+		# MEASURED EFFECT, including where it is still wrong. Skin, hair, the white
+		# boots and the gold all move onto retail's values by eye, and the highlight
+		# deficit closes: hero-pixel V p90 goes 119.0 -> 181.3 against retail's 139.7.
+		# It now OVERSHOOTS by 41.7. That is expected and is NOT tuned out here with a
+		# scalar, for two reasons. First, the two masks are different sizes (3995 port
+		# pixels against 5504 retail) because the port's figure is separately known to
+		# be too small, so a percentile-to-percentile ratio does not compare the same
+		# pixels -- the fallacy that produced rows 979 and 999. Second, the honest fix
+		# is the missing half of the mechanism: retail's ramp, and the per-cell light
+		# value feeding it. At this start cell the light byte is 255, so full albedo is
+		# the right INPUT and the ramp is what would bring the top end down.
+		#
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		# ...AND THE RAMP, WHICH IS THE OTHER HALF OF THAT MECHANISM.
+		#
+		# sub_41B5B0 indexes three 256-entry per-channel tables with its
+		# accumulated light scalar. Their BUILDER is sub_417FA0 at 0x4188C0-0x4189ED:
+		# one loop, i from 0 to 255, filling all six tables (two sets of three) from
+		# four float constants, which read 0.25 (flt_88F7C4), 64.0 (flt_88F914),
+		# 1/3 (flt_88F910) and 0.75 (flt_88F90C):
+		#
+		#     base  = clamp(brightness_setting, 0, 1) * 64      ; sub_81C9E0, clamped
+		#                                                        against 0.0 and 1.0
+		#     R = G = floor(i * 0.25    + base + 64)            ; tables +0xFE18, +0x10218
+		#     B     = floor(i * (1/3)   + base + 64)            ; table  +0x10618
+		#
+		# and the packed result modulates the mesh. Blue climbs faster than red and
+		# green, which is why the ramp cools the image as it brightens rather than
+		# just scaling it -- a plain multiply cannot reproduce that and neither can
+		# a gamma. (The second set of three tables, +0x12E18 onward, is a separate
+		# neutral ramp, floor(i*0.75 + 64) on all three channels, selected by the
+		# flag at +40460; that path is not the one the world draws through.)
+		#
+		# APPLIED HERE AT FULL LIGHT ONLY. i = 255 with the brightness setting at
+		# maximum gives R = G = floor(63.75 + 128) = 191 and B = floor(85 + 128) = 213,
+		# hence the constants below. That is the right value for this frame and no
+		# other: the Seraphim's start cell carries terrain light byte 255 and has no
+		# dynamic light near her. A rig standing in shadow needs i from the cell and
+		# the ramp evaluated per rig, which is the next step and is NOT done here.
+		#
+		# Direction confirmed independently before it was applied: with the figures
+		# finally at matching size, the port read BRIGHTER than retail at every
+		# percentile of the hero mask (p10 through p90, ratios 1.18 to 1.53), and
+		# 1/0.749 = 1.34 sits inside that band.
+		mat.albedo_color = RETAIL_LIGHT_FULL
+
+
+## Every MeshInstance3D under `n`, styled. A worn piece is a whole ModelView
+## subtree, not a bare mesh, so the walk is what makes "style what was just
+## attached" a single call at each site.
+func _style_tree(n: Node) -> void:
+	if n is MeshInstance3D:
+		_style(n)
+	for c in n.get_children():
+		_style_tree(c)
 
 ## Moves the built rig to `cell`, converted through IsoCamera.cell_to_world
 ## (already static and exact -- never reimplemented) and placed at the ground
@@ -229,7 +370,13 @@ func equip(models: Sacred.Models, mesh_name: String, slot: int,
 	if e < 0:
 		return false
 	var socket := ModelView.SOCKET_MAIN if slot == 1 else ModelView.SOCKET_OFF
-	return (node as ModelView).attach_socket(models, e, socket, texture) != null
+	var piece := (node as ModelView).attach_socket(models, e, socket, texture)
+	if piece == null:
+		return false
+	# A carried weapon is lit by the same model as the body it hangs off, so it
+	# takes the same treatment -- see _style for why this cannot live in setup().
+	_style_tree(piece)
+	return true
 
 
 ## Puts a skinned garment on the rig -- the ARMOUR path, distinct from equip()
@@ -247,7 +394,11 @@ func wear(models: Sacred.Models, mesh_name: String, texture: int = -1) -> bool:
 	var e := models.index_of(mesh_name)
 	if e < 0:
 		return false
-	return (node as ModelView).attach_skinned(models, e, texture) != null
+	var worn_mesh := (node as ModelView).attach_skinned(models, e, texture)
+	if worn_mesh == null:
+		return false
+	_style(worn_mesh)
+	return true
 
 
 ## How many garments bound, and how many were refused. As with equipped(), a
@@ -443,7 +594,16 @@ func face(_cell: Vector2, dir: Vector2) -> bool:
 	# The rig-horizontal angle that points at the viewer, and the one that
 	# points along screen +X. `_horizon` walks the rig's own horizontal circle
 	# and reports where a given world axis is most closely matched.
-	var to_camera := _horizon(basis, Vector3(0.0, 0.0, -1.0))
+	# WORLD +Z, NOT -Z. IsoCamera sits at Vector3(p.x, p.y, 1000.0) and is never
+	# rotated, so it looks along its own local -Z, i.e. down the world -Z axis --
+	# which means the direction FROM the world TOWARDS it is +Z. SectorView says
+	# the same independently: it lays terrain at `pz = (x + y) * DEPTH_STEP`, so
+	# the cells that are nearer the viewer (larger x+y, drawn lower on screen by
+	# `sy = -(x+y) * HH`) sit at LARGER z. This read -1 and turned every body a
+	# clean 180 degrees, front to the wall -- the horizontal part of the posed
+	# forward is identical under both signs, only its z flips, which is exactly
+	# the shape a facing bug of this kind has.
+	var to_camera := _horizon(basis, Vector3(0.0, 0.0, 1.0))
 	var to_right := _horizon(basis, Vector3(1.0, 0.0, 0.0))
 	if is_nan(to_camera) or is_nan(to_right):
 		return false

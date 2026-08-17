@@ -21,7 +21,14 @@ extends "res://checks/check.gd"
 ## itself. Three of them would each, alone, fail if the equality rule were
 ## reinstated or if positional pairing were adopted.
 const WANT_DECLARE := 971
-const WANT_DECODE := 802
+
+## 802 until the geometric tiebreaker landed in Models._pair_by_geometry. The
+## strict rule accepts a matching only when EVERY valid matching hands each mesh
+## the same list; the tiebreaker resolves the ties it refused by scoring mean
+## vertex-to-bone distance. Measured, as the assert message below demands: 1349
+## entries decided by the strict rule alone, 139 ties then broken geometrically
+## with 0 disagreements against it, 118 of which became entries that now decode.
+const WANT_DECODE := 920
 
 ## The entry that refutes POSITIONAL pairing. Three meshes needing 27, 3 and 12
 ## bones, whose sections appear in the directory as 12, 27, 3 -- so a reader
@@ -35,11 +42,18 @@ const POSITIONAL_TRAP_2 := "AMAZONE_CLOTH.GRN"
 const POSITIONAL_TRAP_2_SIZES: Array[int] = [9, 5]
 
 ## Left/right symmetric pieces whose two lists are the SAME SIZE and DIFFERENT
-## BONES, so counts alone cannot say which boot goes on which leg. Refusing
-## these is the correct answer, not a conservative one: a coin flip binds a
-## boot to the opposite leg. They are pinned as REFUSED so that a future
-## geometric tiebreak has to move this constant deliberately.
-const AMBIGUOUS: Array[String] = ["SERABOOTS01.GRN", "SERASHOULDER01.GRN"]
+## BONES, so counts alone cannot say which boot goes on which leg. This held
+## SERABOOTS01.GRN and SERASHOULDER01.GRN, pinned as REFUSED so that a future
+## geometric tiebreak had to move the constant deliberately rather than silently.
+##
+## MOVED, deliberately. Models._pair_by_geometry now decides them by mean
+## vertex-to-bone distance, which is the signal counts were missing -- a boot's
+## vertices sit near its own leg's bones and far from the other's, so this is
+## principled rather than the coin flip the paragraph above warns about. Both
+## are spot-checked by entry id in checks/bonepair_check.gd (654, 664), which is
+## where the ongoing coverage lives; empty here means nothing is currently
+## refused for size-tie reasons, and a new entry appearing must be justified.
+const AMBIGUOUS: Array[String] = []
 
 
 func _init() -> void:

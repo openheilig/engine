@@ -322,7 +322,67 @@ func attach_socket(models: Sacred.Models, entry: int, socket: String,
 	# first version of this line did. Safe because the two bases are the same
 	# transform anyway -- measured identical on all 41 body/hand pairs the eight
 	# startcode classes declare.
-	piece.transform = (grip as Transform3D).affine_inverse()
+	#
+	# ORTHONORMALIZED, because G^-1 ALSO INVERTS G'S SCALE and that scale is not
+	# ours to apply. A grip is a place to put the hilt, not a size for the
+	# weapon: measured across the corpus the grips carry wildly different scales
+	# -- SWORD.GRN's is 1.0000, SeraWindslicer's is 0.1497 and SeraWindweaver's
+	# is 2.1800 -- so the raw inverse magnified the Seraphim's own starting blade
+	# by 6.68x and shrank the other to 0.46x. At her campaign start that drew a
+	# 49.2-unit sword as 328.9 units against a 74.3-unit SERAPHIM body (measured,
+	# both from the built rigs' AABBs): the flat sheet lying across her in every
+	# world capture, which three separate investigations mistook for a wing, a
+	# shadow and a broken rig before this line was read. SWORD.GRN's unit grip is
+	# why the --figure= viewer never showed it.
+	#
+	# HALF THE CORPUS IS A CONTROL GROUP, which is why this survived so long:
+	# 101 of the 206 weapon-side grips are already unit (SWORD.GRN, SPEAR, every
+	# SHIELD_*), and every viewer and check ever pointed at a weapon happened to
+	# use one of those. Across the 105 scaled ones the values cluster PER EXPORT
+	# BATCH -- 0.2297 shared by 21 files across VAMP_*/WEAPON_DUNKELELF_*/
+	# MAGIERSTAB_*, 0.0799 by 12, 0.0964 by 7, 0.1497 by 6 -- which is a per-scene
+	# Max helper-node scale, not a per-weapon size. The mesh vertices are already
+	# authored at final world size, so neither s nor 1/s may be applied here, only
+	# 1.0. Dropped, the 105 land in the same on-screen band as the 101 unit
+	# controls (median 48.6 against the controls' median 33.4, max 97.6, against
+	# bodies of 74-82); kept, they land at median 308 and max 1114.
+	#
+	# THE SCALE IS REAL FILE DATA, not a composition artefact: the scale_shear
+	# blocks are clean uniform diagonals with off-diagonals exactly +-0 (e.g.
+	# SK_HAMMER Bone_weapon_02 = 0.059148 on all three). Models.bones() must go
+	# on reporting it faithfully; this dock is the one consumer that must not
+	# apply it, which is why the fix lives here and not in formats/models.gd.
+	#
+	# MIRRORED GRIPS ARE OUT OF SCOPE and unchanged by this line: 9 grips have a
+	# negative-determinant basis (AXE_BRIGHT, AXE_DARK, AXE_HEAVY, GREATAXE,
+	# GREATAXE_1BLADE, HAMMER_ECKIG, HAMMER_HEAVY, HAMMER_NEO at -1.0000, and
+	# GARDE_AXE at -1.2806). orthonormalized() preserves handedness, so those
+	# weapons still dock point-mirrored exactly as they did under the raw
+	# inverse. Whether retail mirrors them too is UNMEASURED.
+	#
+	# Dropping the scale keeps the alignment the line exists for: T maps the
+	# grip's own origin to zero either way, so the hilt still lands on the hand;
+	# only the magnification goes.
+	#
+	# GUARDED, because orthonormalized() DIVIDES BY EACH AXIS LENGTH and a grip
+	# whose basis has a zero-length axis therefore comes back as NaN. Emitting
+	# that transform does not merely misplace the weapon: it poisons the piece's
+	# AABB, and a non-finite AABB stops the renderer presenting frames at all --
+	# measured, as a run that streamed its 16 sectors normally and then hung
+	# forever instead of settling, twice. A grip that cannot be normalised keeps
+	# the raw inverse it has always had, which is wrong by a scale factor but
+	# renders.
+	# The guard tests the ANSWER, not the input. Checking the grip's axis
+	# LENGTHS is not enough: Gram-Schmidt also emits NaN for a basis whose axes
+	# are merely parallel, which has perfectly ordinary lengths, and a first
+	# version of this guard passed such a grip straight through.
+	var g := grip as Transform3D
+	var t := Transform3D(g.basis.orthonormalized(), g.origin).affine_inverse()
+	if not _is_finite_transform(t):
+		push_warning("ModelView.attach_socket: entry %d grip for %s does not normalise (scale %s) -- keeping the raw inverse" % [
+			entry, socket, str(g.basis.get_scale())])
+		t = g.affine_inverse()
+	piece.transform = t
 	sockets_attached += 1
 	return piece
 
@@ -1270,3 +1330,14 @@ func _align_bone(bl: Array[Dictionary]) -> int:
 	# before this existed.
 	var q := ((bl[p]["rest"] as Transform3D).basis.get_rotation_quaternion()).normalized()
 	return -1 if absf(q.w) > 0.9999 else p
+
+
+## True when every component of `t` is a real number. A non-finite transform is
+## not merely a misplaced object: it poisons the instance's AABB, and the
+## renderer then stops presenting frames entirely, which reads as the whole run
+## hanging rather than as anything to do with this mesh.
+static func _is_finite_transform(t: Transform3D) -> bool:
+	for v: Vector3 in [t.basis.x, t.basis.y, t.basis.z, t.origin]:
+		if not (is_finite(v.x) and is_finite(v.y) and is_finite(v.z)):
+			return false
+	return true

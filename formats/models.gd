@@ -1111,10 +1111,21 @@ func bone_names(entry: int) -> PackedStringArray:
 ## clamped parent silently reparents a limb and still renders.
 ##
 ## SCALE-SHEAR CONVENTION, recorded as unfalsifiable on this corpus: the
-## nine floats are read as a row-major 3x3. Every scale-shear in all 181
-## sampled bones is the identity to within 1e-6 (max component magnitude
-## 1.0000009), so row-major and column-major produce the same matrix here
+## nine floats are read as a row-major 3x3, and every block observed so far
+## is DIAGONAL, so row-major and column-major produce the same matrix here
 ## and this corpus cannot distinguish them. Stated rather than hidden.
+##
+## NOT IDENTITY, though -- an earlier version of this block claimed "every
+## scale-shear in all 181 sampled bones is the identity to within 1e-6". That
+## sample contained no weapon props and the claim is false on the full corpus.
+## Measured over models.pak: 105 of the 206 weapon-socket grip bones carry a
+## NON-IDENTITY uniform diagonal (0.0591, 0.0799, 0.0964, 0.1497, 0.2297,
+## 2.1800 and friends, clustered per export batch), 101 are unit, 9 are
+## negative (-1.0000, one at -1.2806), and SK_HAMMER.GRN bone 1 "SK_Hammer_01"
+## carries a genuinely NON-UNIFORM one, (-0.035898, -0.058334, -0.047436).
+## bones() reports all of that faithfully; whether a consumer should APPLY it
+## is the consumer's decision -- view/model_view.gd's attach_socket documents
+## why the weapon dock is the one place that must not.
 func bones(entry: int) -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	var raw := bone_bytes(entry)
@@ -1296,72 +1307,26 @@ func mesh_weights(entry: int) -> Array[Dictionary]:
 	var dir := _directory(buf)
 	if dir.is_empty():
 		return out
-	var bl_count := bone_bytes(entry).size() / BONE_STRIDE
-	if bl_count <= 0:
-		return out
-
-	# Every FormMeshBone list in the entry, by its own length.
-	var lists: Array[PackedInt32Array] = []
-	for j in dir.size():
-		if dir[j]["tag"] != TAG_FORM_MESH_BONE_SECTION:
-			continue
-		var lst := PackedInt32Array()
-		var last: int = mini(j + 1 + int(dir[j]["children"]), dir.size())
-		for k in range(j + 1, last):
-			if dir[k]["tag"] != TAG_FORM_MESH_BONE:
-				continue
-			var o := SECTION_OFF_MESH + int(dir[k]["rel"])
-			if o < 0 or o + 4 > buf.size():
-				push_error("Models.mesh_weights: entry %d FormMeshBone at %d runs past the entry" % [entry, o])
-				return []
-			var g := buf.decode_s32(o)
-			if g < 0 or g >= bl_count:
-				push_error("Models.mesh_weights: entry %d FormMeshBone references bone %d of %d" % [
-					entry, g, bl_count])
-				return []
-			lst.append(g)
-		lists.append(lst)
-
-	# WHICH LIST BELONGS TO WHICH MESH. The sections are not children of the
-	# Mesh nodes -- they sit together at the end of the directory -- and their
-	# order is NOT mesh order: DWARF_BLACK_BODY's three meshes need 27, 3 and 12
-	# bones while its sections run 12, 27, 3. So neither containment nor
-	# position answers this, and the pairing has to be solved.
-	#
-	# The constraint is `len(list) >= highest + 1`: a mesh's local bone indices
-	# must fit inside its list. NOT equality -- a mesh may use a PREFIX of its
-	# list, which is what SERABOOTS01 does (two meshes needing 4, two lists of
-	# 5) and what made the previous equality rule refuse it.
-	#
-	# Solved as a perfect matching, accepted only when every valid matching
-	# hands each mesh the SAME list, so an entry with a genuine ambiguity is
-	# refused rather than guessed. Measured against the equality rule it
-	# replaces, over all 971 weight-declaring entries: the old rule decoded 736,
-	# this decodes 807, both succeed on 736 and they AGREE on all 736 with zero
-	# disagreements. A strict generalisation, not a different answer.
-	var needs := PackedInt32Array()
-	var mesh_nodes := PackedInt32Array()
-	for j in dir.size():
-		if dir[j]["tag"] != TAG_MESH:
-			continue
-		if _child_with_tag(dir, j, TAG_MESH_VERTICES) == -1 \
-				or _child_with_tag(dir, j, TAG_MESH_NORMALS) == -1 \
-				or _child_with_tag(dir, j, TAG_MESH_TRIANGLES) == -1:
-			continue
-		var wj0 := _child_with_tag(dir, j, TAG_MESH_WEIGHTS)
-		if wj0 == -1:
-			push_error("Models.mesh_weights: entry %d mesh at node %d has no MeshWeights child" % [entry, j])
-			return []
-		var o0 := SECTION_OFF_MESH + int(dir[wj0]["rel"])
-		if o0 < 0 or o0 + 8 > buf.size():
-			push_error("Models.mesh_weights: entry %d MeshWeights at node %d is out of range" % [entry, wj0])
-			return []
-		mesh_nodes.append(j)
-		needs.append(buf.decode_s32(o0 + 4) + 1)
+	var inputs := _pair_inputs(entry, buf, dir)
+	if inputs.is_empty():
+		return []
+	var needs: PackedInt32Array = inputs["needs"]
+	var lists: Array[PackedInt32Array] = inputs["lists"]
 	var assign := _pair_bone_lists(needs, lists)
 	if assign.is_empty():
-		push_error("Models.mesh_weights: entry %d has %d meshes and %d FormMeshBone lists that admit no unambiguous pairing" % [
-			entry, needs.size(), lists.size()])
+		# The size constraint ties on left/right symmetric pieces -- two boots,
+		# two same-size lists holding one leg each -- so geometry breaks it.
+		assign = _pair_by_geometry(entry, needs, lists)
+	if assign.is_empty():
+		# The sizes ALONE do not say whether this was "no matching exists" or
+		# "more than one distinct matching", and those want opposite fixes, so
+		# the message carries the numbers that decide it: what each mesh needs
+		# and what each list offers.
+		var have := PackedInt32Array()
+		for l in lists:
+			have.append(l.size())
+		push_error("Models.mesh_weights: entry %d has %d meshes and %d FormMeshBone lists that admit no unambiguous pairing (needs=%s, list sizes=%s)" % [
+			entry, needs.size(), lists.size(), str(needs), str(have)])
 		return []
 
 	var mesh_i := -1
@@ -1433,6 +1398,73 @@ func mesh_weights(entry: int) -> Array[Dictionary]:
 	return out
 
 
+## What the pairing is solved FROM: `needs[i]`, the count of bones mesh i's
+## weight stream indexes into, and `lists`, every FormMeshBone list in the entry
+## by its own length. Returns {} on a malformed entry, having said why.
+##
+## WHICH LIST BELONGS TO WHICH MESH. The sections are not children of the Mesh
+## nodes -- they sit together at the end of the directory -- and their order is
+## NOT mesh order: DWARF_BLACK_BODY's three meshes need 27, 3 and 12 bones while
+## its sections run 12, 27, 3. So neither containment nor position answers this,
+## and the pairing has to be solved.
+##
+## The constraint is `len(list) >= highest + 1`: a mesh's local bone indices must
+## fit inside its list. NOT equality -- a mesh may use a PREFIX of its list,
+## which is what SERABOOTS01 does (two meshes needing 4, two lists of 5) and what
+## made the previous equality rule refuse it.
+##
+## Solved as a perfect matching, accepted only when every valid matching hands
+## each mesh the SAME list; the left/right ties that survives that are broken by
+## _pair_by_geometry. Measured against the equality rule it replaces, over all
+## 971 weight-declaring entries: the old rule decoded 736, this decodes 807, both
+## succeed on 736 and they AGREE on all 736 with zero disagreements. A strict
+## generalisation, not a different answer.
+func _pair_inputs(entry: int, buf: PackedByteArray, dir: Array) -> Dictionary:
+	var bl_count := bone_bytes(entry).size() / BONE_STRIDE
+	if bl_count <= 0:
+		return {}
+
+	var lists: Array[PackedInt32Array] = []
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_FORM_MESH_BONE_SECTION:
+			continue
+		var lst := PackedInt32Array()
+		var last: int = mini(j + 1 + int(dir[j]["children"]), dir.size())
+		for k in range(j + 1, last):
+			if dir[k]["tag"] != TAG_FORM_MESH_BONE:
+				continue
+			var o := SECTION_OFF_MESH + int(dir[k]["rel"])
+			if o < 0 or o + 4 > buf.size():
+				push_error("Models.mesh_weights: entry %d FormMeshBone at %d runs past the entry" % [entry, o])
+				return {}
+			var g := buf.decode_s32(o)
+			if g < 0 or g >= bl_count:
+				push_error("Models.mesh_weights: entry %d FormMeshBone references bone %d of %d" % [
+					entry, g, bl_count])
+				return {}
+			lst.append(g)
+		lists.append(lst)
+
+	var needs := PackedInt32Array()
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_MESH:
+			continue
+		if _child_with_tag(dir, j, TAG_MESH_VERTICES) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_NORMALS) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_TRIANGLES) == -1:
+			continue
+		var wj0 := _child_with_tag(dir, j, TAG_MESH_WEIGHTS)
+		if wj0 == -1:
+			push_error("Models.mesh_weights: entry %d mesh at node %d has no MeshWeights child" % [entry, j])
+			return {}
+		var o0 := SECTION_OFF_MESH + int(dir[wj0]["rel"])
+		if o0 < 0 or o0 + 8 > buf.size():
+			push_error("Models.mesh_weights: entry %d MeshWeights at node %d is out of range" % [entry, wj0])
+			return {}
+		needs.append(buf.decode_s32(o0 + 4) + 1)
+	return {"needs": needs, "lists": lists}
+
+
 ## Assigns one FormMeshBone list to each mesh: a perfect matching under
 ## `list.size() >= needs[i]`, accepted only when every valid matching gives
 ## each mesh the same list. Returns list indices per mesh, or an empty array
@@ -1448,14 +1480,8 @@ const MAX_PAIR_SOLUTIONS := 64
 
 func _pair_bone_lists(needs: PackedInt32Array, lists: Array[PackedInt32Array]) -> PackedInt32Array:
 	var empty := PackedInt32Array()
-	if needs.is_empty() or needs.size() > MAX_MESH_PAIR or lists.is_empty():
-		return empty
-	var used: Array[bool] = []
-	used.resize(lists.size())
-	used.fill(false)
-	var sols: Array[PackedInt32Array] = []
-	_pair_search(needs, lists, used, PackedInt32Array(), sols)
-	if sols.is_empty() or sols.size() > MAX_PAIR_SOLUTIONS:
+	var sols := _pair_solutions(needs, lists)
+	if sols.is_empty():
 		return empty
 	# Different matchings are fine as long as they are the same ANSWER: two
 	# interchangeable lists with identical contents (SERABOOTS01's pair of
@@ -1466,6 +1492,139 @@ func _pair_bone_lists(needs: PackedInt32Array, lists: Array[PackedInt32Array]) -
 			if lists[s[i]] != lists[sols[0][i]]:
 				return empty
 	return sols[0]
+
+
+## Every perfect matching under `list.size() >= needs[i]`, or an empty array
+## when there is none or more than MAX_PAIR_SOLUTIONS of them. Split out of
+## _pair_bone_lists so the geometric tiebreaker enumerates the same candidates
+## the strict rule does, rather than a second opinion about what a candidate is.
+func _pair_solutions(needs: PackedInt32Array, lists: Array[PackedInt32Array]) -> Array[PackedInt32Array]:
+	var none: Array[PackedInt32Array] = []
+	if needs.is_empty() or needs.size() > MAX_MESH_PAIR or lists.is_empty():
+		return none
+	var used: Array[bool] = []
+	used.resize(lists.size())
+	used.fill(false)
+	var sols: Array[PackedInt32Array] = []
+	_pair_search(needs, lists, used, PackedInt32Array(), sols)
+	if sols.is_empty() or sols.size() > MAX_PAIR_SOLUTIONS:
+		return none
+	return sols
+
+
+## Breaks a tie the size constraint cannot: scores each candidate matching by
+## how far a mesh's vertices sit from the rest positions of the bones it would
+## be bound to, and takes the cheapest.
+##
+## WHY THIS IS NOT A COIN FLIP. The 169 entries the strict rule refuses are the
+## left/right symmetric pieces -- SERABOOTS01's two sections are [6,7,8,5,12]
+## and [10,11,12,9,8], one leg each, and both fit both meshes -- so no counting
+## rule can separate them and the file states the answer only through where the
+## geometry is. A boot bound to the opposite leg is not a near miss, it is the
+## model turned inside out, so the wrong answer here is loud rather than subtle.
+##
+## THE CONTROL IS WHAT MAKES IT EVIDENCE: checks/bonepair_check.gd runs this
+## against every entry the strict rule already decides and requires the two to
+## agree everywhere. A geometric rule that reproduces hundreds of independently
+## derived answers is measured; one validated only on the entries nothing else
+## can check would be a guess with a distance in it.
+##
+## MARGIN, not just a minimum: when the best and second-best scores are within
+## PAIR_GEOM_MARGIN of each other the geometry is not actually saying anything,
+## and the entry is refused exactly as before. Vertices are subsampled because
+## the answer is a gross spatial question -- which leg is this boot near -- and
+## a mesh has thousands of vertices that all say the same thing.
+const PAIR_GEOM_SAMPLES := 64
+const PAIR_GEOM_MARGIN := 1.15
+
+func _pair_by_geometry(entry: int, needs: PackedInt32Array,
+		lists: Array[PackedInt32Array]) -> PackedInt32Array:
+	var empty := PackedInt32Array()
+	var sols := _pair_solutions(needs, lists)
+	if sols.size() < 2:
+		return empty          # no tie to break, or nothing to choose from
+	var world := bind_poses(entry)
+	if world.is_empty():
+		return empty
+	var ma := mesh_arrays(entry)
+	if ma.is_empty():
+		return empty
+	# mesh_arrays walks Mesh nodes under the same skip rules mesh_weights does,
+	# so the two are index-parallel -- but that is a contract, and a contract
+	# worth checking before it is used to bind bones to the wrong half of a body.
+	if int(ma["meshes"]) != needs.size():
+		push_error("Models._pair_by_geometry: entry %d has %d meshes by weights and %d by arrays" % [
+			entry, needs.size(), int(ma["meshes"])])
+		return empty
+	var pos: PackedVector3Array = ma["positions"]
+	var vmesh: PackedInt32Array = ma["vertex_mesh"]
+	var samples: Array[PackedVector3Array] = []
+	for i in needs.size():
+		samples.append(PackedVector3Array())
+	var step := maxi(1, pos.size() / (PAIR_GEOM_SAMPLES * needs.size()))
+	for v in range(0, pos.size(), step):
+		var mi := vmesh[v]
+		if mi >= 0 and mi < samples.size():
+			samples[mi].append(pos[v])
+	for s in samples:
+		if s.is_empty():
+			return empty
+
+	var best := INF
+	var second := INF
+	var best_i := -1
+	for si in sols.size():
+		var score := 0.0
+		for mi in needs.size():
+			var bl := lists[sols[si][mi]]
+			var acc := 0.0
+			for v in samples[mi]:
+				var near := INF
+				for b in bl:
+					if b < 0 or b >= world.size():
+						continue
+					near = minf(near, v.distance_squared_to(world[b].origin))
+				if near == INF:
+					return empty
+				acc += sqrt(near)
+			score += acc / float(samples[mi].size())
+		if score < best:
+			second = best
+			best = score
+			best_i = si
+		elif score < second:
+			second = score
+	if best_i == -1 or best <= 0.0 or second < best * PAIR_GEOM_MARGIN:
+		return empty
+	return sols[best_i]
+
+
+## The strict and geometric answers side by side, for checks/bonepair_check.gd
+## to run the control with. Not used by mesh_weights, which already holds the
+## buffer and directory this has to re-read -- the duplication is one read on a
+## path nothing renders through, and the alternative was a check that re-derives
+## `needs` and `lists` itself and so tests its own copy of the walk.
+func pairing_verdicts(entry: int) -> Dictionary:
+	var length := true_length(entry)
+	if length <= 0 or not magic_ok(entry):
+		return {}
+	var buf := _pak.read_at(_pak.entry_offset(entry), length)
+	if buf.size() < length:
+		return {}
+	var dir := _directory(buf)
+	if dir.is_empty():
+		return {}
+	var inputs := _pair_inputs(entry, buf, dir)
+	if inputs.is_empty():
+		return {}
+	var needs: PackedInt32Array = inputs["needs"]
+	var lists: Array[PackedInt32Array] = inputs["lists"]
+	return {
+		"needs": needs,
+		"lists": lists,
+		"strict": _pair_bone_lists(needs, lists),
+		"geometric": _pair_by_geometry(entry, needs, lists),
+	}
 
 
 func _pair_search(needs: PackedInt32Array, lists: Array[PackedInt32Array],

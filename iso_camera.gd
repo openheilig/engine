@@ -20,6 +20,33 @@ extends Camera3D
 const HW := 48.0    ## iso half-width
 const HH := 24.0    ## iso half-height
 
+## Retail centres its view ONE WORLD UNIT up-left of cell_to_world's answer.
+##
+## MEASURED 2026-08-16, not derived. Retail was driven to the Seraphim's
+## campaign start (analysis/tools/drive/menu.sh new) and both engines captured
+## the same room at 1024x768. The port's frame was retail's frame translated by
+## exactly (1,1) screen pixels: shifting the port down-right by one pixel makes
+## a bare wall patch bit-identical to retail's (mean |delta| = 0.00 over
+## 80x100 px), so nothing about the sampling grid, the textures or the lighting
+## differs -- only the origin. p6_classify.py agrees on two separate runs.
+##
+## The offset is expressed in WORLD units rather than screen pixels because it
+## DOUBLES with the zoom step: shift=1,1 at the middle step and shift=2,2 at
+## 2x, on settled frames 4 s apart (drive-serazoom2). A screen-space constant
+## would have stayed at one pixel.
+##
+## It is applied to the camera, and only to the camera, because that is what
+## the measurement constrains. Terrain, objects and the camera all share
+## cell_to_world, so a constant added THERE cancels out and changes no pixel;
+## the two things the evidence separates are "where the view is centred" and
+## "where the geometry is", and it is the first that disagrees with retail.
+## Which subsystem morally owns the unit -- retail's own carthesianToIso, its
+## hero anchor, or its glOrtho set-up -- is NOT yet known, and reading that out
+## of the binary is the follow-up. Until then this is an honest measured
+## constant, not an explained one, and it is here rather than hidden in
+## cell_to_world so it cannot be mistaken for the latter.
+const VIEW_ORIGIN := Vector2(-1.0, 1.0)
+
 ## Cell coordinate limits. Sacred's world is 100x100 sectors of 64 cells.
 @export var cell_limit := Vector2(6400.0, 6400.0)
 @export var pan_speed := 900.0        ## world units/second at the widest zoom
@@ -87,22 +114,49 @@ func _process(delta: float) -> void:
 		_move(dir * pan_speed * delta / zoom_scale())
 
 
+## The cell the current left-drag last re-targeted, so holding the button still
+## while the pointer jitters inside one cell does not re-path every motion
+## event. Reset on release so the next drag always re-targets at least once.
+var _drag_cell := Vector2i(-1, -1)
+
+
+## LEFT DRAG WALKS, IT DOES NOT PAN. Holding the button and moving the pointer
+## re-targets the hero every time the pointer crosses into a new cell, which is
+## the continuous "keep walking where I point" this genre runs on and what the
+## port was missing -- a single click could only ever schedule one path.
+##
+## Panning the camera on left-drag, which this did before, was already DEAD in
+## normal play and not a behaviour being taken away: main.gd:735 calls
+## follow_cell(p.cell) every tick, so any drag-pan was overwritten before the
+## next frame. It survives on MIDDLE drag, where it is actually reachable --
+## the --at=/--sector= inspection modes build no player and so never follow.
 func _unhandled_input(e: InputEvent) -> void:
-	if e is InputEventMouseMotion and e.button_mask & MOUSE_BUTTON_MASK_LEFT:
+	if e is InputEventMouseMotion and e.button_mask & MOUSE_BUTTON_MASK_MIDDLE:
 		_move(Vector2(-e.relative.x, e.relative.y) * (size / 1000.0))
-	elif e is InputEventMouseButton and e.pressed:
+	elif e is InputEventMouseMotion and e.button_mask & MOUSE_BUTTON_MASK_LEFT:
+		var cell := viewport_to_cell(e.position)
+		if cell != _drag_cell:
+			_drag_cell = cell
+			move_click.emit(cell)
+			get_viewport().set_input_as_handled()
+	elif e is InputEventMouseButton:
+		if not e.pressed:
+			if e.button_index == MOUSE_BUTTON_LEFT:
+				_drag_cell = Vector2i(-1, -1)
+			return
 		if e.button_index == MOUSE_BUTTON_WHEEL_UP:
 			set_zoom_index(zoom_index - 1)
 		elif e.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			set_zoom_index(zoom_index + 1)
 		elif e.button_index == MOUSE_BUTTON_LEFT:
-			move_click.emit(viewport_to_cell(e.position))
+			_drag_cell = viewport_to_cell(e.position)
+			move_click.emit(_drag_cell)
 			get_viewport().set_input_as_handled()
 
 
 ## Centre the view on a cell coordinate.
 func look_at_cell(cell: Vector2) -> void:
-	var p := cell_to_world(cell)
+	var p := cell_to_world(cell) + VIEW_ORIGIN
 	position = Vector3(p.x, p.y, 1000.0)
 
 
@@ -130,7 +184,7 @@ func follow_cell(cell: Vector2) -> void:
 	var h := get_viewport().get_visible_rect().size.y
 	if int(h) % 2 != 0:
 		push_error("IsoCamera: viewport height %d is odd -- the view centre falls on a half pixel, breaking follow's pixel-grid snap" % int(h))
-	var p := cell_to_world(cell)
+	var p := cell_to_world(cell) + VIEW_ORIGIN
 	var s := zoom_scale()
 	position = Vector3(roundf(p.x * s) / s, roundf(p.y * s) / s, 1000.0)
 

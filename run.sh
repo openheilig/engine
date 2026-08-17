@@ -34,8 +34,11 @@ case "${1:-}" in
 	[ "$fail" -eq 0 ]
 	;;
 --flags)
-	# Read out of main.gd rather than listed here, so this cannot go stale.
-	grep -oE '"--[a-z-]+=?' "$DIR/main.gd" | tr -d '"' | sort -u
+	# Read out of the sources rather than listed here, so this cannot go stale.
+	# drive.gd is included because --drive=/--shots=/--drive-out= are parsed
+	# there, not in main.gd, and a flag list that omits them is a flag list
+	# somebody will trust.
+	grep -ohE '"--[a-z-]+=?' "$DIR/main.gd" "$DIR/drive.gd" | tr -d '"' | sort -u
 	;;
 --layers)
 	exec "$GODOT" --headless --path "$DIR" --script res://parity/verify.gd
