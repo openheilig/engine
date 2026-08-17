@@ -60,6 +60,43 @@ const BAND_MAX := 4096
 ## of pos.y), the smallest step a genuinely distinct object can produce.
 const BAND_TIE_EPS := 0.001
 
+## Sprite width, in pixels, above which a placement is treated as a STRUCTURE
+## spanning many ground cells rather than an upright standing on one, and so
+## keeps its authored order instead of being sorted at its foot. See the
+## base_pos comment in _build_objects for why the split exists at all.
+##
+## SWEPT, not chosen. Whole-frame delta against retail's own spawn capture --
+## same script, same millisecond, pixels differing by >24 out of 786432:
+##
+##    96  20.66%     160  17.73%     320  17.73%
+##   128  19.85%     192  17.73%     no threshold, every sprite   18.06%
+##                   256  17.73%     no height at all, corner     20.67%
+##
+## The curve is FLAT from 160 to 320 because only two sprites in this scene
+## sit anywhere near that span -- the chapel's 460-wide interior shell and
+## CW_Tree at 344 -- and every threshold in it classifies both the same way.
+## It falls off below 160 because the widest genuine UPRIGHT present, Busch 41
+## at 158, starts being misread as a structure and loses its foot.
+##
+## 256 is the midpoint of the plateau rather than an edge of it: the value
+## least likely to reclassify something when a scene with other art is
+## measured. That the plateau is flat is itself the warning -- this scene
+## brackets the threshold, it does not pin it.
+const STRUCTURE_W := 256
+
+## REFUTED, and recorded so it is not tried again. The width test above lets a
+## wine rack move forward over the candles standing ON its own shelves, so the
+## obvious next rule was "only give the height to a genuine UPRIGHT, something
+## far taller than it is wide". It loses at every ratio measured -- same frame,
+## same metric as STRUCTURE_W's sweep:
+##
+##   no aspect gate  17.73%     2.5  19.11%
+##   1.5  18.55%                3.0  19.13%
+##   2.0  18.58%                4.0  20.42%
+##
+## So squat objects gain more from being sorted at their foot than the candles
+## lose by being covered. The candle occlusion is real and still open; it is
+## just not what an aspect ratio fixes.
 ## --sortcube=CX,CY marker-cube side length in screen pixels -- one retail cell
 ## width (IsoCamera.HW * 2), so the proxy reads at the same scale a character
 ## sprite would.
@@ -708,10 +745,43 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy
 			# so no single index works everywhere.
 			if _exterior and _items != null and _items.is_top_level(o["type"]):
 				continue
+			# SORT AN UPRIGHT AT ITS FOOT, A STRUCTURE AT ITS CORNER.
+			#
+			# static.pak stores a sprite's TOP-LEFT, so ordering placements by
+			# the stored y sorts a 389px chapel pillar as though it stood a
+			# whole sprite-height further back than it does, and everything
+			# nearer than its ROOFLINE paints over its stonework -- the "ivy
+			# in front of the pillar" the two-engine compare charged 7
+			# percentage points of the frame to (row 1016). Adding the height
+			# to reach the sprite's foot fixes that: 20.7% -> 18.1%.
+			#
+			# But it cannot be added unconditionally, and the exception is
+			# measured rather than assumed. A WIDE sprite is not one object
+			# standing at one spot -- it is a structure spanning many ground
+			# cells, and the chapel's 460x889 interior shell reaches further
+			# south than the furniture standing INSIDE it, so its foot sorts
+			# it in front of its own contents and it painted out the wine
+			# rack. A single painter key cannot order a sprite that contains
+			# other sprites; retail draws those in authored order, and the
+			# stored corner IS that order.
+			#
+			# So: only sprites narrow enough to stand in one place get their
+			# height. STRUCTURE_W is swept, not chosen -- see its comment.
+			#
+			# OPEN: this is an empirical split, not a transcribed rule. The
+			# authored draw order retail uses for building parts has not been
+			# recovered; when it is, it replaces the width test outright.
+			var bp: Vector2 = o["pos"]
+			var oh := 0
+			if _mixed != null and _items != null:
+				var osz := _mixed.size_of(_items.sprite_of(o["type"]))
+				if osz.x <= STRUCTURE_W:
+					oh = osz.y
+			o["base_pos"] = Vector2(bp.x, bp.y - float(oh))
 			objs.append(o)
 	objs.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		var pa: Vector2 = a["pos"]
-		var pb: Vector2 = b["pos"]
+		var pa: Vector2 = a["base_pos"]
+		var pb: Vector2 = b["base_pos"]
 		# pos.y is Godot-up, so DESCENDING y is north-to-south = back-to-front.
 		return pa.y > pb.y if not is_equal_approx(pa.y, pb.y) else pa.x < pb.x)
 
@@ -724,7 +794,11 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy
 	for i in n:
 		var band := _band_of(i, n, _band_count)
 		if not band_has_repr[band]:
-			band_repr[band] = ground_depth(objs[i]["pos"])
+			# Same baseline the sort and the per-vertex pz use -- a band whose
+			# representative depth came from a different point than its
+			# members' would order the bands against each other on one rule
+			# and their contents on another.
+			band_repr[band] = ground_depth(objs[i]["base_pos"])
 			band_has_repr[band] = true
 	for b in range(1, _band_count):
 		if band_repr[b] <= band_repr[b - 1]:

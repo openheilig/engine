@@ -28,6 +28,25 @@ func _init(pak: Pak) -> void:
 func count() -> int:
 	return _pak.count()
 
+## The sprite's SIZE alone, read straight out of the 16-byte header.
+##
+## The object painter order needs every placement's extent before any art is
+## decoded -- static.pak stores only a sprite's TOP-LEFT corner, so the size is
+## what says where the object meets the ground. Walking the 64-byte tile table
+## for each placement to reach two u16s would decode a sector's geometry twice;
+## this peeks the header and stops.
+##
+## (The header's dx/dy at +8 is NOT that ground point. It reads (0,0) on every
+## structural piece measured -- chapel shell, pillar, wall, tree -- so it
+## carries no footing information and sorting by it scored 20.4% against
+## retail where the size-derived baseline scored 18.1%.)
+func size_of(i: int) -> Vector2i:
+	if i <= 0 or i >= _pak.count():
+		return Vector2i.ZERO
+	var r := _pak.blob(i)
+	return Vector2i(r.decode_u16(4), r.decode_u16(6)) if r.size() >= 16 else Vector2i.ZERO
+
+
 ## {size: Vector2i, anchor: Vector2i, tiles: Array[Dictionary]} or {} if the
 ## entry has no art. Each tile is {tex: int, src: Rect2, dst: Rect2i}.
 func sprite(i: int) -> Dictionary:

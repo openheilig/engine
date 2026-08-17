@@ -91,24 +91,45 @@ func _init() -> void:
 	expect(hud.missing.is_empty(),
 		"these sheets did not resolve: %s" % [hud.missing])
 	expect(hud.found, "the HUD drew nothing")
-	# The wings TILE, so the count is derived rather than listed: each side
-	# steps at the slot pitch from its anchor to the console.
-	var wings := 0
-	var wx := Hud.WING_LEFT_X
-	while wx < Hud.WING_LEFT_END:
-		wings += 1
-		wx += Hud.SLOT_STEP
-	wx = Hud.WING_RIGHT_X
-	while wx > Hud.WING_RIGHT_END:
-		wings += 1
-		wx -= Hud.SLOT_STEP
+	# The wings CARRY THE SLOTS -- one rail tile per slot per side -- so the
+	# count is derived from SLOTS rather than from a fixed screen span.
+	var wings := Hud.SLOTS * 2
 	var want := Hud.PIECES.size() + Hud.ART_SLOTS.size() + Hud.SLOTS * 2 + 1 + wings
 	expect(hud.drawn == want,
 		"the HUD placed %d pieces, expected %d (%d of them wing tiles)" % [
 			hud.drawn, want, wings])
-	# The wings must MEET the console rather than leave a gap or overlap it.
-	expect(Hud.WING_LEFT_END <= 397 and Hud.WING_RIGHT_END >= 397,
-		"a wing does not reach the console")
+	# THE RAIL MUST NOT OUTRUN THE SLOTS, which is exactly what the earlier
+	# full-width tiling did: ten pieces laid across bare terrain, charged 13%
+	# of the whole two-engine frame delta (row 1015). Each rail butts the
+	# console and reaches just far enough to carry the outermost slot.
+	var lw: int = (Hud.WING_LEFT[0]["rect"] as Rect2i).size.x
+	var rail_l: int = Hud.CONSOLE_LEFT - lw - Hud.SLOT_STEP * (Hud.SLOTS - 1)
+	expect(rail_l <= Hud.SKILL_X0 and rail_l > Hud.SKILL_X0 - Hud.SLOT_STEP,
+		"the left rail starts at %d; the outermost skill slot is at %d" % [
+			rail_l, Hud.SKILL_X0])
+	var rw: int = (Hud.WING_RIGHT[0]["rect"] as Rect2i).size.x
+	var rail_r: int = Hud.CONSOLE_RIGHT + Hud.SLOT_STEP * (Hud.SLOTS - 1) + rw
+	var spell_end: int = Hud.SPELL_X0 + Hud.SLOT_STEP * (Hud.SLOTS - 1) + 63
+	expect(rail_r >= spell_end and rail_r < spell_end + Hud.SLOT_STEP,
+		"the right rail ends at %d; the outermost spell slot ends at %d" % [
+			rail_r, spell_end])
+	# The console's own edges are the anchors, so a moved console moves both.
+	expect(Hud.CONSOLE_LEFT == (console["at"] as Vector2i).x
+		and Hud.CONSOLE_RIGHT == (console["at"] as Vector2i).x + cw,
+		"the rail anchors have drifted off the console's %d-wide rect" % cw)
+	# THE DIAL IS 56 WIDE ON SCREEN, not the 128 of its own texture. Setting
+	# size before add_child let the layout snap it back and painted a 128px
+	# night-sky annulus across the console; this reads the live node.
+	var dial: TextureRect = null
+	for c in hud.get_node("Taskbar").get_children():
+		var t := c as TextureRect
+		if t != null and t.texture is ImageTexture:
+			dial = t
+	expect(dial != null, "the day/night dial was not placed")
+	if dial != null:
+		expect(dial.size == Vector2(Hud.DISC_SIZE, Hud.DISC_SIZE),
+			"the dial renders %s, expected %dx%d" % [
+				dial.size, Hud.DISC_SIZE, Hud.DISC_SIZE])
 
 	# The console shows text, and retail's own break marker becomes a newline.
 	hud.show_line("Kill the demon,<n>after Shareefa has summoned it.")

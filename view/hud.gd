@@ -88,8 +88,13 @@ const ART_SHEET := "GUI_MAIN_05"
 ## has to replay identically, and a HUD that reshuffles its own woodwork every
 ## launch cannot be compared frame to frame.
 ##
-## Left runs rightward from x 32 until it reaches the console; right runs
-## leftward from x 890 until it does. Both step at the slot pitch.
+## THE RAIL IS AS LONG AS THERE ARE SLOTS TO CARRY. Each side BUTTS AGAINST
+## THE CONSOLE and tiles outward one piece per slot at the slot pitch -- it is
+## not a full-width border. Retail's spawn frame is the measurement: the right
+## rail ends at 732 and this rule puts it at 627 + 104 = 731, to the pixel.
+## Tiling from a fixed x 32 / x 890 instead drew ten spurious pieces across
+## bare terrain, which the two-engine compare charged 13% of the whole frame
+## delta to (row 1015).
 const WING_LEFT := [
 	{"id": 6, "rect": Rect2i(0, 56, 102, 19), "y": 747},
 	{"id": 7, "rect": Rect2i(0, 76, 99, 17), "y": 749},
@@ -101,16 +106,25 @@ const WING_RIGHT := [
 	{"id": 11, "rect": Rect2i(0, 150, 99, 18), "y": 748},
 ]
 const WING_SHEET := "GUI_MAIN_03"
-const WING_LEFT_X := 32
-const WING_LEFT_END := 397        ## the console's left edge
-const WING_RIGHT_X := 890
-const WING_RIGHT_END := 532
+const CONSOLE_LEFT := 397         ## the console's left edge -- left rail butts here
+const CONSOLE_RIGHT := 627        ## 397 + 230 -- right rail starts here
 
-## The skill and spell wings. Five slots each, 63x63, from gfx id 103 (empty).
+## The skill and spell wings, 63x63 each, from gfx id 103 (empty).
 ## `x = 394 + 66*(i - n)` and `x = 640 + 66*i` with n the visible slot count,
 ## both at window y 15 -> screen 691.
 const SLOT_EMPTY := {"id": 103, "sheet": "GUI_MAIN_01", "rect": Rect2i(19, 169, 63, 63)}
-const SLOTS := 5
+
+## HOW MANY SLOTS ARE DRAWN, and it is the ASSIGNED count rather than a fixed
+## five. `x = 394 + 66*(i - n)` makes n readable straight off a frame: retail's
+## spawn capture puts the leftmost skill slot at 328, and 394 - 66n = 328 gives
+## n = 1. The spell side agrees independently -- `640 + 66*i` would put a
+## second spell slot at 706 and retail draws bare wall there. Five empty rings
+## a side was eight sprites of 63x63 painted over open terrain, 4% of the whole
+## screen (row 1015).
+##
+## ponytail: a constant, not a query against the hero's art list, because
+## nothing in the port assigns arts yet. When it does, this reads from there.
+const SLOTS := 1
 const SLOT_Y := 691
 const SLOT_STEP := 66
 const SKILL_X0 := 394 - SLOT_STEP * SLOTS      ## i - n with n = SLOTS
@@ -204,12 +218,18 @@ func _disc(tex_pak) -> void:
 	if img == null:
 		missing.append(DISC)
 		return
+	# RESIZE THE IMAGE, DO NOT ASK THE CONTROL TO SHRINK. `tr.size = 56` loses:
+	# a TextureRect's minimum size comes from its texture and the recalculation
+	# is DEFERRED, so the assignment is clamped straight back up to the
+	# texture's own 128x128 -- which drew the dial as a 128px night-sky annulus
+	# across the whole console, five times its area. Measured, not reasoned:
+	# the live node read size=(128,128) while this file said 56, and it still
+	# did with the assignment moved after add_child. Baking the size into the
+	# image leaves the layout nothing to override.
+	img.resize(DISC_SIZE, DISC_SIZE, Image.INTERPOLATE_BILINEAR)
 	var tr := TextureRect.new()
 	tr.texture = ImageTexture.create_from_image(img)
 	tr.position = Vector2(DISC_AT)
-	tr.size = Vector2(DISC_SIZE, DISC_SIZE)
-	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	tr.stretch_mode = TextureRect.STRETCH_SCALE
 	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_root.add_child(tr)
 	drawn += 1
@@ -256,17 +276,11 @@ func _rescale() -> void:
 
 ## The two ornamental rails, tiled from their anchors outward. See WING_LEFT.
 func _wings(tex_pak, cache: Dictionary) -> void:
-	var i := 0
-	var x := WING_LEFT_X
-	while x < WING_LEFT_END:
+	for i in SLOTS:
 		var p: Dictionary = WING_LEFT[0] if i == 0 else WING_LEFT[1 + (i % 2)]
-		_blit(tex_pak, cache, WING_SHEET, p["rect"], Vector2i(x, int(p["y"])))
-		x += SLOT_STEP
-		i += 1
-	i = 0
-	x = WING_RIGHT_X
-	while x > WING_RIGHT_END:
-		var p2: Dictionary = WING_RIGHT[0] if i == 0 else WING_RIGHT[1 + (i % 2)]
-		_blit(tex_pak, cache, WING_SHEET, p2["rect"], Vector2i(x, int(p2["y"])))
-		x -= SLOT_STEP
-		i += 1
+		var pw: int = (p["rect"] as Rect2i).size.x
+		_blit(tex_pak, cache, WING_SHEET, p["rect"],
+			Vector2i(CONSOLE_LEFT - pw - SLOT_STEP * i, int(p["y"])))
+		var q: Dictionary = WING_RIGHT[0] if i == 0 else WING_RIGHT[1 + (i % 2)]
+		_blit(tex_pak, cache, WING_SHEET, q["rect"],
+			Vector2i(CONSOLE_RIGHT + SLOT_STEP * i, int(q["y"])))
