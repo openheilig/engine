@@ -15,6 +15,7 @@ func _init() -> void:
 	_fraction()
 	_ready()
 	_hero()
+	_table()
 	print("regen_check OK\ttotal(4,0.5,10)=%.2f\trate(1,100)=%.2f\teps=%.2f" % [
 		Regen.total(4.0, 0.5, 10), Regen.rate(1.0, 100), Regen.READY_EPSILON])
 	finish()
@@ -116,6 +117,58 @@ func _ready() -> void:
 	expect(not Regen.ready(0.5), "half a second left is not ready")
 	expect(is_equal_approx(Regen.READY_EPSILON, 0.01),
 		"retail's epsilon is 0.01 (sub_8218774)")
+
+
+## THE COMBAT-ART TABLE, read out of retail's own executable. The signature is
+## the point of the test: a wrong offset here does not crash, it returns floats
+## that look exactly like balance data.
+func _table() -> void:
+	var install := Sacred.find_install()
+	if install == "":
+		print("regen_check\tSKIP\tno install tree")
+		return
+	var arts := CombatArts.new(install)
+	if not expect(arts.found, "combat-art table not read: %s" % arts.reason):
+		return
+	var ids := arts.ids()
+	expect(ids.size() == 94, "read %d arts, retail scans 94" % ids.size())
+	expect(arts.has(1000) and not arts.has(1), "the id index is not keyed by art id")
+
+	# EVERY art must produce a usable clock: positive, finite, and rising.
+	for id in ids:
+		var c := arts.coefficients(id)
+		expect(c["base"] > 0.0, "art %d has a non-positive base" % id)
+		expect(c["step"] >= 0.0, "art %d speeds up as it levels" % id)
+		var t0 := arts.total(id, 0)
+		var t9 := arts.total(id, 9)
+		expect(t0 > 0.0 and is_finite(t0), "art %d has no clock at level 0" % id)
+		expect(t9 >= t0, "art %d regenerates faster at level 9 than at 0" % id)
+		expect(arts.elements(id).size() == 3, "art %d has no element triple" % id)
+
+	# The table must AGREE with the standalone formula, not merely coexist with
+	# it -- this is the join between the reader and world/regen.gd.
+	var c1 := arts.coefficients(1000)
+	expect(is_equal_approx(arts.total(1000, 4),
+			Regen.total(c1["base"], c1["step"], 4)),
+		"CombatArts.total and Regen.total disagree")
+	expect(is_equal_approx(arts.total(1000, 0), 5.0),
+		"art 1000 at level 0 is %.2f, retail ships base 5" % arts.total(1000, 0))
+	expect(is_equal_approx(arts.total(1000, 1), 8.0),
+		"art 1000 at level 1 is %.2f, expected 5 + 3" % arts.total(1000, 1))
+
+	# And it must feed a real countdown end to end: retail's own coefficients
+	# through the port's own tick, landing ready.
+	var rate: float = Regen.rates(1.0, 30, 40)[Regen.COMBAT_ART]
+	var total := arts.total(1000, 0)
+	var rem := total
+	var steps := 0
+
+	while not Regen.ready(rem) and steps < 100000:
+		rem = Regen.tick(rem, total, 0.01, rate)
+		steps += 1
+	expect(Regen.ready(rem), "art 1000 never finished: %f left" % rem)
+	print("regen_check\ttable OK\tarts=%d\tart1000 lvl0=%.1fs lvl9=%.1fs\trecharge=%.2fs" % [
+		ids.size(), arts.total(1000, 0), arts.total(1000, 9), float(steps) * 0.01])
 
 
 ## THE HERO'S OWN RATES, from retail's own template rather than from literals.
