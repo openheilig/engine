@@ -31,9 +31,14 @@ extends CanvasLayer
 ## one. An earlier draft of this header assigned those two to the mercenary
 ## window; that is RETRACTED and the pixels say so.
 ##
-## MANA IS STILL NOT DRAWN, and that one is a real gap. No element, window or
-## field for it has been located -- not the art, not the value. Inventing an
-## orb for it would be inventing the most recognisable part of the screen.
+## THERE IS NO MANA GAUGE, and that is retail's design rather than a gap in
+## this file (row 1042). Sacred has no mana pool: its six attributes are
+## Strength, Endurance, Dexterity, PHYSICAL REGENERATION, MENTAL REGENERATION
+## and Charisma, and what a spell costs is TIME, not points. The element table
+## names 1446 pieces and not one of them is a mana anything; the resource shows
+## up on the combat-art slots instead, as UI_ACTION_GRAYED while an art
+## regenerates against UI_ACTION / UI_ACTION_BRIGHT when it is ready. So an orb
+## here would not be a missing feature -- it would be an invented one.
 ##
 ## Nothing here reads a simulation type (R10.2): the caller pushes values in.
 
@@ -114,17 +119,24 @@ const PORTRAIT := [
 ## Red area is very nearly linear in the hit-point fraction (measured 0.541
 ## 0.371 0.200 0.000 against 0.529 0.345 0.210 0.042), and BOTH a height-
 ## proportional waterline and an arc-proportional sweep reproduce that series
-## to within 0.033 -- less than the spread between them and the measurement.
-## The band is near-uniform per angle (526..725 px in six 30-degree bins), so
-## the two laws cannot be separated by this data at all. This slices by HEIGHT
-## because a slice is two rects and a sweep is a shader. If a frame ever
-## separates them, only SPLIT_Y below changes.
-const RING_EMPTY := Rect2i(95, 0, 95, 107)
-## The band's own vertical extent inside the 107-tall block, measured off the
-## art rather than assumed to be the whole block: rows 0 and 106 carry none of
-## it. The waterline runs between these, not between 0 and 107.
-const RING_TOP := 1
-const RING_BOTTOM := 106
+## to a mean error of 0.026 -- the SAME error, to three places. The band is
+## near-uniform per angle (395..471 px in six 30-degree bins), which is why:
+## over a uniform annulus, arc length and height are nearly the same function.
+## This slices by HEIGHT because a slice is two rects and a sweep is a shader.
+## If a frame ever separates them, only `split` below changes.
+## `UI_CHR_HEALTH_02` -- x 96, NOT 95. Retail's own element table gives
+## (96,0)-(191,107) and the one-pixel error is worth the note: aligning the two
+## blocks at 95 shifts the empty ring against the full one, which invents a
+## differing pixel at every edge in the art and drops the agreement with
+## retail's frame from 97.3% to 87.5%.
+const RING_EMPTY := Rect2i(96, 0, 95, 107)
+## The band's own extent inside the 107-tall block, measured off the art: the
+## two blocks differ on 2580 pixels and agree on 1618, and the differing set
+## spans rows 10..102 and columns 0..84 ONLY. The finial and the leafwork down
+## the right side are identical in both, so they are frame, not gauge -- the
+## waterline runs between these rows and nowhere near the block's own 0..107.
+const RING_TOP := 10
+const RING_BOTTOM := 102
 
 ## The five potion slots, ids 177..181. They form a shallow arc dipping UP at
 ## the centre, and the centre one sits at x 497 + 15 = 512, which is exactly
@@ -389,7 +401,11 @@ func set_health(frac: float) -> void:
 	var at: Vector2i = PORTRAIT[0]["at"]
 	# The waterline, in the block's own rows. f = 1 puts it at the band's top
 	# edge and f = 0 at its bottom, so the slice is never inverted.
-	var split := RING_TOP + roundi((1.0 - f) * float(RING_BOTTOM - RING_TOP))
+	# The span is one row LONGER than the band so the ends are exact: f = 1 puts
+	# the waterline at the band's first row and f = 0 one past its last, which
+	# is the difference between an empty gauge and an empty gauge with one lit
+	# row left in it.
+	var split := RING_TOP + roundi((1.0 - f) * float(RING_BOTTOM + 1 - RING_TOP))
 	_slice(_ring_full, Rect2i(rect.position.x, rect.position.y + split,
 		rect.size.x, rect.size.y - split), Vector2i(at.x, at.y + split))
 	if _ring_empty == null:

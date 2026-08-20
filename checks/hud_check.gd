@@ -124,7 +124,7 @@ func _init() -> void:
 		hud.set_health(f)
 		var red := (hud._ring_full.texture as AtlasTexture).region as Rect2
 		var split := Hud.RING_TOP + roundi((1.0 - f) * float(
-			Hud.RING_BOTTOM - Hud.RING_TOP))
+			Hud.RING_BOTTOM + 1 - Hud.RING_TOP))
 		expect(int(red.position.y) == split and
 			int(red.end.y) == (Hud.PORTRAIT[0]["rect"] as Rect2i).end.y,
 			"at %.2f health the red slice is %s, not rows %d..%d" % [
