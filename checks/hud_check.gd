@@ -115,6 +115,38 @@ func _init() -> void:
 	expect(hud.drawn == want,
 		"the HUD placed %d pieces, expected %d (%d of them wing tiles)" % [
 			hud.drawn, want, wings])
+	# THE LIFE GAUGE. The two blocks are complementary slices of one ring, so
+	# the invariant is that they TILE it: whatever the fraction, the grey rows
+	# plus the red rows cover the band exactly once, with no overlap and no
+	# gap. That is the property a wrong sign or an off-by-one breaks, and it is
+	# checkable without a frame.
+	for f in [1.0, 0.75, 0.5, 0.25, 0.0]:
+		hud.set_health(f)
+		var red := (hud._ring_full.texture as AtlasTexture).region as Rect2
+		var split := Hud.RING_TOP + roundi((1.0 - f) * float(
+			Hud.RING_BOTTOM - Hud.RING_TOP))
+		expect(int(red.position.y) == split and
+			int(red.end.y) == (Hud.PORTRAIT[0]["rect"] as Rect2i).end.y,
+			"at %.2f health the red slice is %s, not rows %d..%d" % [
+				f, red, split, (Hud.PORTRAIT[0]["rect"] as Rect2i).end.y])
+		expect(hud._ring_full.position.y == 15 + split,
+			"the red slice is at y %d but its rows start at %d" % [
+				hud._ring_full.position.y, split])
+		# Full health draws NO grey. Anything else would blend the red ring's
+		# soft edge against grey rather than against the world, which moves
+		# pixels in a frame the capture runbooks md5.
+		expect(hud._ring_empty.visible == (f < 1.0),
+			"at %.2f health the drained half is %s" % [
+				f, "shown" if hud._ring_empty.visible else "hidden"])
+		if hud._ring_empty.visible:
+			var grey := (hud._ring_empty.texture as AtlasTexture).region as Rect2
+			expect(int(grey.end.y) == split,
+				"the grey slice ends at %d and the red starts at %d -- they %s"
+					% [int(grey.end.y), split,
+					"overlap" if int(grey.end.y) > split else "leave a gap"])
+	# Leave it where a fresh run finds it.
+	hud.set_health(1.0)
+
 	# THE RAIL MUST NOT OUTRUN THE SLOTS, which is exactly what the earlier
 	# full-width tiling did: ten pieces laid across bare terrain, charged 13%
 	# of the whole two-engine frame delta (row 1015). Each rail butts the

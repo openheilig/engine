@@ -22,13 +22,18 @@ extends CanvasLayer
 ## screen coordinates so that convention lives here in one comment rather than
 ## in twelve subtractions.
 ##
-## WHAT THIS DOES NOT DRAW, and it is a real gap rather than a simplification:
-## the LIFE AND MANA GAUGES. All 46 functions of cUI_Taskbar2 were enumerated
-## and the class references no orb, globe or fill-bar art and computes no
-## fraction or scissor rect. The two orb-looking 95x107 elements in
-## GUI_main_02 belong to the mercenary window instead. So where the gauges are
-## drawn is unrecovered, and inventing a pair of orbs here would be inventing
-## the most recognisable part of the screen.
+## THE LIFE GAUGE IS THE PORTRAIT RING, and this file draws it (row 1039).
+## All 46 functions of cUI_Taskbar2 were enumerated and the class references no
+## orb, globe or fill-bar art and computes no fraction or scissor rect -- which
+## is not a gap in the enumeration but the answer to it. The gauge was never in
+## the taskbar. It is the portrait window, and its art is the pair below:
+## GUI_MAIN_02's 95x107 block at (0,0) is the FULL state and (95,0) the EMPTY
+## one. An earlier draft of this header assigned those two to the mercenary
+## window; that is RETRACTED and the pixels say so.
+##
+## MANA IS STILL NOT DRAWN, and that one is a real gap. No element, window or
+## field for it has been located -- not the art, not the value. Inventing an
+## orb for it would be inventing the most recognisable part of the screen.
 ##
 ## Nothing here reads a simulation type (R10.2): the caller pushes values in.
 
@@ -91,6 +96,35 @@ const PIECES := [
 const PORTRAIT := [
 	{"sheet": "GUI_MAIN_02", "rect": Rect2i(0, 0, 95, 107), "at": Vector2i(932, 15)},
 ]
+
+## THE RING IS THE LIFE GAUGE. The block above is its FULL state; the block
+## beside it on the sheet, (95,0,95,107), is the EMPTY one. Diffing the two
+## gives 3814 pixels that differ -- the band -- against 236 that are identical,
+## so the two blocks are the same frame painted red and grey and the band is
+## the gauge.
+##
+## THE BOUNDARY IS SYMMETRIC AND HORIZONTAL. Classifying every band pixel of a
+## retail frame as nearer the red art or the grey art puts red below y 54 and
+## grey above it, on BOTH sides at the same height. Row 1039 described this as
+## "an arc anchored at about +32 degrees from bottom-centre whose far end
+## sweeps away"; that is wrong. Nothing is anchored off-centre and no single
+## end moves -- the two ends move together, mirrored about bottom-centre.
+##
+## ponytail: the fill LAW is undetermined and this takes the simpler half.
+## Red area is very nearly linear in the hit-point fraction (measured 0.541
+## 0.371 0.200 0.000 against 0.529 0.345 0.210 0.042), and BOTH a height-
+## proportional waterline and an arc-proportional sweep reproduce that series
+## to within 0.033 -- less than the spread between them and the measurement.
+## The band is near-uniform per angle (526..725 px in six 30-degree bins), so
+## the two laws cannot be separated by this data at all. This slices by HEIGHT
+## because a slice is two rects and a sweep is a shader. If a frame ever
+## separates them, only SPLIT_Y below changes.
+const RING_EMPTY := Rect2i(95, 0, 95, 107)
+## The band's own vertical extent inside the 107-tall block, measured off the
+## art rather than assumed to be the whole block: rows 0 and 106 carry none of
+## it. The waterline runs between these, not between 0 and 107.
+const RING_TOP := 1
+const RING_BOTTOM := 106
 
 ## The five potion slots, ids 177..181. They form a shallow arc dipping UP at
 ## the centre, and the centre one sits at x 497 + 15 = 512, which is exactly
@@ -178,6 +212,10 @@ var missing := PackedStringArray()
 
 var _root: Control
 var _text: Label
+## The two halves of the life gauge: the red block sliced to the bottom
+## `health` of the band, the grey one filling the drained top.
+var _ring_full: TextureRect = null
+var _ring_empty: TextureRect = null
 
 
 func _init(tex_pak) -> void:
@@ -193,7 +231,16 @@ func _init(tex_pak) -> void:
 	for p in PIECES:
 		_blit(tex_pak, cache, p["sheet"], p["rect"], p["at"])
 	for w in PORTRAIT:
-		_blit(tex_pak, cache, w["sheet"], w["rect"], w["at"])
+		_ring_full = _blit(tex_pak, cache, w["sheet"], w["rect"], w["at"])
+	# The drained half. NOT counted in `drawn` and starts hidden: at full
+	# health retail shows the red block alone, so a fresh run must put the same
+	# pixels on screen as before this gauge existed -- the capture runbooks
+	# assert an md5 of the frame.
+	if _ring_full != null:
+		_ring_empty = _blit(tex_pak, cache, PORTRAIT[0]["sheet"], RING_EMPTY,
+			PORTRAIT[0]["at"], false)
+		if _ring_empty != null:
+			_ring_empty.visible = false
 	for a in ART_SLOTS:
 		_blit(tex_pak, cache, ART_SHEET, a["rect"], a["at"])
 	_wings(tex_pak, cache)
@@ -220,19 +267,20 @@ func _ready() -> void:
 
 ## One sub-rect of one sheet, placed at a canvas coordinate. A sheet that does
 ## not resolve is RECORDED and skipped, never substituted.
-func _blit(tex_pak, cache: Dictionary, sheet: String, rect: Rect2i, at: Vector2i) -> void:
+func _blit(tex_pak, cache: Dictionary, sheet: String, rect: Rect2i, at: Vector2i,
+		count := true) -> TextureRect:
 	var tex: Texture2D = cache.get(sheet)
 	if tex == null:
 		var id: int = Sacred.TextureFormat.find_model_texture(tex_pak, sheet)
 		if id < 0:
 			if not missing.has(sheet):
 				missing.append(sheet)
-			return
+			return null
 		var img := Sacred.decode_texture(tex_pak, id)
 		if img == null:
 			if not missing.has(sheet):
 				missing.append(sheet)
-			return
+			return null
 		tex = ImageTexture.create_from_image(img)
 		cache[sheet] = tex
 	var tr := TextureRect.new()
@@ -243,7 +291,9 @@ func _blit(tex_pak, cache: Dictionary, sheet: String, rect: Rect2i, at: Vector2i
 	tr.size = Vector2(rect.size)
 	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_root.add_child(tr)
-	drawn += 1
+	if count:
+		drawn += 1
+	return tr
 
 
 ## The day/night disc is a whole texture rather than a table rect.
@@ -322,3 +372,39 @@ func _wings(tex_pak, cache: Dictionary) -> void:
 		var q: Dictionary = WING_RIGHT[0] if i == 0 else WING_RIGHT[1 + (i % 2)]
 		_blit(tex_pak, cache, WING_SHEET, q["rect"],
 			Vector2i(CONSOLE_RIGHT + SLOT_STEP * i, int(q["y"])))
+
+
+## Push the hero's life fraction in, 0.0..1.0. THE CALLER SUPPLIES IT: nothing
+## here reads a simulation type or owns a frame loop (R10.2), and this class
+## has no opinion about which hit-point slot the number came from -- retail's
+## own choice between creature +0x4C8 and +0x4D0 is still unsettled (row 1038).
+##
+## Defaults to full and stays there until called, which is both what retail
+## draws at spawn and a no-op against every frame captured so far.
+func set_health(frac: float) -> void:
+	if _ring_full == null:
+		return
+	var f := clampf(frac, 0.0, 1.0)
+	var rect: Rect2i = PORTRAIT[0]["rect"]
+	var at: Vector2i = PORTRAIT[0]["at"]
+	# The waterline, in the block's own rows. f = 1 puts it at the band's top
+	# edge and f = 0 at its bottom, so the slice is never inverted.
+	var split := RING_TOP + roundi((1.0 - f) * float(RING_BOTTOM - RING_TOP))
+	_slice(_ring_full, Rect2i(rect.position.x, rect.position.y + split,
+		rect.size.x, rect.size.y - split), Vector2i(at.x, at.y + split))
+	if _ring_empty == null:
+		return
+	# Nothing drained -> draw no grey at all rather than a zero-height rect
+	# under the red, which would blend the red's soft edge against grey instead
+	# of against the world and move pixels at full health.
+	_ring_empty.visible = split > RING_TOP
+	if _ring_empty.visible:
+		_slice(_ring_empty, Rect2i(RING_EMPTY.position.x, RING_EMPTY.position.y,
+			RING_EMPTY.size.x, split), at)
+
+
+## Repoint one already-placed piece at a sub-rect of its own sheet.
+func _slice(tr: TextureRect, region: Rect2i, at: Vector2i) -> void:
+	(tr.texture as AtlasTexture).region = Rect2(region)
+	tr.position = Vector2(at)
+	tr.size = Vector2(region.size)
