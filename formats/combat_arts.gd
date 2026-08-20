@@ -31,9 +31,22 @@ const FIRST := 1
 const LAST := 0x5E
 
 const O_ID := 0x00          ## i16, what sub_8306C6A matches
+const O_ICON := 0x0C        ## char[24], the art's own icon TEXTURE name
 const O_ELEM := 0x30        ## i32[3], the EMPTY / LOAD / FULL element ids
-const O_BASE := 0x40        ## f32
+const O_SCHOOL := 0x3C      ## i32
+const O_BASE := 0x40        ## f32  regeneration
 const O_STEP := 0x44        ## f32
+## A SECOND base/step pair, and what it means depends on the art. For the
+## attack moves it reads as a MULTIPLIER -- GUI_MOVE_HARDHIT is 1.80 + 0.20 a
+## level against GUI_MOVE_ATTACKE's 0.75 + 0.05, which is the ordering a heavy
+## swing and a quick one should have. But art 1022 (CHANGELING_DAY) reads
+## 24.00 + 6.00, which is a duration in seconds and not a multiplier at all.
+##
+## SO THE FIELD IS POLYMORPHIC AND ITS READING IS NOT RECOVERED. It is exposed
+## because it is measured; NOTHING applies it. Inventing a rule for which arts
+## multiply damage would be inventing balance.
+const O_EFFECT := 0x50      ## f32
+const O_EFFECT_STEP := 0x54 ## f32
 
 ## The signature. Not decoration: it is the whole defence against a build whose
 ## layout moved.
@@ -65,6 +78,10 @@ func _init(install: String) -> void:
 			return
 		rows.append({
 			"id": bytes.decode_s16(at + O_ID),
+			"icon": bytes.slice(at + O_ICON, at + O_ELEM).get_string_from_ascii(),
+			"school": bytes.decode_s32(at + O_SCHOOL),
+			"effect_base": bytes.decode_float(at + O_EFFECT),
+			"effect_step": bytes.decode_float(at + O_EFFECT_STEP),
 			"base": bytes.decode_float(at + O_BASE),
 			"step": bytes.decode_float(at + O_STEP),
 			"elem": [bytes.decode_s32(at + O_ELEM),
@@ -148,6 +165,24 @@ func coefficients(art_id: int) -> Dictionary:
 func total(art_id: int, perm: int, temp: int = 0) -> float:
 	var c := coefficients(art_id)
 	return Regen.total(c["base"], c["step"], perm, temp)
+
+
+## The art's own icon texture, e.g. "GUI_MOVE_HARDHIT.TGA". This is the same
+## per-art name row 1021 found loose in texture.pak while looking for the
+## filled art-slot art -- the table names it directly.
+func icon(art_id: int) -> String:
+	var r: Dictionary = _by_id.get(art_id, {})
+	return r.get("icon", "")
+
+
+## The second coefficient pair at the art's level. MEASURED, NOT APPLIED --
+## see O_EFFECT. A caller that uses this is deciding something this project
+## has not recovered.
+func effect(art_id: int, perm: int, temp: int = 0) -> float:
+	var r: Dictionary = _by_id.get(art_id, {})
+	if r.is_empty():
+		return 0.0
+	return Regen.total(r["effect_base"], r["effect_step"], perm, temp)
 
 
 ## The EMPTY / LOAD / FULL element ids the slot draws with (row 1043).

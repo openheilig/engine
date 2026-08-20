@@ -112,6 +112,7 @@ var hero_regen := {}
 ## live `remaining` this class ticks. Read from the template, not granted here:
 ## a new Seraphim owns exactly what `templates/hero01.ptx` says she owns.
 var hero_arts: Array[Dictionary] = []
+var _art_uses := 0
 var foe_pa := 0.0
 var proz_aw := 1.0              ## ProzAW[difficulty]; applies to the hostile only
 var foe_id: int = 0             ## ActorRegistry id, 0 when nothing spawned
@@ -271,13 +272,32 @@ func begin() -> bool:
 ##
 ## `rng` is the caller's, so a recorded run replays identically -- see
 ## Combat.resolve.
-func strike(rng: RandomNumberGenerator) -> Dictionary:
-	var out := {"hit": false, "roll": -1.0, "chance": 0.0, "killed": false}
+## `art_id` spends a combat art on this swing. Zero is a plain attack.
+##
+## SPENDING IS ALL IT DOES, AND THAT IS DELIBERATE. Retail's art records carry
+## a second coefficient pair that READS like a damage multiplier for the attack
+## moves -- 1.80 + 0.20 a level for HARDHIT against 0.75 + 0.05 for ATTACKE --
+## but the same field is a 24-second duration on a shapeshift art, so the
+## reading is not recovered and nothing multiplies damage by it. An art costs
+## its regeneration and changes nothing else until that is read out of
+## `sub_81FAC30`. See research/engine/combat-formulas.md.
+##
+## A NOT-READY ART IS REFUSED AND THE SWING DOES NOT HAPPEN, which is retail's
+## own behaviour: `sub_8218774` gates the use on the same field.
+func strike(rng: RandomNumberGenerator, art_id := 0) -> Dictionary:
+	var out := {"hit": false, "roll": -1.0, "chance": 0.0, "killed": false,
+		"art": 0, "refused": false}
 	if _registry == null or foe_id == 0:
 		return out
 	var foe := _registry.get_actor(foe_id)
 	if foe == null or foe.hp <= 0:
 		return out
+	if art_id != 0:
+		if not use_art(art_id):
+			out["refused"] = true
+			return out
+		out["art"] = art_id
+		_art_uses += 1
 	# Retail's to-hit takes no levels -- the level difference is a DAMAGE effect
 	# and is applied below instead (combat-formulas.md, row 1036).
 	var r := Combat.resolve(hero_at, foe_pa, rng)
@@ -343,6 +363,14 @@ func use_art(art_id: int) -> bool:
 	return false
 
 
+## The arts she owns, in template order -- what a caller passes to strike().
+func art_ids() -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for a in hero_arts:
+		out.append(a["id"])
+	return out
+
+
 ## What the art slots would draw, 0 just used and 1 ready (row 1043).
 func art_fractions() -> PackedFloat32Array:
 	var out := PackedFloat32Array()
@@ -372,10 +400,10 @@ func status_line() -> String:
 		QUEST, title, giver_body, giver_cell.x, giver_cell.y,
 		foe_body, foe_cell.x, foe_cell.y, foe_class, hostile,
 		foe_hp(), _attacks, _hits, log.lines.size() if log != null else 0, is_complete()] \
-		+ "\tregen_art=%.2f\tregen_spell=%.2f\tarts=%d\tready=%s" % [
+		+ "\tregen_art=%.2f\tregen_spell=%.2f\tarts=%s\tready=%s\tart_uses=%d" % [
 			hero_regen.get(Regen.COMBAT_ART, 0.0),
 			hero_regen.get(Regen.SPELL, 0.0),
-			hero_arts.size(), art_fractions()] \
+			art_ids(), art_fractions(), _art_uses] \
 		+ "\tbase=%s\tspeed=%d,%d\texp=%d\tawarded=%d\tK(GES)=%.1f" % [
 			foe_base, foe_speed.x, foe_speed.y, foe_exp, awarded_exp,
 			Combat.stat_kernel(float(foe_base[FOE_KERNEL_ATTR])) if foe_base.size() > FOE_KERNEL_ATTR else 0.0]

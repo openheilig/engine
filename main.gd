@@ -102,6 +102,19 @@ func _animate_hero(models: Sacred.Models) -> void:
 		_player_view.clip_score(rigs), ok])
 
 
+## Seconds of simulated time between two headless swings. Retail's own
+## no-weapon recovery time (`sub_81A8636` returns 20.0 when there is no item),
+## used here because the headless fight has no frame clock. It is a stand-in
+## for a swing timer the port does not have, not a recovered cadence.
+##
+## MEASURED CONSEQUENCE, recorded rather than tuned away: 20 s at the Seraphim's
+## own rate serves ~24 s of clock, and her starting art is a 15 s one -- so it
+## is ready again every swing and the cooldown never bites in this loop. That
+## may well be right for a level-1 art, but it means this log does not
+## DEMONSTRATE the gate. `checks/regen_check.gd` is what proves it, by refusing
+## an art at half its clock.
+const FIGHT_SWING_SECONDS := 20.0
+
 ## --fight=N resolves the encounter headlessly, N swings at most, so the whole
 ## loop is demonstrable in a run that exits. <= 0 leaves the hostile alone.
 var _fight_swings := 0
@@ -1103,10 +1116,28 @@ func _begin_encounter(install: String, items) -> void:
 		rng.seed = FIGHT_SEED
 		var n := 0
 		while n < _fight_swings and not _encounter.is_complete():
-			var r: Dictionary = _encounter.strike(rng)
+			# USE AN ART WHEN ONE IS READY, otherwise swing plain. The headless
+			# fight has no clock of its own, so the seconds between swings are
+			# retail's own default recovery time -- `sub_81A8636` returns 20.0
+			# for a creature with no weapon, which is exactly this hero. A
+			# transcribed number rather than an invented cadence, but it is
+			# still a stand-in for a real swing timer: see FIGHT_SWING_SECONDS.
+			var pick := 0
+			for id in _encounter.art_ids():
+				if _encounter.art_ready(id):
+					pick = id
+					break
+			var r: Dictionary = _encounter.strike(rng, pick)
+			# BOTH SIDES OF THE CLOCK. `spent` is read before any time passes,
+			# so a used art shows 0.0 there -- printing only the post-recovery
+			# figure hid the mechanic entirely, because at this rate a level-1
+			# art refills inside one swing.
+			var spent := _encounter.art_fractions()
+			_encounter.regenerate(FIGHT_SWING_SECONDS)
 			n += 1
-			print("swing\t%d\thit=%s\troll=%.3f\tchance=%.4f\thp=%d" % [
-				n, r["hit"], r["roll"], r["chance"], _encounter.foe_hp()])
+			print("swing\t%d\thit=%s\troll=%.3f\tchance=%.4f\thp=%d\tart=%d\tspent=%s\tafter=%s" % [
+				n, r["hit"], r["roll"], r["chance"], _encounter.foe_hp(),
+				int(r["art"]), spent, _encounter.art_fractions()])
 		print(_encounter.status_line())
 		for l in _encounter.log.lines:
 			print("questbook\tquest=%d\tkind=%d\tkey=%s" % [

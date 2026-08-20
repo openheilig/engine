@@ -17,6 +17,7 @@ func _init() -> void:
 	_hero()
 	_table()
 	_granted()
+	_use()
 	print("regen_check OK\ttotal(4,0.5,10)=%.2f\trate(1,100)=%.2f\teps=%.2f" % [
 		Regen.total(4.0, 0.5, 10), Regen.rate(1.0, 100), Regen.READY_EPSILON])
 	finish()
@@ -192,6 +193,58 @@ func _granted() -> void:
 		expect(frames > 1, "art %d recharged in %d frame(s)" % [a["id"], frames])
 	print("regen_check\tgranted OK\trecords=%d\ttable agrees=%d\toff-by-1.12=%d" % [
 		total_records, agree, off])
+
+
+## THE USE ITSELF, on the same records the encounter holds. Exercised through a
+## copy of hero01's list rather than through Encounter, which needs the whole
+## world tree to build -- the state and the transitions are identical.
+func _use() -> void:
+	var install := Sacred.find_install()
+	if install == "":
+		return
+	var h = Sacred.Hero.new(install.path_join("templates/hero01.ptx"))
+	var arts := h.combat_arts_list()
+	if not expect(not arts.is_empty(), "hero01 has no art to use"):
+		return
+	var rates := Regen.rates(1.0, h.attribute("REPHY"), h.attribute("REMAG"))
+	var a: Dictionary = arts[0]
+	var rate: float = rates[a["kind"]]
+
+	# READY -> SPENT -> REFUSED. The refusal is the point: retail gates a use
+	# on the same field, so a second art inside its own cooldown must not fire.
+	expect(Regen.ready(a["remaining"]), "art does not start ready")
+	a["remaining"] = a["total"]
+	expect(not Regen.ready(a["remaining"]), "spending an art left it usable")
+
+	# HALF THE CLOCK IS STILL NOT READY -- an off-by-one on the clamp would
+	# make it pass here.
+	var half := int(a["total"] / rate / 2.0 / 0.05)
+	for i in half:
+		a["remaining"] = Regen.tick(a["remaining"], a["total"], 0.05, rate)
+	expect(not Regen.ready(a["remaining"]),
+		"art was usable again after half its regeneration")
+	expect(Regen.fraction(a["remaining"], a["total"]) > 0.3
+			and Regen.fraction(a["remaining"], a["total"]) < 0.7,
+		"half the clock did not read as about half a slot")
+
+	# And the rest of it does finish.
+	for i in half + 4:
+		a["remaining"] = Regen.tick(a["remaining"], a["total"], 0.05, rate)
+	expect(Regen.ready(a["remaining"]), "art never became usable again")
+
+	# THE EFFECT PAIR IS MEASURED AND MUST NOT BE ZERO, but nothing applies it.
+	# If it ever starts moving damage, this is the line that has to change too.
+	var table := CombatArts.new(install)
+	if table.found and table.has(a["id"]):
+		expect(table.effect(a["id"], a["level"]) > 0.0,
+			"art %d has no effect coefficient" % a["id"])
+		expect(table.icon(a["id"]).begins_with("GUI_")
+				or table.icon(a["id"]).begins_with("gui_"),
+			"art %d has no icon name: %s" % [a["id"], table.icon(a["id"])])
+	print("regen_check\tuse OK\tart=%d\ttotal=%.1fs\trate=%.2f\teffect=%.2f\ticon=%s" % [
+		a["id"], a["total"], rate,
+		table.effect(a["id"], a["level"]) if table.found else 0.0,
+		table.icon(a["id"]) if table.found else "?"])
 
 
 ## THE COMBAT-ART TABLE, read out of retail's own executable. The signature is
