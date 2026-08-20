@@ -106,6 +106,9 @@ var hero_skills: Array[Dictionary] = []
 var hero_attrs := PackedInt32Array()
 ## The two ratings, computed rather than chosen. See the constants above.
 var hero_at := 0.0
+## The hero's two regeneration rates, keyed by Regen.SPELL / Regen.COMBAT_ART.
+## No art is wired to them yet -- see status_line's note.
+var hero_regen := {}
 var foe_pa := 0.0
 var proz_aw := 1.0              ## ProzAW[difficulty]; applies to the hostile only
 var foe_id: int = 0             ## ActorRegistry id, 0 when nothing spawned
@@ -205,6 +208,15 @@ func _read_hero(install: String) -> void:
 		# and the playable classes are 1..9.
 		hero_at = Combat.rating(
 			Combat.base_attack(h.attribute("STK"), h.attribute("GES")), HERO_MULT)
+		# REGENERATION (rows 1043-1046). Sacred charges TIME for a combat art,
+		# not mana, and the two rates come from the two attributes the same
+		# template already carries: REPHY drives combat arts, REMAG spells.
+		#
+		# ponytail: bonus = 1.0, which is a bare creature with no item or buff
+		# adding to it. The accumulated bonus is what `sub_820E04C` builds out
+		# of equipment, and the port equips nothing yet -- when it does, that
+		# aggregate replaces the literal and nothing else here changes.
+		hero_regen = Regen.rates(1.0, h.attribute("REPHY"), h.attribute("REMAG"))
 		var res = Sacred.Resources.new(install.path_join("scripts/us/global.res"))
 		hero_class = res.slot(h.class_slot())
 		return
@@ -321,6 +333,9 @@ func status_line() -> String:
 		QUEST, title, giver_body, giver_cell.x, giver_cell.y,
 		foe_body, foe_cell.x, foe_cell.y, foe_class, hostile,
 		foe_hp(), _attacks, _hits, log.lines.size() if log != null else 0, is_complete()] \
+		+ "\tregen_art=%.2f\tregen_spell=%.2f" % [
+			hero_regen.get(Regen.COMBAT_ART, 0.0),
+			hero_regen.get(Regen.SPELL, 0.0)] \
 		+ "\tbase=%s\tspeed=%d,%d\texp=%d\tawarded=%d\tK(GES)=%.1f" % [
 			foe_base, foe_speed.x, foe_speed.y, foe_exp, awarded_exp,
 			Combat.stat_kernel(float(foe_base[FOE_KERNEL_ATTR])) if foe_base.size() > FOE_KERNEL_ATTR else 0.0]
