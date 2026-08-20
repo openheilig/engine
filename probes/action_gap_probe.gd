@@ -63,3 +63,4 @@ func _init() -> void:
 			var r: Array = best[a]
 			print("%s\t%s\tbest=%.3f\tclip=%s\tmatched=%d/%d\tmeshbones=%d" % [
 				mesh_name, a, r[0], models.entry_name(r[1]), r[2], r[3], d.size()])
+	quit()

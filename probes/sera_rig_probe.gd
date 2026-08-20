@@ -124,3 +124,4 @@ func _init() -> void:
 		for i in mini(8, rows.size()):
 			print("owner\t%s\t%.3f\t%s\tmatched=%d\tmeshbones=%d" % [
 				cname, rows[i][0], rows[i][1], rows[i][2], rows[i][3]])
+	quit()

@@ -101,3 +101,4 @@ func _init() -> void:
 				r[0], mesh.size(), float(r[0]) / float(mesh.size()),
 				r[1], bip.size(), float(r[1]) / maxf(1.0, float(bip.size())),
 				models.entry_name(r[2])])
+	quit()

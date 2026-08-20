@@ -37,8 +37,10 @@ const MIN_MATCHED := 20
 const MIN_SCORE := 0.5
 const CACHE := "user://rigmap.tsv"
 ## Bumped when the cache LAYOUT changes, so an older file is discarded rather
-## than half-read. v2 adds the per-action rows.
-const CACHE_VERSION := 2
+## than half-read. v2 adds the per-action rows; v3 adds the prefix-admitted
+## ones, which are indistinguishable from geometric rows in the file and so
+## would be silently trusted by a v2 reader.
+const CACHE_VERSION := 3
 
 ## THE ACTION IS IN THE CLIP'S NAME, even though the CHARACTER is not.
 ##
@@ -168,6 +170,10 @@ func _compute(models: Models, todo: PackedInt32Array) -> void:
 		for k in m:
 			if not (k as String).ends_with(":s"):
 				clean[k] = m[k]
+		# THE LEARNED PREFIX (rows 1054-1055). Fills the actions geometry left
+		# empty, and only those -- a geometric pick is never overridden.
+		if best[i] >= 0 and best_score[i] >= MIN_SCORE:
+			_admit_by_prefix(models, mesh_local[i], models.entry_name(best[i]), clean)
 		_by_action[todo[i]] = clean
 		if best_score[i] >= MIN_SCORE:
 			_clip[todo[i]] = best[i]
@@ -177,6 +183,76 @@ func _compute(models: Models, todo: PackedInt32Array) -> void:
 			# does not pay the 7-second pass again on every launch.
 			_clip[todo[i]] = -1
 			_score[todo[i]] = maxf(0.0, best_score[i])
+
+
+## Fills `out` -- a mesh's {ACTION: clip} map -- with the clips its own name
+## family carries for the actions geometry could not place.
+##
+## WHY A NAME RULE IS ADMISSIBLE HERE AT ALL. Row 963 established that a clip's
+## CHARACTER cannot be read from its name: `UPI1_WALK_BH.GRN` belongs to
+## `UPIRATE_01.GRN`. That forbids ASSUMING a prefix. It does not forbid
+## LEARNING one -- geometry has already proved `proven_clip` for this mesh
+## above MIN_SCORE, so the prefix is a measurement's output, not a guess.
+##
+## WHY IT IS NEEDED. Row 1054: the Seraphim ships as two rig revisions, one
+## skeleton with re-proportioned arms (forearm -11.7%, hand -13.3%, Finger01
+## +35%, every one at 0.00 degrees of angle). Her body mesh is on one and her
+## own armour on the other, and the clip corpus splits the same way, so she
+## resolves IDLE and FIDLE and no WALK at all. MIN_SCORE is not wrong -- it is
+## separating two real regimes -- but both regimes are the same character.
+##
+## WHY IT IS SAFE. view/model_view.gd sets BIND_POSITION_TRACKS false: a clip
+## contributes ROTATIONS ONLY, bound by bone NAME. The rest positions this
+## class scores on are discarded before playback, so a clip authored against
+## 8.4-unit forearms plays correctly on 9.5-unit ones, and the question that
+## decides usability is name coverage rather than rest agreement. Measured over
+## every clip this rule admits (row 1055): 100% of each mesh's Bip01 chain,
+## with the whole-mesh shortfall being Dummy attachment points, Root, ponytail
+## and weapon bones, which are meant to stay at rest.
+##
+## MEASURED BLAST RADIUS, so a later reader does not have to re-derive it:
+## 121 of the 127 meshes the port builds gain nothing. SERAPHIM gains 8 actions
+## (its whole missing set), THIEF2_MAL and THIEF2_FEM 3 each, GLADIATOR and
+## NOBLE_FEM 1 each. The three prefixes shared across what look like different
+## characters -- BART by TROLL and BAUMBART, SHAR by MAGICIAN and DRYAD_SCOUT,
+## SOLD by SOLDIER and DPIRATE_01 -- are inert, because both members already
+## resolve every action in the shared prefix geometrically.
+##
+## Name-only, so it costs no clip decode: the candidate set is found by string
+## test on entry names, and only those candidates have their bone NAMES read.
+func _admit_by_prefix(models: Models, mesh_names: Dictionary, proven_clip: String, out: Dictionary) -> void:
+	var prefix := proven_clip.split("_")[0]
+	# "" is not a prefix. A clip whose name begins with an underscore yields
+	# one, and pooling those put 29 unrelated clips in a single bucket that
+	# handed CROW.GRN three actions off two OGREs' animations (row 1055).
+	if prefix == "" or prefix == proven_clip:
+		return
+	var lead := prefix + "_"
+	# action -> [named bones, clip entry]. Most-covering wins; ties go to the
+	# lower entry so the pick is stable across runs and caches.
+	var pick: Dictionary = {}
+	for ci in models.count():
+		if not models.entry_name(ci).begins_with(lead):
+			continue
+		if models.kind_of(ci) != Models.KIND_MOTION or not models.is_animation(ci):
+			continue
+		var act := action_of(models.entry_name(ci))
+		if act == "" or out.has(act):
+			continue
+		var named := 0
+		for n in models.clip_bone_names(ci):
+			if mesh_names.has(n):
+				named += 1
+		# The same floor the geometric side uses. A clip that names too few of
+		# this mesh's bones would animate a fragment of it, which is worse than
+		# refusing and is the failure MIN_MATCHED already exists to prevent.
+		if named < MIN_MATCHED:
+			continue
+		if named > int((pick.get(act, [0, 0]) as Array)[0]):
+			pick[act] = [named, ci]
+	for act: String in pick:
+		out[act] = (pick[act] as Array)[1]
+
 
 func _load_cache() -> void:
 	var f := FileAccess.open(CACHE, FileAccess.READ)

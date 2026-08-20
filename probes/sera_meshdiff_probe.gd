@@ -50,3 +50,4 @@ func _init() -> void:
 	for i in mini(14, rows.size()):
 		print("  %-24s\trel=%.4f\tlen_a=%9.4f\tlen_b=%9.4f\tdist=%.4f\tangle=%.2fdeg" % [
 			rows[i][1], rows[i][0], rows[i][2], rows[i][3], rows[i][4], rows[i][5]])
+	quit()

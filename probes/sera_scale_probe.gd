@@ -81,3 +81,4 @@ func _init() -> void:
 			print("%s\t%s\tshared=%d\traw=%d (%.3f)\tscaled=%d (%.3f)\ts=%.5f\tratio_p10=%.4f\tp90=%.4f\tn=%d" % [
 				mesh_name, cname, shared, raw, float(raw) / float(shared),
 				scaled, float(scaled) / float(shared), s, lo, hi, ratios.size()])
+	quit()

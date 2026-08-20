@@ -78,3 +78,4 @@ func _init() -> void:
 		for i in mini(4, worst.size()):
 			print("   worst\t%-22s\tangle=%7.2fdeg\tmesh_len=%.4f\tclip_len=%.4f" % [
 				worst[i][1], worst[i][0], worst[i][2], worst[i][3]])
+	quit()

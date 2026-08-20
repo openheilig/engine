@@ -112,3 +112,4 @@ func _init() -> void:
 			ncol += 1
 			print("collide\t%-10s\t%d\t%s" % [p, ms.size(), ms])
 	print("collisions=%d of %d claimed prefixes" % [ncol, claim.size()])
+	quit()
