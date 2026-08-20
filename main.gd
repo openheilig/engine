@@ -88,6 +88,22 @@ var _encounter: Encounter = null
 ## THE SCORE IS PRINTED, not trusted. Rigs.clip_for is a MEASUREMENT (row 609
 ## found clips that splay the rig they bind to), so the fact line carries the
 ## agreement fraction and --noanim turns the whole thing off.
+## Held past _animate_hero so _process can SWITCH the hero's clip, which is
+## the whole difference between a body that animates and a body that acts.
+## Null whenever the hero is not animated at all (--noanim, no rig, the modes
+## that spawn no player), and _drive_hero_action tests exactly that.
+var _anim_models: Sacred.Models = null
+var _anim_rigs = null
+## Where the hero was last frame, for the only movement test there is: did she
+## actually cover ground. `heading` cannot answer it -- world/actor_state.gd's
+## own header says click-to-move never writes it -- and `facing` is HELD, so it
+## says which way she is turned and never whether she is going.
+var _last_player_cell := Vector2.INF
+## Below this a frame's movement is float noise, not a step. One thousandth of
+## a cell is ~3 orders under Movement.CELLS_PER_SECOND * a 60 Hz frame.
+const MOVING_EPSILON := 0.001
+
+
 func _animate_hero(models: Sacred.Models) -> void:
 	if _player_view == null or _player_view.node == null:
 		return
@@ -97,6 +113,9 @@ func _animate_hero(models: Sacred.Models) -> void:
 	var want := PackedInt32Array([_player_view.model_index])
 	var rigs := Sacred.Rigs.new(models, want)
 	var ok := _player_view.animate(models, rigs)
+	if ok:
+		_anim_models = models
+		_anim_rigs = rigs
 	print("hero_anim\tmodel=%s\tclip=%d\tscore=%.3f\tplaying=%s" % [
 		_player_model, rigs.clip_for(_player_view.model_index),
 		_player_view.clip_score(rigs), ok])
@@ -748,6 +767,7 @@ func _process(delta: float) -> void:
 			if _player_view != null:
 				_player_view.update(p.cell)
 				_face_player(p)
+				_drive_hero_action(p)
 			if _cam != null:
 				_cam.follow_cell(p.cell)
 			# Retail's sector-change path keys off the PLAYER's sector, not the
@@ -3682,3 +3702,34 @@ func _update_sector_env(cell: Vector2) -> void:
 ## projection.
 func _face_player(p: ActorState) -> void:
 	_player_view.face(p.cell, p.facing)
+
+
+## THE HERO'S ACTION, chosen once per frame from what the sim actually did.
+##
+## Retail's own clip pick is a state machine with far more in it than this --
+## attacking, casting, being hit, dying -- and none of those states exist in
+## the port yet: the encounter resolves swings as arithmetic with no clock, so
+## there is nothing to time an ATTACK clip against. What DOES exist is
+## movement, so this drives the one distinction the sim can currently justify
+## and refuses to invent the rest.
+##
+## WALK, NEVER RUN. Both clips exist on every class body, but the port has a
+## single walk speed (Movement.CELLS_PER_SECOND, measured in row 1013), so
+## there is no measured threshold to switch on and picking one would be a
+## tuning decision dressed as a port. Row 1053.
+func _drive_hero_action(p: ActorState) -> void:
+	if _anim_rigs == null:
+		return
+	var moving := _last_player_cell.is_finite() \
+		and _last_player_cell.distance_squared_to(p.cell) > MOVING_EPSILON * MOVING_EPSILON
+	_last_player_cell = p.cell
+	var want := "WALK" if moving else "IDLE"
+	if want == _player_view.action:
+		return
+	var was: String = _player_view.action
+	# PRINTED ON THE TRANSITION ONLY, never per frame. A refused switch is
+	# printed too and says so, because a body that cannot walk holding its idle
+	# is a fact about the model map (SERAPHIM.GRN resolves no WALK, row 1053)
+	# and looks identical on screen to this code not running at all.
+	var ok := _player_view.play_action(_anim_models, _anim_rigs, want)
+	print("hero_action\t%s->%s\t%s" % [was, want, "playing" if ok else "refused"])

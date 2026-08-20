@@ -141,6 +141,78 @@ func _init() -> void:
 		expect(_frac_moved(cmv) == 0.0,
 			"an un-animated rig is already off its rest pose, so the measurement is not the clip")
 
+	# THE SWITCH. Everything above proves a body can play ONE clip; this proves
+	# it can CHANGE clip, which is what a character does and a statue does not.
+	# Asserted on the clip INDEX and on anim_length, never on the fact that
+	# play_action returned true -- returning true while playing the same clip
+	# is precisely the bug a "it switched" check has to be able to fail on, and
+	# is exactly the bug this gate caught on its first run.
+	#
+	# THE BODY IS CHOSEN, NOT NAMED. The obvious pick is the Seraphim, since
+	# she is who a retail start spawns -- and she is the one class body that
+	# resolves NO WALK clip (row 1053), so pinning this gate to her would make
+	# it fail on a defect in Sacred.Rigs' matching rather than on the switching
+	# it exists to test. The bodies that lack a walk are printed instead, so
+	# the gap stays visible without being asserted here.
+	var no_walk := PackedStringArray()
+	var sw: PlayerView = null
+	var sw_name := ""
+	var srigs = null
+	for tree in Main.CLASS_MODEL:
+		var mesh: String = Main.CLASS_MODEL[tree]
+		var cand := PlayerView.new(models, mesh)
+		if cand.node == null:
+			continue
+		var crigs = Sacred.Rigs.new(models, PackedInt32Array([cand.model_index]))
+		var cw: int = crigs.clip_for_action(cand.model_index, "WALK")
+		if cw < 0:
+			no_walk.append(mesh)
+			continue
+		if sw == null:
+			sw = cand
+			sw_name = mesh
+			srigs = crigs
+	print("hero_anim_walkgap\tno_walk=%s" % [no_walk])
+	expect(sw != null, "not one class body resolves a WALK clip, so switching is untestable")
+	if sw != null:
+		root.add_child(sw.node)
+		expect(sw.animate(models, srigs), "the switching body would not animate at all")
+		var rest_clip: int = srigs.rest_clip(sw.model_index)
+		var walk: int = srigs.clip_for_action(sw.model_index, "WALK")
+		expect(walk != rest_clip, "WALK and rest are the same clip -- a switch is unobservable")
+		var smv := sw.node as ModelView
+		var rest_len := smv.anim_length
+
+		expect(sw.play_action(models, srigs, "WALK"), "play_action refused WALK")
+		expect(sw.action == "WALK", "play_action left action=%s after WALK" % sw.action)
+		expect(smv.anim_length != rest_len,
+			"the rig reports the same %.2fs clip after switching to WALK" % rest_len)
+		expect(smv.anim_length > 0.0, "the WALK clip bound zero-length")
+
+		# BACK, because a one-way switch is half a state machine.
+		expect(sw.play_action(models, srigs, "IDLE"), "play_action refused IDLE")
+		expect(is_equal_approx(smv.anim_length, rest_len),
+			"switching back to IDLE landed on a %.2fs clip, not the %.2fs rest clip" % [
+				smv.anim_length, rest_len])
+
+		# THE REFUSAL, and the reason this gate is not just three asserts: an
+		# action this body has no clip for must leave it where it is, not fall
+		# back through rest_clip onto some other action's.
+		var absent := ""
+		for a in Sacred.Rigs.ACTIONS:
+			var ac: int = srigs.clip_for_action(sw.model_index, a)
+			if a != "IDLE" and ac < 0:
+				absent = a
+				break
+		if absent != "":
+			expect(not sw.play_action(models, srigs, absent),
+				"play_action claimed to play %s, which this body has no clip for" % absent)
+			expect(sw.action == "IDLE",
+				"a refused %s still moved the body off IDLE (now %s)" % [absent, sw.action])
+		print("hero_anim_switch\tbody=%s\trest=%d/%.2fs\twalk=%d\trefused=%s" % [
+			sw_name, rest_clip, rest_len, walk,
+			absent if absent != "" else "(body has every action)"])
+
 	print("hero_anim_check\tOK\tbodies=%d\tanimated=%d" % [tested, animated])
 	finish(0)
 

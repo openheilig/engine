@@ -489,7 +489,66 @@ func animate(models: Sacred.Models, rigs) -> bool:
 	var ci: int = rigs.rest_clip(model_index)
 	if ci < 0:
 		return false
-	return mv.play_clip(models, ci)
+	if not mv.play_clip(models, ci):
+		return false
+	# Seed play_action's state, so the first switch away from rest is a real
+	# switch and a switch back to it is correctly a no-op.
+	_action_clip = ci
+	action = Sacred.Rigs.action_of(models.entry_name(ci))
+	return true
+
+
+## THE CLIP THIS BODY IS PLAYING RIGHT NOW, as an ACTION name ("WALK",
+## "IDLE", ...) or "" before animate() has run. Read-only by convention --
+## play_action() owns it.
+var action := ""
+## The clip entry `action` resolved to, so a repeat call is a no-op rather
+## than a rebuild. -1 when nothing is playing.
+var _action_clip := -1
+
+
+## Switches this body to its clip for `action` and returns whether it is now
+## playing one. THE MECHANISM ONLY: which action a character should be in is a
+## simulation question and this class never asks it -- the caller passes a
+## name, exactly as it passes a cell to update() and an angle to face().
+##
+## REFUSES RATHER THAN APPROXIMATES, the same contract animate() has. A mesh
+## with no clip for `action` keeps playing whatever it was playing and this
+## returns false, because the alternative -- falling back to some other
+## action -- would make a body that cannot walk silently attack instead.
+##
+## "IDLE" IS THE ONE NAME THAT LADDERS, via rest_clip's IDLE -> FIDLE -> WALK.
+## It reads like the same shortcut would suit every member of REST_ACTIONS and
+## it must not: WALK is in that list because rest_clip may FALL BACK to a walk
+## for a body with no idle, and routing a WALK request through rest_clip made
+## play_action("WALK") return the IDLE clip and answer true. The Seraphim --
+## who resolves no WALK at all -- reported herself as walking on the spot.
+##
+## A repeat call for the action already playing is free: the clip index is
+## compared, not the name, so REST_ACTIONS collapsing onto the same clip
+## costs nothing either.
+##
+## ponytail: a switch rebuilds the Animation from the .GRN every time, because
+## ModelView.play_clip decodes on each call. Walk <-> idle transitions are
+## rare enough (a few per second at worst) that this has not been measured to
+## hitch; if it does, cache the built Animation in the AnimationPlayer's
+## library by clip name instead of removing and re-adding it.
+func play_action(models: Sacred.Models, rigs, action_name: String) -> bool:
+	var mv := node as ModelView
+	if mv == null or rigs == null:
+		return false
+	var ci: int = rigs.rest_clip(model_index) if action_name == "IDLE" \
+		else rigs.clip_for_action(model_index, action_name)
+	if ci < 0:
+		return false
+	if ci == _action_clip:
+		action = action_name
+		return true
+	if not mv.play_clip(models, ci):
+		return false
+	_action_clip = ci
+	action = action_name
+	return true
 
 
 ## The clip index Sacred.Rigs picked for this body, and how well it scored.
