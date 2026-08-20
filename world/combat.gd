@@ -2,26 +2,33 @@ class_name Combat
 extends RefCounted
 ## The combat arithmetic, as recovered from retail rather than designed here.
 ##
-## TO-HIT IS RECOVERED AND CONFIRMED IN TWO BINARIES
-## (research/engine/combat-formulas.md):
+## RETAIL RUNS ONE CURVE AND USES IT TWICE (research/engine/combat-formulas.md,
+## rows 1034-1036, confirmed live under gdb against the retail Linux binary):
 ##
-##     hit% = clamp( 200*AT/(AT+PA) * ALVL/(ALVL+DLVL), 5, 95 )
+##     curve(a2, a3, a4, a5):
+##         a5 = clamp(a5, 0, 0.99);  a4 = max(a4, -1)
+##         k  = -ln(1 - a5) / ln(a4 + 1)
+##         r  = |a3| > 0.001 ? a2/a3 : 10000
+##         f  = 1 - 1/(r + 1)^k          # the FRACTION
+##         return a2 * f                 # the fraction APPLIED
 ##
-## AT is Angriffswert (attack rating), PA Verteidigungswert (defence rating),
-## ALVL/DLVL the two levels. In armalion.exe it is inlined into
-## cCreature::receive_event; in armalion_us.exe it is its own function at
-## sub_428790. The two are algebraically identical, which is why this is
-## transcribed rather than fitted.
+## To-hit takes the fraction; damage takes the product. Retail's to-hit call
+## site passes a4 = 1.0 and a5 = 0.5 as literals, which makes k = 1 and
+## collapses the fraction to plain `AT/(AT+PA)` -- no level term, NO CLAMP.
 ##
-## THE ROLL IS ALSO READ, from the call site: `rand(0,100)` and `roll < hit%`
-## hits -- a STRICT comparison, so a 5% floor really does miss 95 times in 100
-## and not 96.
+## THIS REPLACED A FORMULA THAT WAS WRONG FOR RETAIL. Until row 1034 this file
+## carried `clamp(200*AT/(AT+PA) * ALVL/(ALVL+DLVL), 5, 95)`, transcribed from
+## the two 2001 PRERELEASE binaries -- and retail is a different game: no level
+## term in accuracy, no 5/95 floor and ceiling. The level difference does exist,
+## but it lives in the DAMAGE step as the curve's exponent; see `level_term`.
+## The prerelease formula stays in the research document, not here, because the
+## port targets retail.
 ##
-## WHAT IS NOT RECOVERED, and is therefore not invented here: the RESOLUTION
-## step. How damage meets resistance, what criticals do, and what the weapon
-## slot flag selects are all undecoded (combat-formulas.md's `## Open`). So
-## `resolve()` returns WHETHER a blow lands and leaves the damage to its
-## caller; there is no damage formula in this file to be wrong about.
+## THE ROLL IS READ FROM THE CALL SITE, not chosen: `rand() % 1001` scaled by
+## the literal 0.001, so 1001 discrete outcomes over [0.000, 1.000], and
+## `roll < chance` hits. The strictness is MEASURED rather than assumed -- 11
+## of 11 rolls below the chance proceeded into the damage step and 7 of 7 at or
+## above it left through the miss path.
 ##
 ## Nothing here touches the scene tree or a node (R10.1), and nothing here
 ## holds state: the RNG is passed in, because a fixed-tick sim that records and
@@ -42,43 +49,114 @@ const STAT_SPAN := 156.0
 const STAT_CEILING := 165.0
 const BAL_STAT_OFF := 20.0      ## balance.bin BalStatOff; the file's number, not a choice
 
-const HIT_MIN := 5
-const HIT_MAX := 95
-const ROLL_MAX := 100
+## Every one of retail's five curve call sites pushes a4 = 1.0, so ln(a4+1) is
+## ln 2 throughout and k reduces to -log2(1 - a5).
+const CURVE_A4 := 1.0
+## a5 at the to-hit site is the literal 0.5, giving k = 1. The damage sites
+## scale this same 0.5 by the level term.
+const A5_BASE := 0.5
+const A5_CEILING := 0.99        ## the curve's own clamp, at its top
+const FLAT_ARMOUR := 0.001      ## |a3| at or under this takes the no-armour branch
+const NO_ARMOUR_RATIO := 10000.0
+const ROLL_STEPS := 1001        ## rand() % 1001, so 0..1000 inclusive
+const ROLL_SCALE := 0.001       ## the literal at 0x86e6ba8, exactly 1/1000
+const CHANNELS := 4
+const LEVEL_STEP := 0.01        ## the literal at 0x86e6b9c, per level of advantage
+const RESIST_FULL := 100.0
 
 
-## The recovered to-hit percentage. Integer, clamped, exactly as retail clamps.
+## THE SHARED CURVE, `sub_815D44C`, transcribed. Returns the FRACTION -- what
+## retail hands back through the `a6` out-param. Multiply by `a2` yourself to
+## get what the function returns; the two consumers want different halves.
 ##
-## The int64 cast in the original truncates toward zero after the multiply, so
-## the arithmetic is done in float and floored once at the end rather than
-## rounded -- rounding would disagree with retail on every fractional case.
-static func to_hit(at: int, pa: int, alvl: int, dlvl: int) -> int:
-	# Retail divides by (PA + AT) and by (DLVL + ALVL) without guarding either.
-	# A port cannot afford that, and returning the floor is the conservative
-	# answer: a defender who somehow has no rating at all does not become
-	# unmissable.
-	if at + pa <= 0 or alvl + dlvl <= 0:
-		return HIT_MIN
-	var v := (float(at) + float(at)) / float(pa + at) * 100.0 \
-		* (float(alvl) * 1.0 / float(dlvl + alvl))
-	var h := int(v)
-	if h < HIT_MIN:
-		return HIT_MIN
-	if h > HIT_MAX:
-		return HIT_MAX
-	return h
+## No guard is added for a2 = 0 or a3 = 0: retail's own two guards (the a5 clamp
+## and the |a3| test) already cover them, and a3 = 0 legitimately means "no
+## armour", which the 10000 ratio turns into approximately full effect.
+static func curve_fraction(a2: float, a3: float,
+		a4: float = CURVE_A4, a5: float = A5_BASE) -> float:
+	var s := clampf(a5, 0.0, A5_CEILING)
+	var e := maxf(a4, -1.0)
+	var k := -log(1.0 - s) / log(e + 1.0)
+	var r := (a2 / a3) if absf(a3) > FLAT_ARMOUR else NO_ARMOUR_RATIO
+	return 1.0 - 1.0 / pow(r + 1.0, k)
+
+
+## Retail's chance to land a blow, as a fraction in [0,1].
+##
+## With a4 = 1 and a5 = 0.5 this is algebraically AT/(AT+PA). It is written
+## through the curve anyway, rather than as the reduced form, so that the one
+## transcribed function stays the only place the arithmetic lives.
+static func hit_chance(at: float, pa: float) -> float:
+	return curve_fraction(at, pa, CURVE_A4, A5_BASE)
 
 
 ## One attack. `rng` is the caller's -- a Sim that records and replays must own
 ## its own seeded generator, or a replay diverges the first time anyone swings.
 ##
-## Returns {hit, roll, chance}. `hit` is `roll < chance`, the strict test from
-## the call site. No damage: see the class doc.
-static func resolve(at: int, pa: int, alvl: int, dlvl: int,
-		rng: RandomNumberGenerator) -> Dictionary:
-	var chance := to_hit(at, pa, alvl, dlvl)
-	var roll := rng.randi_range(0, ROLL_MAX)
+## Returns {hit, roll, chance}, all of `roll` and `chance` floats in [0,1].
+## `hit` is `roll < chance`, the strict test measured at the call site.
+static func resolve(at: float, pa: float, rng: RandomNumberGenerator) -> Dictionary:
+	var chance := hit_chance(at, pa)
+	# 1001 outcomes, not 101 and not a continuous float: retail's modulus is the
+	# distribution, and a port that rolls randf() would be subtly wrong at both
+	# ends. The glibc SEQUENCE is not reproducible here and is not attempted.
+	var roll := float(rng.randi_range(0, ROLL_STEPS - 1)) * ROLL_SCALE
 	return {"hit": roll < chance, "roll": roll, "chance": chance}
+
+
+## THE LEVEL TERM, and the surprise of row 1036: it is a DAMAGE effect, not an
+## accuracy one. `sub_81FAC30` raises the curve's exponent when the attacker
+## outranks the defender, and to-hit never sees a level at all.
+##
+##     delta = max(0, attackerLevel - defenderLevel)     # one-sided
+##     a5    = 0.5 * (1 + 0.01*delta)
+##     k     = 1 - log2(1 - delta/100)
+##
+## One-sided is retail's own `jbe`, measured live: a level-2 attacker on a
+## level-1 target produced 1.010000, and the same pair reversed produced 1.0.
+## The curve's a5 ceiling makes the bonus SATURATE at delta = 98 (k = 6.64)
+## rather than reaching ln(0), which is deliberate rather than lucky.
+##
+## Retail also gates this on the attacker's type (`[atk+0x0c] > 0x10`). That
+## gate is not applied here because what the type id means is not recovered;
+## a caller that knows better should pass equal levels to suppress the term.
+static func level_term(attacker_level: int, defender_level: int) -> float:
+	return 1.0 + LEVEL_STEP * float(maxi(0, attacker_level - defender_level))
+
+
+## ONE DAMAGE CHANNEL. `raw` is the attacker's damage in this channel, `armour`
+## the defender's in the same channel, `resist_percent` the defender's byte from
+## its creature-info resistance table.
+##
+##     dmg = raw * curve_fraction(raw, armour, 1, 0.5*lvl) * (100 - resist)/100
+##
+## Confirmed live at 64 of 64 channels over 16 swings and four attacker/target
+## pairings in both directions.
+static func damage_channel(raw: float, armour: float, resist_percent: int = 0,
+		lvl_term: float = 1.0) -> float:
+	var f := curve_fraction(raw, armour, CURVE_A4, A5_BASE * lvl_term)
+	return raw * f * (RESIST_FULL - float(resist_percent)) / RESIST_FULL
+
+
+## All four channels of one landed blow. `resist` is the defender's four bytes
+## for the CURRENT difficulty -- retail reads them at `[info + difficulty +
+## 0x42 + 5*i]`, i.e. one column of a 4-channel x 5-difficulty table.
+##
+## Short inputs are read as zero rather than refused, because a caller that has
+## only physical damage (which is every caller until inventory exists) should
+## not have to build three empty channels to say so.
+static func damage(raw: PackedFloat32Array, armour: PackedFloat32Array,
+		resist: PackedByteArray, attacker_level: int = 0,
+		defender_level: int = 0) -> PackedFloat32Array:
+	var lvl := level_term(attacker_level, defender_level)
+	var out := PackedFloat32Array()
+	out.resize(CHANNELS)
+	for i in CHANNELS:
+		var r := raw[i] if i < raw.size() else 0.0
+		var a := armour[i] if i < armour.size() else 0.0
+		var p := resist[i] if i < resist.size() else 0
+		out[i] = damage_channel(r, a, p, lvl)
+	return out
 
 
 ## The derived-stat kernel. `bal_stat_off` defaults to the value balance.bin

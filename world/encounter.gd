@@ -256,13 +256,15 @@ func begin() -> bool:
 ## `rng` is the caller's, so a recorded run replays identically -- see
 ## Combat.resolve.
 func strike(rng: RandomNumberGenerator) -> Dictionary:
-	var out := {"hit": false, "roll": -1, "chance": 0, "killed": false}
+	var out := {"hit": false, "roll": -1.0, "chance": 0.0, "killed": false}
 	if _registry == null or foe_id == 0:
 		return out
 	var foe := _registry.get_actor(foe_id)
 	if foe == null or foe.hp <= 0:
 		return out
-	var r := Combat.resolve(int(hero_at), int(foe_pa), hero_level, foe_level, rng)
+	# Retail's to-hit takes no levels -- the level difference is a DAMAGE effect
+	# and is applied below instead (combat-formulas.md, row 1036).
+	var r := Combat.resolve(hero_at, foe_pa, rng)
 	_attacks += 1
 	out["hit"] = r["hit"]
 	out["roll"] = r["roll"]
@@ -270,7 +272,19 @@ func strike(rng: RandomNumberGenerator) -> Dictionary:
 	if not r["hit"]:
 		return out
 	_hits += 1
-	foe.hp = maxi(0, foe.hp - HERO_DAMAGE)
+	# ponytail: physical channel only, and the hostile's armour and resistance
+	# go in as zero because nothing puts them on an actor yet -- there is no
+	# inventory and ActorState carries no armour field. Zero armour is retail's
+	# own no-armour branch rather than an invented number, so this is the real
+	# formula with honest inputs. Wire the other three channels and the
+	# creature-info resist column when inventory lands.
+	var dmg := Combat.damage(
+		PackedFloat32Array([float(HERO_DAMAGE)]), PackedFloat32Array(),
+		PackedByteArray(), hero_level, foe_level)
+	# Retail keeps damage in float and its hp arithmetic is not recovered, so
+	# rounding rather than truncating is the neutral choice. At zero armour the
+	# curve returns 0.9999, so this is HERO_DAMAGE either way.
+	foe.hp = maxi(0, foe.hp - roundi(dmg[0]))
 	if foe.hp == 0:
 		foe.flags &= ~ActorState.FLAG_ALIVE
 		out["killed"] = true
@@ -299,9 +313,10 @@ func foe_hp() -> int:
 
 ## One tab-separated status line, in the shape main.gd's other fact lines use.
 func status_line() -> String:
-	return "encounter\thero=%s\tlvl=%d\tskills=%s\tband=%s\tfoe_lvl=%d\tAT=%.1f\tPA=%.1f\tprozAW=%.2f\thit=%d%%\n" % [
+	return "encounter\thero=%s\tlvl=%d\tskills=%s\tband=%s\tfoe_lvl=%d\tAT=%.1f\tPA=%.1f\tprozAW=%.2f\thit=%.1f%%\tk=%.3f\n" % [
 		hero_class, hero_level, hero_skills, band, foe_level, hero_at, foe_pa,
-		proz_aw, Combat.to_hit(int(hero_at), int(foe_pa), hero_level, foe_level)] \
+		proz_aw, Combat.hit_chance(hero_at, foe_pa) * 100.0,
+		-log(1.0 - Combat.A5_BASE * Combat.level_term(hero_level, foe_level)) / log(2.0)] \
 		+ "encounter\tquest=%d\ttitle=%s\tnpc=%s@%d,%d\tfoe=%s@%d,%d\tclass=%d\thostile=%s\thp=%d\tswings=%d\thits=%d\tlines=%d\tdone=%s" % [
 		QUEST, title, giver_body, giver_cell.x, giver_cell.y,
 		foe_body, foe_cell.x, foe_cell.y, foe_class, hostile,

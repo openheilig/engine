@@ -33,9 +33,12 @@ today:
 - **One quest that closes.** `world/script.gd` interprets four opcodes of the
   quest bytecode and *refuses* the ones it does not know rather than skipping
   them; `world/quest_log.gd` holds quest state; `world/encounter.gd` runs
-  quest 74 end to end against a hostile NPC. `world/combat.gd` implements the
-  recovered to-hit formula and nothing else — the resolution step is undecoded,
-  so there is deliberately no damage formula to be wrong about.
+  quest 74 end to end against a hostile NPC. `world/combat.gd` implements
+  retail's to-hit **and** its damage resolution — one shared curve used twice,
+  transcribed and then confirmed live under gdb against the retail binary. The
+  gate checks it against numbers the binary itself printed. Only the physical
+  channel is fed: armour and resistances have nothing to read them off an actor
+  until there is an inventory.
 - **Retail's taskbar.** `view/hud.gd` draws the console, wings, buttons and
   combat-art arc from retail's own 1887-rect table at retail's own coordinates.
   The life and mana gauges are **not** drawn: all 46 `cUI_Taskbar2` functions
@@ -50,8 +53,8 @@ Several readers have no feature behind them yet: the faction matrix, `.pax`
 hero saves, `triggers.pak`, `formats/equipment.gd` and `formats/wpmod.gd` are
 decoded and gated with no production caller.
 
-Not implemented: damage resolution, inventory, skills, dialogue, sound
-playback, multiplayer, save/load. Do not expect to play anything.
+Not implemented: inventory, skills, dialogue, sound playback, multiplayer,
+save/load. Do not expect to play anything.
 
 ## Start here
 

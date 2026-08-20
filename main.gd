@@ -1105,7 +1105,7 @@ func _begin_encounter(install: String, items) -> void:
 		while n < _fight_swings and not _encounter.is_complete():
 			var r: Dictionary = _encounter.strike(rng)
 			n += 1
-			print("swing\t%d\thit=%s\troll=%d\tchance=%d\thp=%d" % [
+			print("swing\t%d\thit=%s\troll=%.3f\tchance=%.4f\thp=%d" % [
 				n, r["hit"], r["roll"], r["chance"], _encounter.foe_hp()])
 		print(_encounter.status_line())
 		for l in _encounter.log.lines:
