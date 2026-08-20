@@ -115,6 +115,10 @@ func _animate_hero(models: Sacred.Models) -> void:
 ## an art at half its clock.
 const FIGHT_SWING_SECONDS := 20.0
 
+## --fight=N resolves the encounter headlessly, N swings at most, and then
+## QUITS -- it is a batch flag. Before 2026-08-20 it printed and left the app
+## running, so every run ended on an outer timeout's SIGTERM.
+##
 ## --fight=N resolves the encounter headlessly, N swings at most, so the whole
 ## loop is demonstrable in a run that exits. <= 0 leaves the hostile alone.
 var _fight_swings := 0
@@ -1142,6 +1146,17 @@ func _begin_encounter(install: String, items) -> void:
 		for l in _encounter.log.lines:
 			print("questbook\tquest=%d\tkind=%d\tkey=%s" % [
 				int(l["quest"]), int(l["kind"]), str(l["key"])])
+		# AND EXIT. Without this the fight resolves, prints, and the app then
+		# carries on being the game forever -- every headless `--fight` run had
+		# to be killed by an outer timeout, which reports SIGTERM and hides
+		# whether the run actually finished. `--fight` is a batch flag; batch
+		# flags terminate.
+		#
+		# quit() is DEFERRED to the end of the frame, so the rest of this
+		# start-up path still runs. That is deliberate: it keeps the exit on
+		# the same code path as a normal launch instead of tearing down a
+		# half-built tree.
+		get_tree().quit(0)
 
 
 func _apply_retail_start(install: String) -> void:
