@@ -42,6 +42,20 @@ const O_ATTR_NOW := 0x041F      ## u16 x6, the same six again -- see attributes(
 const O_GOLD := 0x041B          ## u32
 const O_LEVEL := 0x042B         ## u32
 const O_CA := 0x04CB            ## u16 combat-art count
+const O_CA_LIST := 0x04CD       ## the records themselves, straight after it
+## THE SAVED RECORD IS THE LIVE ONE. Each entry is the same 22-byte struct
+## retail keeps in memory at the combat block's +250 (findings log row 1044),
+## written out field for field -- so the template is not a compact description
+## of a starting art, it is a snapshot of the art already installed.
+const CA_STRIDE := 22
+const CA_KIND := 0x00           ## u32: 1 = spell, 2 = combat art
+const CA_ID := 0x04             ## u16
+const CA_PERM := 0x06           ## u8, from runes
+const CA_TEMP := 0x07           ## u8, from items
+const CA_FLAGS := 0x08          ## u16, bit 0 = known
+const CA_TOTAL := 0x0A          ## f32, regeneration seconds
+const CA_MULT := 0x0E           ## f32, the per-art multiplier -- 1.0 in every template
+const CA_REMAINING := 0x12      ## f32, 0.0 in every template: a new hero's arts are ready
 
 const SECTION := 0xC7
 const ITEMS := 0xC8
@@ -63,6 +77,7 @@ var _attr_now := PackedInt32Array()
 var _skill_id := PackedInt32Array()
 var _skill_level := PackedInt32Array()
 var _items := PackedInt32Array()
+var _ca := PackedByteArray()
 
 
 func _init(path: String) -> void:
@@ -78,6 +93,9 @@ func _init(path: String) -> void:
 	gold = c.decode_u32(O_GOLD)
 	level = c.decode_u32(O_LEVEL)
 	combat_arts = c.decode_u16(O_CA)
+	var end := O_CA_LIST + combat_arts * CA_STRIDE
+	if combat_arts > 0 and end <= c.size():
+		_ca = c.slice(O_CA_LIST, end)
 	for i in ATTRS:
 		_attr.append(c.decode_u16(O_ATTR + i * 2))
 		_attr_now.append(c.decode_u16(O_ATTR_NOW + i * 2))
@@ -139,6 +157,37 @@ func skills() -> Array[Dictionary]:
 	for i in SKILLS:
 		if _skill_id[i] != 0:
 			out.append({"id": _skill_id[i], "level": _skill_level[i]})
+	return out
+
+
+## The combat arts the character starts with, as records in retail's own
+## layout. Eight templates carry 19 between them: every class gets two, except
+## the two that get three and four.
+##
+## THE TOTAL IS THE ONE RETAIL SAVED, not one recomputed here. Thirteen of the
+## nineteen agree with `CombatArts` to the last bit; the other six are the
+## table's value divided by exactly 1.12, which is per ART and not per hero --
+## hero07 carries two of each. What that factor is has not been recovered, so
+## the saved number is used and the discrepancy is recorded rather than
+## smoothed over. See research/engine/combat-formulas.md.
+func combat_arts_list() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if _ca.is_empty():
+		return out
+	for i in combat_arts:
+		var o := i * CA_STRIDE
+		if o + CA_STRIDE > _ca.size():
+			break
+		out.append({
+			"kind": _ca.decode_u32(o + CA_KIND),
+			"id": _ca.decode_u16(o + CA_ID),
+			"level": _ca[o + CA_PERM],
+			"temp": _ca[o + CA_TEMP],
+			"flags": _ca.decode_u16(o + CA_FLAGS),
+			"total": _ca.decode_float(o + CA_TOTAL),
+			"mult": _ca.decode_float(o + CA_MULT),
+			"remaining": _ca.decode_float(o + CA_REMAINING),
+		})
 	return out
 
 

@@ -16,6 +16,7 @@ func _init() -> void:
 	_ready()
 	_hero()
 	_table()
+	_granted()
 	print("regen_check OK\ttotal(4,0.5,10)=%.2f\trate(1,100)=%.2f\teps=%.2f" % [
 		Regen.total(4.0, 0.5, 10), Regen.rate(1.0, 100), Regen.READY_EPSILON])
 	finish()
@@ -117,6 +118,80 @@ func _ready() -> void:
 	expect(not Regen.ready(0.5), "half a second left is not ready")
 	expect(is_equal_approx(Regen.READY_EPSILON, 0.01),
 		"retail's epsilon is 0.01 (sub_8218774)")
+
+
+## THE ARTS THE TEMPLATES GRANT. Every class must start with a usable, ticking
+## art -- if this ever reads zero, the hero has been silently disarmed.
+func _granted() -> void:
+	var install := Sacred.find_install()
+	if install == "":
+		return
+	var arts := CombatArts.new(install)
+	var total_records := 0
+	var agree := 0
+	var off := 0
+	for i in range(0, 8):
+		var h = Sacred.Hero.new(install.path_join("templates/hero%02d.ptx" % i))
+		if not h.found:
+			continue
+		var list := h.combat_arts_list()
+		expect(list.size() == h.combat_arts,
+			"hero%02d says %d arts, the list holds %d" % [i, h.combat_arts, list.size()])
+		expect(not list.is_empty(), "hero%02d starts with no combat art at all" % i)
+		for a in list:
+			total_records += 1
+			# Retail's own invariants for a NEW character.
+			expect(a["kind"] == Regen.SPELL or a["kind"] == Regen.COMBAT_ART,
+				"hero%02d art %d has kind %d" % [i, a["id"], a["kind"]])
+			expect(a["total"] > 0.0, "hero%02d art %d has no clock" % [i, a["id"]])
+			expect(is_equal_approx(a["mult"], Regen.ART_MULT),
+				"hero%02d art %d ships mult %f, not 1.0" % [i, a["id"], a["mult"]])
+			expect(is_equal_approx(a["remaining"], 0.0),
+				"hero%02d art %d does not start READY" % [i, a["id"]])
+			expect(a["level"] >= 1, "hero%02d art %d is at level 0" % [i, a["id"]])
+			# Against the table, where the table knows the art.
+			if arts.has(a["id"]):
+				var t := arts.total(a["id"], a["level"], a["temp"])
+				if is_equal_approx(t, a["total"]):
+					agree += 1
+				else:
+					off += 1
+					# The ONLY discrepancy retail ships is a factor of exactly
+					# 1.12. Anything else means the record is being misread.
+					expect(is_equal_approx(t / a["total"], 1.12),
+						"hero%02d art %d: table %.4f vs saved %.4f, ratio %.4f is not 1.12" % [
+							i, a["id"], t, a["total"], t / a["total"]])
+	expect(total_records == 19,
+		"the eight templates carry %d arts, expected 19" % total_records)
+	expect(agree >= 8 and off >= 1,
+		"table-vs-saved split is %d/%d, which is not the shipped mix" % [agree, off])
+	# THE USE -> TICK -> READY CYCLE, on a real template's real arts and the
+	# rates that template's own attributes produce. This is the whole feature.
+	var h1 = Sacred.Hero.new(install.path_join("templates/hero01.ptx"))
+	var list := h1.combat_arts_list()
+	var rates := Regen.rates(1.0, h1.attribute("REPHY"), h1.attribute("REMAG"))
+	expect(not list.is_empty(), "hero01 has no arts to cycle")
+	for a in list:
+		expect(Regen.ready(a["remaining"]), "art %d is not ready at spawn" % a["id"])
+		# Spend it: the clock goes back on and it stops being usable.
+		a["remaining"] = a["total"]
+		expect(not Regen.ready(a["remaining"]),
+			"art %d is still ready the instant after it was used" % a["id"])
+		# And it comes back, in a bounded number of frames.
+		var rate: float = rates.get(a["kind"], 0.0)
+		expect(rate > 0.0, "art %d has kind %d with no rate" % [a["id"], a["kind"]])
+		var frames := 0
+		while not Regen.ready(a["remaining"]) and frames < 100000:
+			a["remaining"] = Regen.tick(a["remaining"], a["total"], 1.0 / 60.0,
+				rate, a["mult"])
+			frames += 1
+		expect(Regen.ready(a["remaining"]),
+			"art %d never recharged: %f left" % [a["id"], a["remaining"]])
+		# It must take real time -- a clock that finishes in one frame is a
+		# clock that is not being applied.
+		expect(frames > 1, "art %d recharged in %d frame(s)" % [a["id"], frames])
+	print("regen_check\tgranted OK\trecords=%d\ttable agrees=%d\toff-by-1.12=%d" % [
+		total_records, agree, off])
 
 
 ## THE COMBAT-ART TABLE, read out of retail's own executable. The signature is
