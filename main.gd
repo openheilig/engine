@@ -18,6 +18,10 @@ extends Node3D
 ##                      stay "28672 quads, 63 textures".
 
 const SECT: int = Sacred.SECT
+## The F3 developer overlay. Preloaded, not `class_name`d: a newly added
+## global class is not in Godot's script-class cache for a `--path` run until
+## the project is reimported (view/rig_placement.gd documents the same trap).
+const DebugOverlayScript := preload("res://debug_overlay.gd")
 
 ## Where the default run opens. Overwritten in _ready() by the class tree's own
 ## StartPosition record (Startcode.start_cell) -- for START_CLASS below that is
@@ -632,6 +636,16 @@ func _ready() -> void:
 		"floor_pak": floor_pak,
 	}, footprints)
 	add_child(_view)
+
+	# F3 overlay. Hidden until pressed, so captures and gates see the frame
+	# they saw before it existed. Preloaded rather than named as a global
+	# class -- see the script header.
+	var overlay: CanvasLayer = DebugOverlayScript.new()
+	overlay.setup(_cam, _view, _sim, _registry)
+	# --overlay starts it shown, which is the only way a --shot=/--drive
+	# capture can carry it: those runs never see a keystroke.
+	overlay.visible = "--overlay" in argv
+	add_child(overlay)
 
 	var region := _region_arg()
 

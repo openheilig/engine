@@ -96,6 +96,7 @@ main.gd        composition root and CLI dispatch; main.tscn is the entry scene
 sacred.gd      the Sacred namespace: install discovery + a facade over formats/
 iso_camera.gd  the isometric camera (owns a _process, so not a view/ file)
 drive.gd       --drive=/--shots=: scripted input and timed captures
+debug_overlay.gd  the F3 developer overlay (owns a _process, so not a view/ file)
 formats/       the runtime readers, one file per retail format
 world/         the fixed-tick simulation: actors, movement, walkability, replay
 view/          rendering: sector streaming, Granny models, player, cursor
@@ -111,6 +112,7 @@ shaders/       terrain, terrain mask and object shaders
 | `sacred.gd` | The `Sacred` namespace: install discovery, and a facade re-exporting everything in `formats/`. Decodes nothing itself. |
 | `formats/` | [The runtime readers](formats/), one file per retail format — pak, world, texture, regions, models, saves, script bytecode. |
 | `iso_camera.gd` | The isometric camera. Not in `view/` — it owns a `_process`, which `view/` forbids. |
+| `debug_overlay.gd` | The developer overlay: resolution, framerate, camera and mouse cell, player, sim tick, sector residency, draw calls and memory. **F3** toggles it; `--overlay` starts it shown so a `--shot=`/`--drive` capture can carry it. Hidden by default, so a run that never presses F3 photographs exactly what it photographed before. Not in `view/` — it owns a `_process`. |
 | `drive.gd` | `--drive=`/`--shots=`: plays a timeline of scripted input and captures at stated milliseconds. Speaks the retail autopilot's own `ms verb args` grammar, so one script drives both engines. Refuses `--shots=` at anything but 1024×768 — the only size retail can be captured at. Front-ended by `tools/drive/session.sh`. |
 | `world/` | Simulation: `sim.gd` fixed-tick loop, actor registry and state, movement, path windows, walkability, interiors, record/replay. |
 | `view/` | Rendering: `sector_view.gd` world streaming, `model_view.gd` Granny renderer, player and cursor views, rig placement. |
