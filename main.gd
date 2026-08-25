@@ -1121,12 +1121,23 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 		if nm == "" or e < 0:
 			unresolved += 1
 			continue
-		# WINGS ARE IN THE SET AND RETAIL DOES NOT DRAW THEM. Measured against a
-		# retail new-game frame: the Seraphim wears helmet, armour, belt,
-		# shoulder, gloves and boots and carries the sword -- eight of set 6's
-		# nine members -- and has no wings at all, while the port drew two large
-		# dark spread wings over her because its only test was "declares vertex
-		# weights", which SeraWings01.grn does.
+		# WINGS ARE IN THE SET AND RETAIL DOES NOT DRAW THEM IN THE WORLD. The
+		# port drew two large dark spread wings over her because its only test
+		# was "declares vertex weights", which SeraWings01.grn does.
+		#
+		# ⚠️ THIS COMMENT USED TO CLAIM the same retail new-game frame shows her
+		# wearing helmet, armour, belt, shoulder, gloves and boots -- eight of
+		# set 6's nine members. IT DOES NOT (row 1120). Retail's new Seraphim
+		# wears NOTHING and carries TWO blades, both point-down, the long one in
+		# her right hand; the blue bra, gold necklace, briefs, thigh bands and
+		# white knee boots that look like kit are all painted by SERAPHIM.GRN's
+		# own Sera_body/Sera_legs/Sera_boots textures. Her character-select
+		# portrait DOES add the wings, so they are a picker-screen display and
+		# the skip below stays right for the world -- but it is right for a
+		# different reason than the one written here.
+		#
+		# So the whole START_SET path is drawing an outfit retail does not have:
+		# worn=6 armed=1 against retail's worn=0 armed=2.
 		#
 		# Skipped on the DECODED CATEGORY, not on the name. items.pak +0x2e sorts
 		# the corpus into ~27 kinds (Sacred.Items.category_of), and 25 is wings:
