@@ -187,9 +187,8 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 	_scale = RETAIL_HUMANOID_PX / REF_HEIGHT
 
 	# Transparent pass, like the object sprites this is sorted against
-	# (_build_sortcube's constraint 2); depth_draw_mode still writes the
-	# depth buffer so opaque terrain occludes/is occluded correctly, mirroring
-	# the sortcube's own material exactly.
+	# (_build_sortcube's constraint 2), mirroring the sortcube's own material.
+	# DEPTH_DRAW_OPAQUE_ONLY does NOT mean "still writes depth" -- see _style().
 	#
 	# PER SURFACE, not material_override. ModelView built ONE material for the
 	# whole mesh until the material chain landed and now builds one per draw
@@ -235,9 +234,22 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 ## darker pixels are the garments and they were still lit by the old model.
 ##
 ## Transparent pass, like the object sprites this is sorted against
-## (_build_sortcube's constraint 2); depth_draw_mode still writes the depth
-## buffer so opaque terrain occludes/is occluded correctly, mirroring the
-## sortcube's own material exactly.
+## (_build_sortcube's constraint 2), mirroring the sortcube's own material.
+##
+## DEPTH_DRAW_OPAQUE_ONLY DOES NOT MEAN "still writes the depth buffer", which
+## this comment claimed until 2026-08-25. It means only OPAQUE materials write
+## depth, so this one writes none. Terrain still occludes a rig correctly
+## because TERRAIN writes depth; what is absent is the rig's own contribution,
+## and the only thing that could reveal it is a rig overlapping ITSELF.
+##
+## LEFT ALONE ON PURPOSE, and by measurement rather than argument. Switching to
+## TRANSPARENCY_ALPHA_DEPTH_PRE_PASS -- which is what retail's fixed-function
+## path amounts to, since `install/sacred` links glAlphaFunc and glDepthMask,
+## i.e. alpha TEST plus depth writes -- changes the rendered frame by ZERO
+## pixels in the NPC window and 3 in the hero box. The rigs do not self-overlap
+## in practice, so the extra pass buys no fidelity. All ten character skins
+## sampled are opaque on every texel (a=255), which is why; the Horse's genuine
+## cutouts (see model_view.gd, a1=0.877) are the case that would need it.
 ##
 ## PER SURFACE, not material_override. ModelView built ONE material for the
 ## whole mesh until the material chain landed and now builds one per draw batch,
