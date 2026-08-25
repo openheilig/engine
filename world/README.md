@@ -18,6 +18,9 @@ this directory for those names and fails if one appears.
 | `interior.gd` | Interior/exterior swap for supported buildings. |
 | `record_store.gd` | The record/replay id space and storage. |
 | `replay.gd` | Deterministic replay, and the three opt-in perturbation flags the determinism gate uses. |
+| `script.gd` | The `funkcode.bin` interpreter. Refuses a whole hook it cannot run — including when the HOST, not the opcode set, is the narrow part. |
+| `quest_log.gd` | Quest state and the player's quest book: the host `script.gd` writes into. |
+| `quest_cast.gd` | A `QuestLog` that also receives the NPCs a hook creates. Emits placements as DATA; turning one into a rig is `main.gd`'s job, because this layer may not touch the scene tree. |
 
 ## Why determinism matters here
 

@@ -30,10 +30,15 @@ today:
 - **The hero, where retail starts her.** The Seraphim at cell 3236,2511 with
   composed armour and hand items, playing an `IDLE` clip, facing driven through
   the alignment bone above `Bip01`.
-- **One quest that closes.** `world/script.gd` interprets four opcodes of the
-  quest bytecode and *refuses* the ones it does not know rather than skipping
-  them; `world/quest_log.gd` holds quest state; `world/encounter.gd` runs
-  quest 74 end to end against a hostile NPC. `world/combat.gd` implements
+- **One quest that closes, and one that starts the game.** `world/script.gd`
+  interprets eight opcodes of the quest bytecode and *refuses* the ones it does
+  not know rather than skipping them — and refuses just as firmly when the HOST
+  cannot receive an opcode's effect, so a hook never runs halfway.
+  `world/quest_log.gd` holds quest state; `world/quest_cast.gd` adds the NPCs a
+  hook creates, as data `main.gd` turns into rigs; `world/encounter.gd` runs
+  quest 74 end to end against a hostile NPC. A new game now runs **quest 1
+  (`Tutorial`)**, whose OnEnter stands a novice nun beside the Seraphim as
+  retail does — `--noquests` opts out. `world/combat.gd` implements
   retail's to-hit **and** its damage resolution — one shared curve used twice,
   transcribed and then confirmed live under gdb against the retail binary. The
   gate checks it against numbers the binary itself printed. Only the physical

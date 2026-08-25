@@ -265,6 +265,18 @@ var _show_creatures := false
 ## rigs exactly like the rolled ones -- the difference is where they stand,
 ## not how they are owned.
 var _show_npcs := false
+## --noquests: do NOT run the starting quest's OnEnter hook. Default OFF, i.e.
+## the hook DOES run, because running it is what retail does -- `cInterpretSQW`
+## fires a quest's hooks as the player arrives, and quest 1 (`Tutorial`) is what
+## puts the novice nun beside the Seraphim at the start. Drawing her is fidelity
+## rather than a feature, so this is an opt-OUT in the style of --noplayer and
+## --noobjects, not an opt-in in the style of --npcs.
+##
+## She is worth 0.918pp of the world band (row 1105) -- more than the whole hero
+## -- so a run that suppresses her is a run whose parity number cannot be
+## compared with the gate's. That is why the `quest` fact line reports the flag
+## rather than simply going quiet.
+var _run_quests := true
 var _creature_views: Array[PlayerView] = []
 var _creature_cells: Array[Vector2] = []
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
@@ -412,6 +424,7 @@ func _ready() -> void:
 	# --creatures on purpose -- one is retail placement, the other a seeded
 	# stand-in, and mixing them in one flag would blur exactly that distinction.
 	_show_npcs = "--npcs" in argv
+	_run_quests = not ("--noquests" in argv)
 	var exterior := "--exterior" in argv
 	var hide_levels := 0
 	for a in argv:
@@ -721,12 +734,17 @@ func _ready() -> void:
 						_animate_hero(Sacred.Models.new(models_pak))
 			_build_hud(tex_pak)
 			_build_sector_env(install)
-			if _show_player or _show_creatures or _show_npcs:
+			# _run_quests is in this list because the quest cast is rigs like any
+			# other: without the light they build and render as black cut-outs,
+			# which reads as a placement bug rather than a lighting one.
+			if _show_player or _show_creatures or _show_npcs or _run_quests:
 				_ensure_rig_light()
 			if _show_creatures and models_pak.is_open():
 				_build_creatures(install, Sacred.Models.new(models_pak), player_cell)
 			if _show_npcs and models_pak.is_open():
 				_build_npcs(install, Sacred.Models.new(models_pak), player_cell)
+			if models_pak.is_open():
+				_build_quest_cast(install, Sacred.Models.new(models_pak), items, tex_pak)
 
 	if region != Vector3i.ZERO:
 		_view.load_region(region.x, region.y, region.z)
@@ -3147,6 +3165,114 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 	for k: String in kinds:
 		listed.append("%s x%d" % [k, kinds[k]])
 	print("npcs\t%s" % ", ".join(listed))
+
+
+## The starting quest, run. Retail's `cInterpretSQW` fires a quest's OnEnter as
+## the player arrives; quest 1 (`Tutorial`) is the one that stands a novice nun
+## beside the Seraphim at the start, and until 2026-08-25 the port drew nothing
+## there at a measured cost of 0.918pp of the world band -- more than the whole
+## hero (row 1105).
+##
+## The hook does NOT carry her position on the CreateNPC. It creates her by
+## handle (`res:17095`, creature 679 = NOVIZIN02.GRN) and a separate NPC_Goto
+## two records later puts her at cell 3237,2514. That is why QuestCast keys on
+## the handle and why nothing here reads a cell out of a create record.
+##
+## WHAT THIS DOES NOT DO: pick which quests are live. Retail decides that from
+## sector and region entry across 11,414 script symbols, and none of that
+## scheduler is ported. This runs ONE hook, the one a new game is known to
+## start with, and says so on its fact line -- a stand-in that is honest about
+## being one rather than a general quest system that is secretly one case.
+const START_QUEST := 1
+func _build_quest_cast(install: String, models: Sacred.Models, items,
+		tex_pak: Sacred.Pak) -> void:
+	# The guard lives HERE and not at the call site, so a second caller cannot
+	# be added that quietly ignores the flag -- the --nodress lesson (row 1102).
+	if not _run_quests:
+		print("quest\tid=%d\tskipped=--noquests" % START_QUEST)
+		return
+	var start := Time.get_ticks_msec()
+	var dir := install.path_join("bin/%s" % START_CLASS)
+	var vec := Sacred.Vectoren.new(dir)
+	if not vec.found or not vec.has_quest(START_QUEST):
+		printerr("quest\tid=%d\tnot in %s" % [START_QUEST, dir])
+		return
+	var hook: Dictionary = vec.hook(START_QUEST, Sacred.Vectoren.H_ON_ENTER)
+	if hook.is_empty():
+		printerr("quest\tid=%d\tno OnEnter hook" % START_QUEST)
+		return
+	var code := FileAccess.get_file_as_bytes(dir.path_join("funkcode.bin"))
+	var vm := ScriptVM.new()
+	var cast := QuestCast.new()
+	if not vm.run(code, hook["offset"], hook["length"], cast):
+		# A REFUSAL IS REPORTED, NOT SWALLOWED. ScriptVM refuses a whole hook
+		# rather than skipping the opcode it cannot run, so this is "she is
+		# absent and here is exactly why", which is what a silent return would
+		# have cost the last three sessions.
+		printerr("quest\tid=%d\trefused_op=%d\t(nothing executed)" % [
+			START_QUEST, vm.refused_op])
+		return
+	cast.mark_entered(START_QUEST)
+
+	# Resolve every mesh BEFORE building any rig, so Sacred.Rigs decodes the
+	# clip corpus ONCE for the whole cast -- the same reason _build_npcs does
+	# it, and that one pass is its whole cost. Constructing a Rigs per NPC
+	# inside the loop measured 8.9 s for a cast of one.
+	var picks: Array[Dictionary] = []
+	var wanted := PackedInt32Array()
+	var unresolved := 0
+	for e in cast.placed():
+		var nm: String = items.name_of(int(e["creature"]))
+		var mi := models.index_of(nm) if nm != "" else -1
+		if mi < 0:
+			unresolved += 1
+			continue
+		picks.append({"name": nm, "mesh": mi, "cell": Vector2(e["cell"])})
+		if not wanted.has(mi):
+			wanted.append(mi)
+	var rigs := Sacred.Rigs.new(models, wanted) if not wanted.is_empty() else null
+
+	var built := 0
+	var animated := 0
+	for pick in picks:
+		var nm: String = pick["name"]
+		var mi: int = pick["mesh"]
+		var pv := PlayerView.new(models, nm, tex_pak)
+		if pv.node == null:
+			unresolved += 1
+			continue
+		add_child(pv.node)
+		var cell: Vector2 = pick["cell"]
+		pv.update(cell)
+		# YAW 0 IS A STAND-IN, not retail's facing. _build_npcs does the same
+		# and for the same reason: nothing in the hook says which way she looks.
+		# Retail's capture has her turned away from the camera and the port's
+		# faces it, so this is a known, measured difference -- see the `quest`
+		# entry in research/engine/game-wiring.md.
+		pv.set_yaw(0.0)
+		# Shared with the rolled and scripted casts so the tree frees these rigs
+		# by exactly the same route -- _build_npcs' own stated reason.
+		_creature_views.append(pv)
+		_creature_cells.append(cell)
+		built += 1
+		var ci: int = rigs.clip_for(mi) if rigs != null else -1
+		var mv := pv.node as ModelView
+		if mv != null and ci >= 0 and mv.play_clip(models, ci):
+			animated += 1
+			# Desynchronise by CELL and not by rng, for the reason _build_npcs
+			# gives: these are fixed placements, so the same NPC must look the
+			# same in every capture or a screenshot pair stops being comparable.
+			mv.seek_anim(fmod(absf(cell.x * 7.0 + cell.y * 13.0),
+				maxf(0.001, mv.anim_length)))
+	print("quest\tid=%d\ttitle=%s\trecords=%d\tcast=%d\tplaced=%d\tbuilt=%d\tanimated=%d\tunresolved=%d\tcompass=%d\tbook=%d\t%d ms" % [
+		START_QUEST, vec.title_of(START_QUEST), vm.executed, cast.cast.size(),
+		cast.placed().size(), built, animated, unresolved,
+		cast.placed().reduce(func(n, e): return n + (1 if e["compass"] else 0), 0),
+		cast.lines.size(), Time.get_ticks_msec() - start])
+	for e in cast.placed():
+		print("quest\tnpc=%s\tcreature=%d\tmodel=%s\tcell=%d,%d\tcompass=%s" % [
+			e["name"], int(e["creature"]), items.name_of(int(e["creature"])),
+			int(e["cell"].x), int(e["cell"].y), e["compass"]])
 
 
 ## --equip=PREFIX[,PREFIX...] -- the R1.4 demonstration (autoresearch row 741):

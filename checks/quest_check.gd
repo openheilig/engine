@@ -57,11 +57,83 @@ func _init() -> void:
 	_resolution(install, log)
 
 	_state_machine(vec, code)
+	_start_quest(vec, code)
 
 	print("quest_check OK quest=%d title=%s lines=%d state=%d autosaves=%d resolved=%d/%d" % [
 		QUEST, vec.title_of(QUEST), log.lines.size(), log.state_of(QUEST),
 		log.autosaves, WANT_RESOLVED, log.lines.size()])
 	finish(0)
+
+
+## Quest 1's OnEnter -- the hook a NEW GAME runs, and the one that puts the
+## novice nun beside the Seraphim at the start (rows 1105/1106). It is here
+## rather than in a check of its own because it exercises the same three
+## classes this file already covers, plus QuestCast.
+##
+## WHAT MAKES IT WORTH ASSERTING. The hook's CreateNPC carries NO POSITION --
+## it names a handle, and an NPC_Goto two records later gives that handle a
+## cell. A reader that expected a cell on the create record would build nothing
+## and report success, which is exactly the failure this asserts against: the
+## cell is checked, not merely the count.
+func _start_quest(vec, code: PackedByteArray) -> void:
+	const Q := 1
+	const WANT_RECORDS := 10
+	const WANT_CREATURE := 679            ## NOVIZIN02.GRN
+	const WANT_CELL := Vector2i(3237, 2514)
+	const WANT_HANDLE := "res:17095"
+	expect(vec.title_of(Q) == "Tutorial",
+		"quest %d is titled '%s', not 'Tutorial'" % [Q, vec.title_of(Q)])
+	var h: Dictionary = vec.hook(Q, Sacred.Vectoren.H_ON_ENTER)
+	expect(not h.is_empty(), "quest %d has no OnEnter hook" % Q)
+	var vm := ScriptVM.new()
+	var cast := QuestCast.new()
+	expect(vm.run(code, h["offset"], h["length"], cast),
+		"quest %d OnEnter refused opcode %d" % [Q, vm.refused_op])
+	expect(vm.executed == WANT_RECORDS,
+		"quest %d OnEnter ran %d records, expected %d" % [Q, vm.executed, WANT_RECORDS])
+	expect(cast.lines.size() == 4,
+		"quest %d wrote %d book lines, expected 4" % [Q, cast.lines.size()])
+	# SetVar is not SetVarBit: both names must appear with their whole values,
+	# and neither may have gone into the bit array.
+	expect(cast.script_vars.get("PoolDLG", -1) == 0 and cast.script_vars.get("atmos10", -1) == 1,
+		"SetVar did not record PoolDLG=0 and atmos10=1: %s" % [cast.script_vars])
+
+	expect(cast.cast.size() == 1, "quest %d created %d NPCs, expected 1" % [Q, cast.cast.size()])
+	var e: Dictionary = cast.cast[0]
+	expect(str(e["handle"]) == WANT_HANDLE,
+		"the created NPC's handle is '%s', expected '%s'" % [e["handle"], WANT_HANDLE])
+	expect(int(e["creature"]) == WANT_CREATURE,
+		"the created NPC is creature %d, expected %d" % [int(e["creature"]), WANT_CREATURE])
+	expect(str(e["name"]) == "novizin1", "the created NPC is named '%s'" % e["name"])
+	# THE LOAD-BEARING ONE. The cell comes from a different record than the
+	# create, matched by handle across a case change (`res:` then `Res:`).
+	expect(e["cell"] == WANT_CELL,
+		"the NPC stands at %s, expected %s -- NPC_Goto did not reach her" % [e["cell"], WANT_CELL])
+	expect(bool(e["compass"]), "QuestKompassObj did not mark the NPC")
+	expect(cast.placed().size() == 1, "placed() returned %d entries" % cast.placed().size())
+
+	# THE CONTROL, and it must stay a REAL quest rather than a synthetic span:
+	# quest 9 sits next to quest 1 in the same tree and uses Teleport, SetIcon,
+	# SetAnimMode and PlaySound, none of which is implemented. If widening the
+	# opcode set ever starts skipping instead of refusing, this fails while
+	# everything above still passes.
+	var vm9 := ScriptVM.new()
+	var c9 := QuestCast.new()
+	var h9: Dictionary = vec.hook(9, Sacred.Vectoren.H_ON_ENTER)
+	expect(not vm9.run(code, h9["offset"], h9["length"], c9),
+		"quest 9's OnEnter ran despite using unimplemented opcodes")
+	expect(vm9.executed == 0, "a refused hook executed %d records" % vm9.executed)
+	expect(c9.cast.is_empty(), "a refused hook created %d NPCs" % c9.cast.size())
+
+	# AND THE HOST ARM. A plain QuestLog cannot answer CreateNPC, so quest 1
+	# must refuse against it rather than run four records and crash on the
+	# fifth -- the reason ScriptVM checks HOST_METHOD before executing.
+	var vmp := ScriptVM.new()
+	var plain := QuestLog.new()
+	expect(not vmp.run(code, h["offset"], h["length"], plain),
+		"quest %d ran against a host that cannot receive its NPC" % Q)
+	expect(plain.lines.is_empty(),
+		"a hook refused for host narrowness still wrote %d book lines" % plain.lines.size())
 
 
 ## Section-1 indices are based at 4. Over every quest that declares a Trigger,
