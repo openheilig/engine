@@ -617,7 +617,7 @@ static func rest_yaw(models: Sacred.Models, entry: int) -> float:
 		var local: Transform3D = bones[i]["rest"]
 		var p: int = int(bones[i]["parent"])
 		xf.append(local if p < 0 or p >= i else xf[p] * local)
-		var nm: String = (bones[i]["name"] as PackedByteArray).get_string_from_utf8()
+		var nm: String = (bones[i]["name"] as PackedByteArray).get_string_from_ascii()
 		if nm != "" and not byname.has(nm):
 			byname[nm] = i
 	var fwd := Vector3.ZERO

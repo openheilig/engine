@@ -245,7 +245,7 @@ func socket_rest(socket: String) -> Variant:
 	if is_prop:
 		var idx := -1
 		for i in bone_rests.size():
-			if (bone_rests[i]["name"] as PackedByteArray).get_string_from_utf8() == socket:
+			if (bone_rests[i]["name"] as PackedByteArray).get_string_from_ascii() == socket:
 				idx = i
 		return _prop_global_rest(idx) if idx >= 0 else null
 	if _skeleton == null:
@@ -851,7 +851,7 @@ func _build_rig(models: Sacred.Models, entry: int) -> bool:
 	bone_sanitised = 0
 	for g in order:
 		var raw: PackedByteArray = bl[g]["name"]
-		var stored := raw.get_string_from_utf8().strip_edges()
+		var stored := raw.get_string_from_ascii().strip_edges()
 		# Godot reserves ':' and '/' in bone names, rejects the empty name, and
 		# needs uniqueness for get_bone_by_name to mean anything. Names are real
 		# since 05-10 (commit a415ac4): Sacred.Models.bone_names() resolves them
@@ -1311,7 +1311,7 @@ func _aspect() -> float:
 func _align_bone(bl: Array[Dictionary]) -> int:
 	var names := PackedStringArray()
 	for b in bl:
-		names.append((b["name"] as PackedByteArray).get_string_from_utf8().strip_edges())
+		names.append((b["name"] as PackedByteArray).get_string_from_ascii().strip_edges())
 	var bip := -1
 	for i in names.size():
 		if names[i].begins_with("Bip01") and not names[i].contains(" "):

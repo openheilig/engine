@@ -952,7 +952,7 @@ func strings(entry: int) -> PackedStringArray:
 			if e >= end:
 				push_error("Models.strings: entry %d string %d runs past the table's span" % [entry, i])
 				return empty
-			out.append(buf.slice(pos, e).get_string_from_utf8())
+			out.append(buf.slice(pos, e).get_string_from_ascii())
 			pos = e + 1
 		return out
 	return empty
@@ -2325,7 +2325,7 @@ func _strings_sec(buf: PackedByteArray, dir: Array[Dictionary], sec: int) -> Pac
 				e += 1
 			if e >= end:
 				return empty
-			out.append(buf.slice(pos, e).get_string_from_utf8())
+			out.append(buf.slice(pos, e).get_string_from_ascii())
 			pos = e + 1
 		return out
 	return empty

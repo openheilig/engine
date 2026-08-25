@@ -32,15 +32,15 @@ extends QuestLog
 ##   compass   true once QuestKompassObj named it -- the `?!` over its head
 var cast: Array[Dictionary] = []
 
+## A created NPC that no NPC_Goto ever placed. Distinct from cell (0, 0), which
+## is a real corner of the world.
+const NO_CELL := Vector2i(-1, -1)
+
 ## SetVar's writes, by name. Kept out of QuestLog's `_var` on purpose: that one
 ## is a bit array with a 160-bit ceiling and these are plain values under a
 ## name. Nothing in the port reads them yet; they are here so a hook that writes
 ## one is not silently lossy.
 var script_vars: Dictionary[String, int] = {}
-
-## A created NPC that no NPC_Goto ever placed. Distinct from cell (0, 0), which
-## is a real corner of the world.
-const NO_CELL := Vector2i(-1, -1)
 
 var _by_handle: Dictionary[String, int] = {}
 
@@ -88,7 +88,7 @@ func quest_compass(handle: String) -> void:
 ## main.gd builds; an unplaced NPC is real but has nowhere to stand.
 func placed() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
-	for e in cast:
+	for e: Dictionary in cast:
 		if e["cell"] != NO_CELL:
 			out.append(e)
 	return out

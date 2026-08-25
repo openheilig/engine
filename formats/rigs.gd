@@ -107,7 +107,7 @@ func _compute(models: Models, todo: PackedInt32Array) -> void:
 	for e in todo:
 		var d: Dictionary = {}
 		for b in models.bones(e):
-			var nm: String = (b["name"] as PackedByteArray).get_string_from_utf8()
+			var nm: String = (b["name"] as PackedByteArray).get_string_from_ascii()
 			if nm != "" and not d.has(nm):
 				d[nm] = (b["rest"] as Transform3D).origin
 		mesh_local.append(d)

@@ -3184,7 +3184,7 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 ## start with, and says so on its fact line -- a stand-in that is honest about
 ## being one rather than a general quest system that is secretly one case.
 const START_QUEST := 1
-func _build_quest_cast(install: String, models: Sacred.Models, items,
+func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Items,
 		tex_pak: Sacred.Pak) -> void:
 	# The guard lives HERE and not at the call site, so a second caller cannot
 	# be added that quietly ignores the flag -- the --nodress lesson (row 1102).
@@ -3221,7 +3221,8 @@ func _build_quest_cast(install: String, models: Sacred.Models, items,
 	var picks: Array[Dictionary] = []
 	var wanted := PackedInt32Array()
 	var unresolved := 0
-	for e in cast.placed():
+	var placed := cast.placed()
+	for e: Dictionary in placed:
 		var nm: String = items.name_of(int(e["creature"]))
 		var mi := models.index_of(nm) if nm != "" else -1
 		if mi < 0:
@@ -3230,11 +3231,11 @@ func _build_quest_cast(install: String, models: Sacred.Models, items,
 		picks.append({"name": nm, "mesh": mi, "cell": Vector2(e["cell"])})
 		if not wanted.has(mi):
 			wanted.append(mi)
-	var rigs := Sacred.Rigs.new(models, wanted) if not wanted.is_empty() else null
+	var rigs: Sacred.Rigs = Sacred.Rigs.new(models, wanted) if not wanted.is_empty() else null
 
 	var built := 0
 	var animated := 0
-	for pick in picks:
+	for pick: Dictionary in picks:
 		var nm: String = pick["name"]
 		var mi: int = pick["mesh"]
 		var pv := PlayerView.new(models, nm, tex_pak)
@@ -3266,10 +3267,10 @@ func _build_quest_cast(install: String, models: Sacred.Models, items,
 				maxf(0.001, mv.anim_length)))
 	print("quest\tid=%d\ttitle=%s\trecords=%d\tcast=%d\tplaced=%d\tbuilt=%d\tanimated=%d\tunresolved=%d\tcompass=%d\tbook=%d\t%d ms" % [
 		START_QUEST, vec.title_of(START_QUEST), vm.executed, cast.cast.size(),
-		cast.placed().size(), built, animated, unresolved,
-		cast.placed().reduce(func(n, e): return n + (1 if e["compass"] else 0), 0),
+		placed.size(), built, animated, unresolved,
+		placed.reduce(func(n: int, e: Dictionary) -> int: return n + (1 if e["compass"] else 0), 0),
 		cast.lines.size(), Time.get_ticks_msec() - start])
-	for e in cast.placed():
+	for e: Dictionary in placed:
 		print("quest\tnpc=%s\tcreature=%d\tmodel=%s\tcell=%d,%d\tcompass=%s" % [
 			e["name"], int(e["creature"]), items.name_of(int(e["creature"])),
 			int(e["cell"].x), int(e["cell"].y), e["compass"]])

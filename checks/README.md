@@ -10,11 +10,17 @@ godot --headless --path . --script res://checks/<name>.gd
 
 Every one states its own question and command line in its header comment.
 
-All 43 pass. 42 need nothing but the retail install; `pax_check` also needs
-`SACRED_CHARS` pointing at the eight-hero `.pax` corpus, which is **not** part
-of the retail install and is not shipped here. Without it the check exits 1
-with a message saying so — that refusal is the correct behaviour, not a
-failure, and it is what distinguishes "no corpus" from "corpus disagrees".
+**All 43 pass, and every one needs nothing but the retail install** — measured
+by running the loop below end to end on 2026-08-25.
+
+This file used to say that `pax_check` was the exception, needing a
+third-party `$SACRED_CHARS` corpus and exiting 1 without one. That stopped
+being true when the check was rewritten to read the install's own
+`templates/hero00.ptx` … `hero07.ptx`, which are `.pax` files in all but
+extension; see that check's own header for why a template *is* a savegame.
+`$SACRED_CHARS` is still honoured when set, as an EXTRA corpus. The claim
+here outlived the code by long enough to be worth naming: a README that
+describes a gate as conditionally red hides a gate that has gone green.
 
 ```
 for f in checks/*_check.gd; do
