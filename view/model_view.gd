@@ -62,6 +62,9 @@ const LIGHT_DIR := Vector3(-0.4, -0.8, -0.45)
 const KEY_ENERGY := 1.5
 
 var vertex_count := 0
+## Triangles the split path drew that no material group claimed -- see the
+## leftovers block in setup(). 0 on the unsplit path, which draws everything.
+var ungrouped_triangles := 0
 var triangle_count := 0
 var basis_located := false
 ## Skeleton facts, printed by main.gd. bone_count is the Skeleton3D bone count,
@@ -621,11 +624,14 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 	# would therefore have skinned the wrong triangles -- confidently, and
 	# invisibly to any check that only compared totals.
 	#
-	# The two orderings are reconciled by TRIANGLE COUNT, and only when that is
-	# unambiguous: if two submeshes have the same face count the mapping is not
-	# determined and the split is refused. Within one submesh the groups are
-	# taken in file order, which is assumed rather than measured -- so the worst
-	# a residual error can do is swap two batches of the SAME submesh.
+	# The two orderings are reconciled by the FILE'S OWN REFERENCE --
+	# models.group_submesh(), which reads each group's FormMesh payload. This
+	# replaced a reconciliation by TRIANGLE COUNT that refused the split
+	# whenever two submeshes had the same face count: 143 of 1567 entries hit
+	# that, and the twelve of them naming more than one texture rendered as
+	# flat clay, because one merged surface has no single material to carry.
+	# The count rule agreed with the reference wherever it decided at all
+	# (1563 of 1565 entries), so this is the same answer without the refusals.
 	textures_named = models.texture_names(entry).size()
 	textured_surfaces = 0
 	var groups: Array[Dictionary] = models.material_groups(entry)
@@ -643,23 +649,16 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 			port_order.append(pm)
 		port_faces[pm] = int(port_faces[pm]) + 1
 
-	# group triangles per GROUP mesh number, and the count -> port mesh map
-	var g_sum := {}
-	for g in groups:
-		g_sum[g["mesh"]] = int(g_sum.get(g["mesh"], 0)) + int(g["triangles"])
-	var by_count := {}
-	var ambiguous := false
-	for pm in port_faces:
-		var c: int = port_faces[pm]
-		if by_count.has(c):
-			ambiguous = true
-		by_count[c] = pm
-	var g2p := {}
-	for gm in g_sum:
-		var c2: int = g_sum[gm]
-		if by_count.has(c2):
-			g2p[gm] = by_count[c2]
-	var split := groups.size() > 1 and not ambiguous and g2p.size() == g_sum.size()
+	# The file's own group -> submesh answer, one entry per group in the same
+	# order. A group naming no drawable submesh refuses the split rather than
+	# landing its triangles on a neighbour.
+	var g2p := models.group_submesh(entry)
+	var split := groups.size() > 1 and g2p.size() == groups.size()
+	if split:
+		for gi in groups.size():
+			if not port_faces.has(g2p[gi]):
+				split = false
+				break
 
 	var mesh := ArrayMesh.new()
 	var mats: Array[StandardMaterial3D] = []
@@ -674,9 +673,20 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 		# tri_index is exact -- across a submesh's groups it covers 0..n-1 once --
 		# so there is no ordering assumption left here at all.
 		for pm2 in port_order:
-			for g2 in groups:
-				if g2p.get(g2["mesh"], -1) != pm2:
+			# Triangles of this submesh no group named. Retail binds a texture
+			# per batch, so geometry outside every batch has no material to
+			# draw with -- but dropping it silently is how a character loses a
+			# limb, so it is counted here and emitted below as clay.
+			var claimed := {}
+			for gi2 in groups.size():
+				if g2p[gi2] != pm2:
 					continue
+				for t3 in (groups[gi2].get("tri_index", PackedInt32Array()) as PackedInt32Array):
+					claimed[t3] = true
+			for gi2 in groups.size():
+				if g2p[gi2] != pm2:
+					continue
+				var g2: Dictionary = groups[gi2]
 				var picks: PackedInt32Array = g2.get("tri_index", PackedInt32Array())
 				if picks.size() != int(g2["triangles"]):
 					split = false
@@ -704,6 +714,41 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 				mats.append(_skin_material(models, entry, int(g2["material"])))
 			if not split:
 				break
+			# TRIANGLES NO GROUP CLAIMS, and the one case where they can still
+			# be drawn correctly. A batch is what names a texture, so geometry
+			# outside every batch has no stated material -- but the entry as a
+			# whole may leave no room for doubt: when it names exactly ONE
+			# texture, every triangle uses that one whatever the batches say,
+			# so the leftovers are drawn with it. That is also what the
+			# pre-split path did for these entries, so single-texture models
+			# (doors, vases, chests -- most of the corpus) keep every triangle
+			# they had.
+			#
+			# With SEVERAL textures named there is no such answer and the
+			# leftovers are counted, not drawn. Guessing clay was tried and is
+			# visibly wrong: ELVE_SORCESS's six unclaimed 14-triangle submeshes
+			# render as a column of pale lumps down her spine. `ungrouped_triangles`
+			# publishes the residue either way, so the open question -- whether
+			# retail's own draw loop reaches them at all -- stays measurable.
+			var rest := PackedInt32Array()
+			for t4 in int(port_faces[pm2]):
+				if claimed.has(t4):
+					continue
+				var rt: int = int(port_start[pm2]) + t4
+				if rt * 3 + 2 >= idx.size():
+					continue
+				rest.append(idx[rt * 3])
+				rest.append(idx[rt * 3 + 1])
+				rest.append(idx[rt * 3 + 2])
+			if not rest.is_empty():
+				ungrouped_triangles += rest.size() / 3
+				if textures_named == 1:
+					var sub2 := arr.duplicate()
+					sub2[Mesh.ARRAY_INDEX] = rest
+					mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sub2)
+					surface_texture.append("<clay>")
+					surface_material.append(0)
+					mats.append(_skin_material(models, entry, 0))
 	if not split:
 		mesh = ArrayMesh.new()
 		mats.clear()

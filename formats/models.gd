@@ -2711,6 +2711,80 @@ func material_textures(entry: int) -> PackedInt32Array:
 		out.append(ref - 1 if ref >= 1 and ref <= textures else -1)
 	return out
 
+## Per GROUP (material_groups() order), the DRAWABLE submesh it belongs to --
+## the same index space mesh_arrays()'s `vertex_mesh` uses. -1 where the group
+## names no drawable mesh. Empty when the entry states no pairing.
+##
+## WHY THIS EXISTS. A group's own `mesh` field is NOT this reader's submesh
+## number, and the two orders differ per file with no single rule: GLADIATOR
+## and DWARF are a 3-cycle, WALDELFE_DARK a transposition, SERAPHIM the
+## identity. view/model_view.gd used to reconcile them by TRIANGLE COUNT and
+## refuse the split whenever two submeshes had the same face count -- which
+## collapsed 143 of 1567 entries onto a single surface, and rendered the twelve
+## that name more than one texture (THIEF2_FEM, ELVE_SORCESS ...) as flat
+## untextured clay, because a merged surface has no one material to carry.
+##
+## THE FILE STATES THE MAPPING. `group.mesh` is a 0-based index into the
+## FormMesh list, and each FormMesh node's int32 payload is the 1-BASED index
+## of its Mesh node counted over ALL Mesh nodes in directory order -- the very
+## same reference _pair_by_reference() already trusts for bone lists, read here
+## for a second purpose rather than re-derived.
+##
+## MEASURED, over every entry carrying groups: on 1563 of 1565 the submesh this
+## resolves to has EXACTLY the triangle total its groups declare. The two that
+## disagree -- SERABFG.GRN and EDLST_RUND_GESCHL_KLEIN.GRN -- resolve to the
+## same submesh the count rule picked and disagree only on the count itself,
+## each declaring a single triangle against a 114- and an 80-triangle mesh. So
+## the join is unanimous and the residue is those two files' own group data.
+func group_submesh(entry: int) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	var length := true_length(entry)
+	if length <= 0 or not magic_ok(entry):
+		return out
+	var buf := _pak.read_at(_pak.entry_offset(entry), length)
+	if buf.size() < length:
+		return out
+	var dir := _directory(buf)
+	if dir.is_empty():
+		return out
+
+	# FormMesh payloads, in directory order -- the index space `group.mesh` uses.
+	var pay := PackedInt32Array()
+	for j in dir.size():
+		if dir[j]["tag"] == TAG_FORM_MESH:
+			var o := SECTION_OFF_MESH + int(dir[j]["rel"])
+			if o + 4 > buf.size():
+				return out
+			pay.append(buf.decode_s32(o))
+	if pay.is_empty():
+		return out
+
+	# all-Mesh-node index -> drawable submesh index. A Mesh node missing any of
+	# the three geometry children is skipped by mesh_arrays() too, so both sides
+	# count the same meshes and skip the same ones.
+	var all2port := {}
+	var all_i := -1
+	var port_i := 0
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_MESH:
+			continue
+		all_i += 1
+		if _child_with_tag(dir, j, TAG_MESH_VERTICES) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_NORMALS) == -1 \
+				or _child_with_tag(dir, j, TAG_MESH_TRIANGLES) == -1:
+			continue
+		all2port[all_i] = port_i
+		port_i += 1
+
+	for g in material_groups(entry):
+		var gm: int = g["mesh"]
+		if gm < 0 or gm >= pay.size():
+			out.append(-1)
+			continue
+		out.append(int(all2port.get(pay[gm] - 1, -1)))
+	return out
+
+
 func material_groups(entry: int) -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	var length := true_length(entry)
