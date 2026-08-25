@@ -278,6 +278,13 @@ var _show_player := true   ## --noplayer: suppress building the player view enti
 var _hide_player_mesh := false
 ## --noanim: build the hero but leave it in its rest pose. See the flag parse.
 var _animate_player := true
+## --nodress: build the hero as her BARE RIG, wearing and carrying nothing.
+## Retail's own starting equipment comes from two tables filled by an
+## `equip=<CLASS>,<slot>,<itemid>` line in the balance text, and NO shipped
+## file carries such a line -- so a stock retail character starts bare and
+## this flag, not START_SET, is what reproduces her. See
+## research/formats/balance-bin.md and findings row 1101.
+var _dress_player_enabled := true
 ## (There is deliberately no `_last_heading` here any more. Holding the last
 ## non-zero heading in the SCENE SCRIPT could not work: nothing in an ordinary
 ## run ever writes ActorState.heading -- click-to-move goes through
@@ -379,6 +386,7 @@ func _ready() -> void:
 	# and it exists because the clip-to-rig binding is MEASURED rather than
 	# certain (row 609): a body whose clip splays it must still be drawable.
 	_animate_player = not ("--noanim" in argv)
+	_dress_player_enabled = not ("--nodress" in argv)
 	_show_hud = not ("--nohud" in argv)
 	var force_interior := "--force-interior" in argv
 	for a in argv:
@@ -1065,6 +1073,11 @@ func _region_arg() -> Vector3i:
 ## garments and the two Wind blades, so a caller could not sort them by name.
 func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) -> void:
 	if _player_view == null or items == null:
+		return
+	# The guard lives HERE and not at the two call sites, so a third caller
+	# cannot be added that quietly ignores the flag.
+	if not _dress_player_enabled:
+		print("dress\tset=none\tmembers=0\tworn=0\tarmed=0\tworn_refused=0\tarm_refused=0\tunresolved=0\tskipped=0")
 		return
 	var sets := Sacred.Sets.new(install)
 	if not sets.found:
