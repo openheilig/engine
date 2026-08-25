@@ -2981,8 +2981,15 @@ func _build_creatures(install: String, models: Sacred.Models, player_cell: Vecto
 		# capture pair differs in exactly one variable: whether an animation is
 		# driving the skeleton PlayerView also poses for placement (row 757's
 		# open suspect).
+		# rest_clip(), NOT clip_for(). clip_for is the best GEOMETRIC score and
+		# for a standing character that is routinely wrong: it gives NOVIZIN02 a
+		# WALK, THIEF2_MAL another character's WALK, and the Seraphim herself
+		# SERA_SPECIAL_MULTI_2WAFFEN -- a two-weapon special attack. rest_clip
+		# prefers IDLE, then FIDLE, then WALK, and falls back to clip_for, which
+		# is why view/player_view.gd has used it for the hero all along. These
+		# builders did not, and that was the whole of the "wrong pose" defect.
 		var ci: int = -1 if "--creatures-noanim" in OS.get_cmdline_user_args() + OS.get_cmdline_args() \
-			else rigs.clip_for(pick["mesh"])
+			else rigs.rest_clip(pick["mesh"])
 		var mv := pv.node as ModelView
 		if mv != null and ci >= 0 and mv.play_clip(models, ci):
 			animated += 1
@@ -3146,8 +3153,15 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 		# the bone chain above Bip01), still open. Without this flag a splayed
 		# rig is indistinguishable from a missing one, which is exactly how it
 		# was first reported.
+		# rest_clip(), NOT clip_for(). clip_for is the best GEOMETRIC score and
+		# for a standing character that is routinely wrong: it gives NOVIZIN02 a
+		# WALK, THIEF2_MAL another character's WALK, and the Seraphim herself
+		# SERA_SPECIAL_MULTI_2WAFFEN -- a two-weapon special attack. rest_clip
+		# prefers IDLE, then FIDLE, then WALK, and falls back to clip_for, which
+		# is why view/player_view.gd has used it for the hero all along. These
+		# builders did not, and that was the whole of the "wrong pose" defect.
 		var ci: int = -1 if "--npcs-noanim" in OS.get_cmdline_user_args() + OS.get_cmdline_args() \
-			else rigs.clip_for(pick["mesh"])
+			else rigs.rest_clip(pick["mesh"])
 		var mv := pv.node as ModelView
 		if mv != null and ci >= 0 and mv.play_clip(models, ci):
 			animated += 1
@@ -3184,6 +3198,9 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 ## start with, and says so on its fact line -- a stand-in that is honest about
 ## being one rather than a general quest system that is secretly one case.
 const START_QUEST := 1
+## Where an NPC_Goto leaves its subject, in cells, relative to the target cell's
+## corner. See the measurement at the placement site below.
+const GOTO_CELL_CENTRE := Vector2(0.5, 0.5)
 func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Items,
 		tex_pak: Sacred.Pak) -> void:
 	# The guard lives HERE and not at the call site, so a second caller cannot
@@ -3228,7 +3245,27 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		if mi < 0:
 			unresolved += 1
 			continue
-		picks.append({"name": nm, "mesh": mi, "cell": Vector2(e["cell"])})
+		# A GOTO DESTINATION IS A CELL CENTRE, not a cell corner. `cell_to_world`
+		# maps an integer cell to its corner vertex, which is right for the hero --
+		# she is SPAWNED at a cell and her feet land on retail's to the pixel
+		# (y=385 both engines, x within 1). It is wrong for an NPC that WALKED
+		# here: retail's `NPC_Goto` converges on the middle of the target cell, and
+		# at the corner the port drew her 27 px high.
+		#
+		# MEASURED, not assumed. Her feet: corner 456, centre 480, retail 483 --
+		# so +0.5 closes 24 of the 27 px and the remaining 3 are inside the slack
+		# between an exact port mask and a brightness-segmented retail one. The
+		# offset is exactly half a cell on both axes, which moves a figure +24 px
+		# down the screen and 0 px across, and `x` was already correct -- a fit
+		# would have needed both axes to move.
+		#
+		# Her resting place is reproducible: three retail runs put her extent at
+		# EXACTLY y 362-483, x 402-425. A fourth caught her at y 340-419 -- still
+		# walking at the 4 s mark, which is the same reason this is a destination
+		# and not a spawn point. The port does not simulate the walk, so it draws
+		# where she ends up.
+		picks.append({"name": nm, "mesh": mi,
+			"cell": Vector2(e["cell"]) + GOTO_CELL_CENTRE})
 		if not wanted.has(mi):
 			wanted.append(mi)
 	var rigs: Sacred.Rigs = Sacred.Rigs.new(models, wanted) if not wanted.is_empty() else null
@@ -3256,7 +3293,14 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		_creature_views.append(pv)
 		_creature_cells.append(cell)
 		built += 1
-		var ci: int = rigs.clip_for(mi) if rigs != null else -1
+		# rest_clip(), NOT clip_for(). clip_for is the best GEOMETRIC score and
+		# for a standing character that is routinely wrong: it gives NOVIZIN02 a
+		# WALK, THIEF2_MAL another character's WALK, and the Seraphim herself
+		# SERA_SPECIAL_MULTI_2WAFFEN -- a two-weapon special attack. rest_clip
+		# prefers IDLE, then FIDLE, then WALK, and falls back to clip_for, which
+		# is why view/player_view.gd has used it for the hero all along. These
+		# builders did not, and that was the whole of the "wrong pose" defect.
+		var ci: int = rigs.rest_clip(mi) if rigs != null else -1
 		var mv := pv.node as ModelView
 		if mv != null and ci >= 0 and mv.play_clip(models, ci):
 			animated += 1
@@ -3270,10 +3314,17 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		placed.size(), built, animated, unresolved,
 		placed.reduce(func(n: int, e: Dictionary) -> int: return n + (1 if e["compass"] else 0), 0),
 		cast.lines.size(), Time.get_ticks_msec() - start])
+	# THE CLIP IS NAMED, not just counted. A capture that says `animated=1` and
+	# nothing more cannot tell an idle from a walk, and a walk is exactly what
+	# clip_for() was handing this NPC while she stood still.
+	for pick: Dictionary in picks:
+		var rc: int = rigs.rest_clip(pick["mesh"]) if rigs != null else -1
+		print("quest\tmodel=%s\tcell=%d,%d\tclip=%s" % [
+			pick["name"], int(pick["cell"].x), int(pick["cell"].y),
+			models.entry_name(rc) if rc >= 0 else "<none>"])
 	for e: Dictionary in placed:
-		print("quest\tnpc=%s\tcreature=%d\tmodel=%s\tcell=%d,%d\tcompass=%s" % [
-			e["name"], int(e["creature"]), items.name_of(int(e["creature"])),
-			int(e["cell"].x), int(e["cell"].y), e["compass"]])
+		print("quest\tnpc=%s\tcreature=%d\tcompass=%s" % [
+			e["name"], int(e["creature"]), e["compass"]])
 
 
 ## --equip=PREFIX[,PREFIX...] -- the R1.4 demonstration (autoresearch row 741):
