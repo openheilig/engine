@@ -144,6 +144,23 @@ func _init() -> void:
 				"the grey slice ends at %d and the red starts at %d -- they %s"
 					% [int(grey.end.y), split,
 					"overlap" if int(grey.end.y) > split else "leave a gap"])
+	# THE COMPOSITION BOUNDARY. Damage mutates ActorState, while Hud owns only
+	# pixels; main.gd must translate the focused actor's current/max HP into the
+	# fraction above. Testing Hud.set_health() alone cannot catch that wire being
+	# absent -- which left the production ring permanently full.
+	var app = load("res://main.gd").new()
+	app._hud = hud
+	var actor := ActorState.new()
+	actor.hp = 25
+	actor.hp_max = 100
+	app._sync_hud_health(actor)
+	var live_red := (hud._ring_full.texture as AtlasTexture).region as Rect2
+	var live_split := Hud.RING_TOP + roundi(0.75 * float(
+		Hud.RING_BOTTOM + 1 - Hud.RING_TOP))
+	expect(int(live_red.position.y) == live_split,
+		"main left the 25/100 actor's life ring at row %d, expected %d" % [
+			int(live_red.position.y), live_split])
+	app.free()
 	# Leave it where a fresh run finds it.
 	hud.set_health(1.0)
 

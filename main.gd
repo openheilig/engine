@@ -805,6 +805,7 @@ func _process(delta: float) -> void:
 	if _show_player and _player_id != ActorRegistry.INVALID_ID:
 		var p := _registry.get_actor(_player_id)
 		if p != null:
+			_sync_hud_health(p)
 			if _player_view != null:
 				_player_view.update(p.cell)
 				_face_player(p)
@@ -814,6 +815,17 @@ func _process(delta: float) -> void:
 			# Retail's sector-change path keys off the PLAYER's sector, not the
 			# camera's -- panning the view does not change the music.
 			_update_sector_env(p.cell)
+
+
+## The composition boundary between simulation state and HUD pixels. ActorState
+## remains scene-tree-free; Hud remains simulation-free. Unknown/zero maximum
+## HP renders full rather than dividing by zero -- spawn already defaults full,
+## so incomplete records do not invent damage.
+func _sync_hud_health(actor: ActorState) -> void:
+	if _hud == null or actor == null:
+		return
+	var fraction := 1.0 if actor.hp_max <= 0 else float(actor.hp) / float(actor.hp_max)
+	_hud.set_health(fraction)
 
 
 ## The ONLY Sim per-frame advance call site outside godot-port/world/ -- a

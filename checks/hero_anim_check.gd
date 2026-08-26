@@ -167,11 +167,16 @@ func _init() -> void:
 		var cw: int = crigs.clip_for_action(cand.model_index, "WALK")
 		if cw < 0:
 			no_walk.append(mesh)
+			cand.node.free()
 			continue
 		if sw == null:
 			sw = cand
 			sw_name = mesh
 			srigs = crigs
+		else:
+			# Only the first WALK-capable body drives the switch assertions.
+			# Candidates are not scene children yet, so release them explicitly.
+			cand.node.free()
 	print("hero_anim_walkgap\tno_walk=%s" % [no_walk])
 	expect(sw != null, "not one class body resolves a WALK clip, so switching is untestable")
 	if sw != null:
@@ -213,6 +218,11 @@ func _init() -> void:
 			sw_name, rest_clip, rest_len, walk,
 			absent if absent != "" else "(body has every action)"])
 
+
+	# finish() quits immediately; it does not run a frame that could flush
+	# queue_free(). Free the private scene synchronously so meshes, materials,
+	# skeletons and animation libraries release their RenderingServer RIDs.
+	root.free()
 	print("hero_anim_check\tOK\tbodies=%d\tanimated=%d" % [tested, animated])
 	finish(0)
 
