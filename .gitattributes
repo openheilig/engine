@@ -1,0 +1,4 @@
+# Everything this allowlist repo tracks is hand-written text, so one global
+# rule does the whole job. If a binary type ever earns an explicit "!" line in
+# .gitignore, give it a `binary` attribute here in the same commit.
+* text=auto eol=lf
