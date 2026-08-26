@@ -722,7 +722,8 @@ func _ready() -> void:
 					# model, 0 coloured pixels in the world against 1364 once the
 					# pak is passed. Every other rig in the world already got it;
 					# the player was the one rig that did not.
-					_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model, tex_pak)
+					_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model,
+						tex_pak, _player_hidden_materials(install, items))
 					if _player_view.node != null:
 						add_child(_player_view.node)
 						if _hide_player_mesh:
@@ -1077,6 +1078,28 @@ func _region_arg() -> Vector3i:
 		if p.size() == 3:
 			return Vector3i(int(p[0]), int(p[1]), int(p[2]))
 	return Vector3i.ZERO
+
+
+## Base-body material names hidden by the outfit before PlayerView builds its
+## mesh. Retail draws a covered slot's garment INSTEAD of the base surface,
+## never both (row 1125). Only boots -> `shoes` is measured: SERAPHIM.GRN's
+## material table names that surface explicitly, and its own Sera_boots.tga
+## proves the bare body already carries boot geometry. The other five armour
+## categories remain visible until their slot mappings are measured.
+## ponytail: one measured mapping; extend from retail A/B captures, not category
+## names that merely sound plausible.
+func _player_hidden_materials(install: String, items: Sacred.Items) -> PackedStringArray:
+	var out := PackedStringArray()
+	if not _dress_player_enabled or items == null:
+		return out
+	var sets := Sacred.Sets.new(install)
+	if not sets.found:
+		return out
+	for rec in sets.members_of(START_SET):
+		if items.category_of(rec) == Sacred.Items.CATEGORY_BOOTS:
+			out.append("shoes")
+			break
+	return out
 
 
 ## Dresses the player in a REAL retail outfit rather than a hand-picked list of
@@ -1784,7 +1807,8 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 		_cam.look_at_cell(cell)
 		var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 		if models_pak.is_open():
-			_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model)
+			_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model,
+				null, _player_hidden_materials(install, items))
 			if _player_view.node != null:
 				add_child(_player_view.node)
 				print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [

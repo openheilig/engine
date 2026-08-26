@@ -359,8 +359,15 @@ func _init() -> void:
 		"set %d split into %d garments and %d props, expected 7 and 2" % [
 			MainScript.START_SET, uriel.size(), blades.size()])
 
-	var dressed := PlayerView.new(models, "SERAPHIM.GRN", tp)
+	var base_material_names := models.material_names(models.index_of("SERAPHIM.GRN"))
+	var shoes_mat := base_material_names.find("shoes")
+	assert(shoes_mat >= 0,
+		"SERAPHIM.GRN no longer names a `shoes` base material -- boot hiding has no decoded target")
+	var dressed := PlayerView.new(models, "SERAPHIM.GRN", tp, PackedStringArray(["shoes"]))
 	assert(dressed.node != null, "SERAPHIM.GRN did not build for the outfit test")
+	var dressed_body := dressed.node as ModelView
+	assert(not dressed_body.surface_material.has(shoes_mat),
+		"the dressed SERAPHIM still emits material %d (`shoes`) under its worn boots" % shoes_mat)
 	for g in uriel:
 		dressed.wear(models, g)
 	var hand := 1

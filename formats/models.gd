@@ -1015,6 +1015,45 @@ func _extension_values(entry: int, want_key: String) -> PackedStringArray:
 		out.append(name)
 	return out
 
+## Per MATERIAL index (material_textures() order), the material's own name,
+## through the same DataExtension __ObjectName chain bone_names() uses: a
+## 0xCA5E0D00 material node's direct DataExtensionReference child carries
+## ref_raw; ref_raw - 1 indexes object_names(). "" wherever the chain does
+## not resolve -- never a substitute (D-19). MEASURED on SERAPHIM.GRN: the
+## six materials name themselves Angel_body / legs / Angel_Hair /
+## Angel_head / shoes / Angel_arms -- the base-body vocabulary retail's
+## garment-hiding rule matches against (row 1125; the outside sweep read
+## the same table). Garment files name THEIR materials independently
+## ("Material #450", "Blessed_armor", ...), so matching is always
+## base-material-name against a slot table, never name equality.
+func material_names(entry: int) -> PackedStringArray:
+	var empty := PackedStringArray()
+	var length := true_length(entry)
+	if length <= 0 or not magic_ok(entry):
+		return empty
+	var buf := _pak.read_at(_pak.entry_offset(entry), length)
+	if buf.size() < length:
+		return empty
+	var dir := _directory(buf)
+	if dir.is_empty():
+		return empty
+	var names := object_names(entry)
+	var out := PackedStringArray()
+	for j in dir.size():
+		if dir[j]["tag"] != TAG_MATERIAL:
+			continue
+		var nm := ""
+		for k in _direct_children(dir, j):
+			if dir[k]["tag"] != TAG_DATA_EXTENSION_REFERENCE:
+				continue
+			var ext: int = _node_u32(buf, dir, k) - 1
+			if ext >= 0 and ext < names.size():
+				nm = names[ext]
+			break
+		out.append(nm)
+	return out
+
+
 ## Resolved bone name per bone in bones() order, through the two-hop
 ## chain documented on the tag constants above: FormBoneChannels[bone_i]
 ## - 1 selects a TransformChannel; its first direct child, if a

@@ -148,6 +148,18 @@ var surface_material := PackedInt32Array()
 ## argument; a body is never skinned this way, only a carried piece.
 var item_texture := -1
 
+## Base-body MATERIAL NAMES setup() must not emit -- claimed but never drawn.
+## Set before setup(). This is retail's garment-hiding rule (row 1125): a body
+## wearing real boots must not also draw the base `shoes` material painted onto
+## it, or two boots render in one place. The vocabulary is material_names() --
+## SERAPHIM's base materials name themselves Angel_body / legs / Angel_Hair /
+## Angel_head / shoes / Angel_arms. Only boots -> "shoes" is measured; the rest
+## of the slot table is deliberately absent until each slot is measured against
+## retail the same way.
+## ponytail: one measured slot mapping; upgrade by dressing each slot in retail
+## and diffing, not by guessing the remaining five.
+var hide_materials := PackedStringArray()
+
 func set_texture_pak(pak: Sacred.Pak) -> void:
 	_texture_pak = pak
 
@@ -429,9 +441,16 @@ func attach_skinned(models: Sacred.Models, entry: int, texture: int = -1) -> Mes
 		worn_refused += 1
 		return null
 	# Bind ORDER is what the mesh's ARRAY_BONES indexes, so the remap keeps the
-	# order and changes only which skeleton each bind points into. The bind POSE
-	# is the piece's own -- it takes the piece's vertices into that bone's space,
-	# which is a fact about the garment's geometry, not about the wearer.
+	# order and changes only which skeleton each bind points into. The bind
+	# POSE is the WEARER's -- the inverse of the same-named bone's global rest
+	# in THIS skeleton, exactly what _build_rig gave this body's own vertices
+	# -- not the piece's own bind pose. Row 1121 measured why: garment and
+	# wearer rest poses disagree on most shared bones (SeraBoots01 vs
+	# SERAPHIM: only 1 of 4 shared weighted bones agrees), so binding through
+	# the piece's own poses deforms the garment as if its rest were the
+	# wearer's. Row 1122 measured the wearer-rest inverse against retail's own
+	# render: the upper body lands on retail's pixels; residual offsets are
+	# per-bone and small.
 	#
 	# NAMES ALONE DO NOT SAY THE GARMENT FITS, and the control is what showed
 	# it: offered Uriel's Legacy, GLADIATOR.GRN binds 5 pieces and refuses 2 --
@@ -468,7 +487,7 @@ func attach_skinned(models: Sacred.Models, entry: int, texture: int = -1) -> Mes
 		if pr.origin.distance_to(wr.origin) < FIT_WITHIN \
 				and pr.basis.get_rotation_quaternion().angle_to(wr.basis.get_rotation_quaternion()) < FIT_WITHIN:
 			agreed += 1
-		skin.add_bind(b, piece._skin.get_bind_pose(i))
+		skin.add_bind(b, _skeleton.get_bone_global_rest(b).affine_inverse())
 	if agreed == 0:
 		# This garment was cut for a different body. Refused rather than bound
 		# to a skeleton whose bones sit somewhere else.
@@ -653,6 +672,7 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 	# order. A group naming no drawable submesh refuses the split rather than
 	# landing its triangles on a neighbour.
 	var g2p := models.group_submesh(entry)
+	var mat_names := models.material_names(entry)
 	var split := groups.size() > 1 and g2p.size() == groups.size()
 	if split:
 		for gi in groups.size():
@@ -691,6 +711,14 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 				if picks.size() != int(g2["triangles"]):
 					split = false
 					break
+				# GARMENT-HIDING (row 1125). A hidden material's triangles stay
+				# claimed -- they were named by a batch, so letting them fall
+				# through to the leftovers pass would redraw them as clay -- but
+				# no surface is emitted for them.
+				if not hide_materials.is_empty() \
+						and int(g2["material"]) >= 0 and int(g2["material"]) < mat_names.size() \
+						and hide_materials.has(mat_names[int(g2["material"])]):
+					continue
 				var start: int = int(port_start[pm2])
 				var gi := PackedInt32Array()
 				gi.resize(picks.size() * 3)

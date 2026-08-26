@@ -131,7 +131,8 @@ var _placement: SkeletonModifier3D = null
 ## required so the parity dumps and grnwalk, which want geometry only, are
 ## unaffected.
 func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
-		texture_pak: Sacred.Pak = null) -> void:
+		texture_pak: Sacred.Pak = null,
+		hide_materials: PackedStringArray = PackedStringArray()) -> void:
 	model_index = models.index_of(model_name)
 	if model_index < 0:
 		push_warning("PlayerView: %s not found in models.pak -- drawing nothing" % model_name)
@@ -139,6 +140,11 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 
 	var mv := ModelView.new()
 	mv.set_texture_pak(texture_pak)
+	# Retail's garment-hiding rule (row 1125): base-body materials the start
+	# outfit covers are never emitted, so a worn boot does not draw over the
+	# body's own `shoes` material. Empty by default -- every caller that does
+	# not dress a set keeps the exact mesh it had.
+	mv.hide_materials = hide_materials
 	if not mv.setup(models, model_index, false):
 		push_warning("PlayerView: %s failed to build -- drawing nothing" % model_name)
 		mv.free()

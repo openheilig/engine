@@ -62,6 +62,12 @@ const CATEGORY_OFF := 0x2e
 ## skips it, and a bare 25 at that call site would read as a magic number.
 const CATEGORY_WINGS := 25
 
+## Category 18, boots -- named for the same reason as CATEGORY_WINGS: the
+## garment-hiding rule in main.gd dispatches on it, and a bare 18 at that
+## call site would read as a magic number. (Row 1125's category census:
+## boots 18, belt 19, shoulder 21, arms 22.)
+const CATEGORY_BOOTS := 18
+
 ## items.pak RECORD INDEX -> mixed.pak sprite id (the record's +0x10 field).
 ## static.pak +0x04 is an items.pak record index, NOT a mixed.pak index --
 ## Resacred's chain is PakStatic.itemTypeId -> PakItemType.mixedId ->
