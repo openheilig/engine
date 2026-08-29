@@ -6,6 +6,6 @@ func _init() -> void:
 	var n := models.count()
 	for i in n:
 		var nm: String = models.entry_name(i)
-		if "STIEFEL" in nm or "SERA_" in nm or nm == "SERAPHIM.GRN":
+		if "IDLE" in nm.to_upper() or "FIDLE" in nm.to_upper():
 			print("entry %d = %s" % [i, nm])
 	quit()
