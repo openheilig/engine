@@ -20,32 +20,45 @@ extends Camera3D
 const HW := 48.0    ## iso half-width
 const HH := 24.0    ## iso half-height
 
-## Retail centres its view ONE WORLD UNIT up-left of cell_to_world's answer.
+## Retail centres its view ONE WORLD UNIT up-left of cell_to_world's answer,
+## and this constant is the follow ANCHOR: the offset between the follow
+## target and the view centre, in world units.
 ##
-## MEASURED 2026-08-16, not derived. Retail was driven to the Seraphim's
-## campaign start (analysis/tools/drive/menu.sh new) and both engines captured
-## the same room at 1024x768. The port's frame was retail's frame translated by
-## exactly (1,1) screen pixels: shifting the port down-right by one pixel makes
-## a bare wall patch bit-identical to retail's (mean |delta| = 0.00 over
-## 80x100 px), so nothing about the sampling grid, the textures or the lighting
-## differs -- only the origin. p6_classify.py agrees on two separate runs.
+## MEASURED twice, agreeing. 2026-08-16: retail driven to the Seraphim's
+## campaign start, both engines captured, and the port's frame was retail's
+## frame translated by exactly (1,1) screen pixels -- a bare wall patch became
+## bit-identical after the shift (mean |delta| = 0.00 over 80x100 px). Row
+## 1104 then measured hero centroids within 0.5 px on independent runs. The
+## offset DOUBLES with the zoom step (shift=1,1 at 1.0x, shift=2,2 at 2.0x,
+## drive-serazoom2), which is what a world-unit constant does and a
+## screen-space one cannot.
 ##
-## The offset is expressed in WORLD units rather than screen pixels because it
-## DOUBLES with the zoom step: shift=1,1 at the middle step and shift=2,2 at
-## 2x, on settled frames 4 s apart (drive-serazoom2). A screen-space constant
-## would have stayed at one pixel.
-##
-## It is applied to the camera, and only to the camera, because that is what
-## the measurement constrains. Terrain, objects and the camera all share
-## cell_to_world, so a constant added THERE cancels out and changes no pixel;
-## the two things the evidence separates are "where the view is centred" and
-## "where the geometry is", and it is the first that disagrees with retail.
-## Which subsystem morally owns the unit -- retail's own carthesianToIso, its
-## hero anchor, or its glOrtho set-up -- is NOT yet known, and reading that out
-## of the binary is the follow-up. Until then this is an honest measured
-## constant, not an explained one, and it is here rather than hidden in
-## cell_to_world so it cannot be mistaken for the latter.
+## What owns the unit is no longer open: the apitrace of the walking game
+## (tmp/apitrace/walk.trace, 2026-08-29) shows retail has NO camera matrix --
+## a fixed glOrtho(0,1024,768,0) for the whole session and the scroll living
+## in the modelview translation, i.e. everything is CPU-transformed into
+## screen pixels exactly as this port does. The modelview translation series
+## across the walk is the follow law transcribed below; this constant is that
+## law's rest offset, and it sits here, not in cell_to_world, because it
+## belongs to the view and not to the geometry.
 const VIEW_ORIGIN := Vector2(-1.0, 1.0)
+
+## The follow ease, transcribed from the same walk trace as the law below:
+## each update halves the remaining distance to the target (measured steps
+## 34.94, 17.21, 8.87, 4.17, 2.08, 1.05, 0.52 -- ratios 0.49-0.51), i.e.
+## cam += (target - cam) * 0.5 once per sim tick, pixel-quantized at render.
+const FOLLOW_K := 0.5
+
+## Beyond this many world units of follow distance the ease is bypassed and
+## the camera snaps. Retail never crossed a teleport while followed in the
+## captured runs, so the eased law is unmeasured there; 40 cells is far
+## beyond any walk a click can produce and far below any sector jump.
+const TELEPORT_SNAP_DIST := 1920.0
+
+## The eased camera's continuous world position (pre-pixel-snap). Rendered
+## position is always the snapped one; this carries the ease between ticks.
+var _cam_world := Vector2.ZERO
+var _cam_valid := false
 
 ## Cell coordinate limits. Sacred's world is 100x100 sectors of 64 cells.
 @export var cell_limit := Vector2(6400.0, 6400.0)
@@ -164,34 +177,52 @@ func look_at_cell(cell: Vector2) -> void:
 ## beside look_at_cell rather than folded into it -- --at=, --sector= and the
 ## probe route all call look_at_cell directly and must keep placing the
 ## camera exactly where they place it today.
+## Retail's follow law, transcribed from an apitrace of the walking game
+## (tmp/apitrace/walk.trace, 2026-08-29; findings row 1189). The camera eases
+## toward the follow target, HALVING the remaining distance each update --
+## the trace's remaining steps run 34.94, 17.21, 8.87, 4.17, 2.08, 1.05,
+## 0.52, 0.52 world units across eight updates and then rest exactly -- and
+## the rendered position is quantized to whole screen pixels (the tail steps
+## are 0.5215 world units = one pixel at the 1.0 zoom step). Retail updates
+## once per sim tick: in the trace each camera position holds for exactly two
+## rendered frames. There is no cell snapping anywhere in it; the old
+## per-tick cell snap this replaces jumped the view 48 px at every cell
+## boundary, which is the judder that made motion look wrong.
 ##
-## The player's cell is continuous; the camera's position is not allowed to
-## be, or every pixel comparison this project makes becomes meaningless. At
-## scale s a world-integer point lands on a pixel integer only when the
-## camera's own coordinate is itself a multiple of 1/s, so the snapped
-## coordinate is the world coordinate times s, rounded, divided by s. At the
-## middle zoom step (s=1.0) that is exactly "round to the nearest whole
-## world unit" -- Success Criterion 4's case -- and the same formula covers
-## the other two measured steps without special-casing any of them.
-##
-## Half the viewport enters the same arithmetic (`position` is the view's
-## centre), so an odd viewport height puts the centre on a half pixel no
-## matter how the camera itself is snapped -- checked here at follow time
-## and reported with push_error rather than silently rendering a frame that
-## cannot be compared, the same runtime-check-not-assert posture the sim's
-## radius ordering uses.
+## The player's cell is continuous; the camera's position is still not
+## allowed to carry sub-pixel information, or every pixel comparison this
+## project makes becomes meaningless. At scale s a world-integer point lands
+## on a pixel integer only when the camera's own coordinate is itself a
+## multiple of 1/s, so after the ease the coordinate is snapped: world times
+## s, rounded, divided by s. Half the viewport enters the same arithmetic
+## (`position` is the view's centre), so an odd viewport height puts the
+## centre on a half pixel no matter how the camera is snapped -- checked
+## here and reported with push_error rather than silently rendering a frame
+## that cannot be compared.
 func follow_cell(cell: Vector2) -> void:
 	var h := get_viewport().get_visible_rect().size.y
 	if int(h) % 2 != 0:
 		push_error("IsoCamera: viewport height %d is odd -- the view centre falls on a half pixel, breaking follow's pixel-grid snap" % int(h))
-	var p := cell_to_world(cell) + VIEW_ORIGIN
+	var target := cell_to_world(cell) + VIEW_ORIGIN
+	if not _cam_valid:
+		# First frame after a load follows retail's first world frame: the
+		# view is already settled on the hero, not easing in from anywhere.
+		_cam_world = target
+		_cam_valid = true
+	elif _cam_world.distance_to(target) > TELEPORT_SNAP_DIST:
+		# ponytail: retail was never observed crossing a teleport while
+		# followed, so the law for it is unmeasured; snap rather than ease
+		# across the map. Ceiling: revisited when a teleport capture exists.
+		_cam_world = target
+	else:
+		_cam_world += (target - _cam_world) * FOLLOW_K
 	var s := zoom_scale()
-	position = Vector3(roundf(p.x * s) / s, roundf(p.y * s) / s, 1000.0)
+	position = Vector3(roundf(_cam_world.x * s) / s, roundf(_cam_world.y * s) / s, 1000.0)
+
 
 
 static func cell_to_world(cell: Vector2) -> Vector2:
 	return Vector2((cell.x - cell.y) * HW, -(cell.x + cell.y) * HH)
-
 
 static func world_to_cell(w: Vector2) -> Vector2:
 	var u := w.x / HW      # x - y
