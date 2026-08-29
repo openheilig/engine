@@ -389,9 +389,9 @@ func update(cell: Vector2) -> void:
 	# flag, so there is no opt-in here either.
 	if not _shadow_on:
 		_shadow_on = true
-		(node as ModelView).enable_drop_shadow(p.y, ground_z)
+		(node as ModelView).enable_drop_shadow(Vector3(p.x, p.y, ground_z), Vector2(105, 40))
 	else:
-		(node as ModelView).update_shadow_ground(p.y, ground_z)
+		(node as ModelView).update_shadow_ground(Vector3(p.x, p.y, ground_z))
 
 	if _skeleton == null or _root_bones.is_empty() or _placement == null:
 		return
