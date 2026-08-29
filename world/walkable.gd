@@ -68,6 +68,30 @@ var _terrain_cache: Dictionary = {}
 ## the byte-26 plane because the two are read on different code paths and one of
 ## them is going away once outdoor walkability is actually found.
 var _liquid_cache: Dictionary = {}
+## sector key -> PackedByteArray of the sector's 64x64 WldxEntry +0x1e bytes,
+## the cell-by-cell door/structure/room-interior flag byte (world-sectors.md).
+## Bit 2 of this byte is the door signal; the rest of the door-bit logic
+## (static-chain walk, blocker flag & 0x200, mask lookup) reads from Sacred.
+## Statics and Sacred.TriggerType, both injected through bind_statics_and_types.
+var _door_cache: Dictionary = {}
+## sector key -> PackedInt32Array of the sector's 64x64 WldxEntry +0x04 static
+## chain heads, the entry points for the door-bit blocker lookup. u32 per cell
+## is 16 KB per sector; kept separate from _terrain_cache so the door path and
+## the byte-26 fallback can be invalidated independently.
+var _static_cache: Dictionary = {}
+var _statics: Sacred.Statics
+var _trigger_type: Sacred.TriggerType
+
+## Wire A (rows 1148-1157): the door-bit path needs both readers -- Sacred.
+## Statics walks the per-cell static chain for the blocker (flag & 0x200) and
+## reads its object mask at +0x2b, Sacred.TriggerType resolves the per-type
+## collision mask. Either may be null and the door-bit branch is then
+## bypassed (returns false on a door cell, which is the safe default --
+## "wrongness visible" per the file header).
+func bind_statics_and_types(statics: Sacred.Statics, trigger_type: Sacred.TriggerType) -> void:
+	_statics = statics
+	_trigger_type = trigger_type
+
 
 
 func _init(world: Sacred.World) -> void:
@@ -247,6 +271,19 @@ func _regions_for(gx: int, gy: int) -> Sacred.Regions:
 ## them does not strand the hero -- the start cell is not liquid and the flood
 ## fill from it saturates the probe's 60,000-cell bound both with and without
 ## the block, so no reachability is measurably lost.
+## Wire A (rows 1148-1157) re-routes the door-bit branch onto a real retail
+## gate. For cells whose WldxEntry +0x1e bit 2 is set (the door bit, per
+## world-sectors.md), the byte-26 fallback is bypassed entirely and the cell
+## is decided by the 16-bit collision-class bitmask:
+##   1. Walk the cell's static chain (WldxEntry +0x04 is the chain head,
+##      Statics.chain() follows NEXT_OFF=0x1f).
+##   2. The first node whose flag at +0x08 has bit 0x200 set is the blocker
+##      cWorld::canWalk names.
+##   3. Read the blocker's 16-bit object mask at +0x2b and the type id at
+##      +0x27; resolve the per-type 16-bit mask through Sacred.TriggerType.
+##   4. Walkable iff (object_mask & type_mask) != 0 -- the polarity correction
+##      row 1155 closed, after which retail verified it (rows 625/626/676).
+## Cells without the door bit keep the byte-26 fallback exactly as it was.
 func _terrain_open(cx: int, cy: int) -> bool:
 	if _world == null:
 		return false
@@ -263,8 +300,60 @@ func _terrain_open(cx: int, cy: int) -> bool:
 		return false
 	if is_liquid(cx, cy):
 		return false
+	# Door-bit branch takes priority over the byte-26 fallback. The two readers
+	# are bound separately so a partial setup (Statics without TriggerType, or
+	# vice versa) fails closed: an unbound door-bit cell is BLOCKED, not opened.
+	if _door_bit_at(sx, sy, lx, ly):
+		return _door_decision(sx, sy, lx, ly)
 	var b := bytes[ly * Sacred.SECT + lx]
 	return b != 1 and b != 4
+
+
+## True iff the cell at sector (sx,sy) local (lx,ly) has WldxEntry +0x1e bit 2
+## set (the door signal). Returns false on a missing sector or out-of-range
+## local cell so a corrupt file degrades to the byte-26 rule, not a crash.
+func _door_bit_at(sx: int, sy: int, lx: int, ly: int) -> bool:
+	var door_bytes := _door_bytes_for(sx, sy)
+	if door_bytes.is_empty():
+		return false
+	if lx < 0 or ly < 0 or lx >= Sacred.SECT or ly >= Sacred.SECT:
+		return false
+	return (door_bytes[ly * Sacred.SECT + lx] & 0x04) != 0
+
+
+## Resolves the door-bit blocker for one cell and returns the polarity-
+## corrected walkability decision: walkable iff the blocker's object mask
+## AND the type table mask is non-zero. Returns false on any missing
+## reader / empty chain / no flagged blocker, so a degenerate state can
+## never widen the player's walkable area.
+func _door_decision(sx: int, sy: int, lx: int, ly: int) -> bool:
+	if _statics == null or _trigger_type == null:
+		return false
+	var heads := _static_heads_for(sx, sy)
+	if heads.is_empty():
+		return false
+	var head := heads[ly * Sacred.SECT + lx]
+	if head <= 0:
+		return false
+	# Walk the chain manually so the blocker STATIC INDEX stays in scope --
+	# Sacred.Statics.chain() returns type/flags/pos dicts that lose the
+	# index, and the mask + type id at +0x2b / +0x27 must be read off the
+	# raw record. Same cycle guard (zero / out-of-range / repeat) as chain().
+	var cur := head
+	var seen: Dictionary[int, bool] = {}
+	while cur > 0 and cur < _statics.count() and not seen.has(cur):
+		seen[cur] = true
+		var blob: PackedByteArray = _statics.blob(cur)
+		if blob.size() < 64:
+			return false
+		if (blob.decode_u32(8) & 0x200) != 0:
+			var obj_mask := blob.decode_u32(0x2b)
+			var type_id := blob.decode_u32(0x27)
+			var type_mask := _trigger_type.mask(type_id)
+			return (obj_mask & type_mask) != 0
+		cur = blob.decode_u32(0x1f)
+	return false
+
 
 
 ## True when this cell carries one of the 14 animated liquid materials (row
@@ -326,6 +415,48 @@ func _terrain_bytes_for(gx: int, gy: int) -> PackedByteArray:
 			for i in n:
 				out[i] = stream[32 + i * Sacred.CELL + 26]
 	_terrain_cache[key] = out   ## cache the miss too, same as _regions_for
+	return out
+
+## WldxEntry +0x1e (the door/structure/room-interior flag byte) for every cell
+## of one sector, in row-major order, or empty if the sector is absent. Same
+## caching posture as _terrain_bytes_for above. Bit 2 of this byte is the door
+## signal _door_bit_at() reads; the other two set bits (structure / room
+## interior) are not consumed by this file but are kept verbatim so a future
+## consumer does not need to re-extract.
+func _door_bytes_for(gx: int, gy: int) -> PackedByteArray:
+	var key := gy * 100 + gx
+	if _door_cache.has(key):
+		return _door_cache[key]
+	var out := PackedByteArray()
+	if _world != null and _world.has_sector(gx, gy):
+		var stream := _world.sector(gx, gy)
+		if not stream.is_empty():
+			var n := Sacred.SECT * Sacred.SECT
+			out.resize(n)
+			for i in n:
+				out[i] = stream[32 + i * Sacred.CELL + 0x1e]
+	_door_cache[key] = out
+	return out
+
+
+## WldxEntry +0x04 (the static.pak chain head) for every cell of one sector,
+## row-major, or empty if the sector is absent. u32 per cell is 16 KB per
+## sector -- a separate cache from _door_bytes_for so the door path and the
+## byte-26 fallback can be invalidated independently when one of them is
+## corrected without touching the other.
+func _static_heads_for(gx: int, gy: int) -> PackedInt32Array:
+	var key := gy * 100 + gx
+	if _static_cache.has(key):
+		return _static_cache[key]
+	var out := PackedInt32Array()
+	if _world != null and _world.has_sector(gx, gy):
+		var stream := _world.sector(gx, gy)
+		if not stream.is_empty():
+			var n := Sacred.SECT * Sacred.SECT
+			out.resize(n)
+			for i in n:
+				out[i] = stream.decode_u32(32 + i * Sacred.CELL + 4)
+	_static_cache[key] = out
 	return out
 
 

@@ -254,3 +254,57 @@ func item_records() -> PackedInt32Array:
 		out.append(k)
 	out.sort()
 	return out
+
+## Apply every modifier record naming `item` to `stats`, ADDITIVELY, returning
+## the updated dict. `stats` is the caller's starting aggregate -- an empty
+## dictionary on a fresh item -- and is NOT mutated; a fresh dictionary is
+## always returned, so the same caller can pass the same `stats` to several
+## items in turn.
+##
+## KEYS, mapped from modifier fields -- additive ints, deliberately NOT named
+## as percentages: row 1166 confirms no tag names a unit, so the values are
+## the raw ints wpmod stores and nothing more. A consumer that knows its own
+## unit multiplies by it; a consumer that doesn't keeps the ints and shows
+## the relative sizes across items.
+##
+##   channels     one int per (channel, slot) pair:
+##                "chan_<name>_0" / "_1" / "_2" for each of the 10 channels
+##                in CHANNELS order. Three values per channel is fixed[8..37],
+##                each (channel, slot) accumulated across every modifier
+##                record that names the item. Slot 0 is the first int of the
+##                triple, slot 2 the third -- the +0x08..+0x27 triple is
+##                retail's three-value column per channel.
+##   bonus        "bonus_<id>" for a Bonus: block (id 801..820), magnitude
+##                being the hi half of blk[2] -- the upper bound of [lo,hi].
+##   skill        "skill_<skill>" for a Skill: block (skill id 0..33 via the
+##                +599 offset), magnitude being blk[5].
+##   spell        "spell_<group>" for a Spell: block (group 14..34), magnitude
+##                being blk[4].
+##   bare         left out: a bare block carries no magnitude of its own.
+##
+## `creature_id` is unused -- every modifier applies to its item regardless of
+## who is carrying it, and no field discriminates by wearer. It is kept in
+## the signature for symmetry with dress_creature().
+func apply_to_item(item: int, stats: Dictionary, creature_id: int = 0) -> Dictionary:
+	var out: Dictionary = {}
+	for k in stats:
+		out[k] = stats[k]
+	var recs := records_for_item(item)
+	for rec in recs:
+		for c in CHANNELS.size():
+			var ch := channel(rec, c)
+			for v in 3:
+				var key := "chan_%s_%d" % [CHANNELS[c], v]
+				out[key] = int(out.get(key, 0)) + ch[v]
+		for m: Dictionary in modifiers(rec):
+			var kind: String = m["kind"]
+			if kind == "bonus":
+				var k := "bonus_%d" % int(m["id"])
+				out[k] = int(out.get(k, 0)) + int(m["magnitude"])
+			elif kind == "skill" and int(m["skill"]) >= 0:
+				var k := "skill_%d" % int(m["skill"])
+				out[k] = int(out.get(k, 0)) + int(m["magnitude"])
+			elif kind == "spell":
+				var k := "spell_%d" % int(m["group"])
+				out[k] = int(out.get(k, 0)) + int(m["magnitude"])
+	return out

@@ -59,7 +59,8 @@ func _init() -> void:
 
 func _expect(view: SectorView, by_type: Dictionary, regions: Sacred.Regions,
 		footprints: Sacred.Footprints, sid: int, want_key: int, why: String) -> void:
-	expect(by_type.has(sid), "sector %d,%d no longer places type %d -- pick a new sample" % [GX, GY, sid])
+	if not expect(by_type.has(sid), "sector %d,%d no longer places type %d -- pick a new sample" % [GX, GY, sid]):
+		return
 	var o: Dictionary = by_type[sid]
 	var res := view._classify_object(o, o["pos"], GX, GY, regions, footprints)
 	var got: int = int(res["region_key"])

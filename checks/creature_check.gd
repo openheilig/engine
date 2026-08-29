@@ -98,7 +98,7 @@ func _init() -> void:
 ## only corroborate.
 func _fields(install: String) -> String:
 	var c = Sacred.Creatures.new(install.path_join("pak"))
-	assert(c.count() == COUNT, "reader count moved: want %d, got %d" % [COUNT, c.count()])
+	expect(c.count() == COUNT, "reader count moved: want %d, got %d" % [COUNT, c.count()])
 
 	var stray := 0
 	var flagged := 0
@@ -108,9 +108,9 @@ func _fields(install: String) -> String:
 			flagged += 1
 		if (f & ~Sacred.Creatures.FLAG_KNOWN) != 0:
 			stray += 1
-	assert(stray == 0,
+	expect(stray == 0,
 		"%d records set a FLAGS bit the writer does not name -- the offset is wrong" % stray)
-	assert(flagged > 0 and flagged < COUNT,
+	expect(flagged > 0 and flagged < COUNT,
 		"FLAGS is %d of %d records, which is not a flag byte" % [flagged, COUNT])
 
 	# BASE attributes: every record carries STK, RES and GES, and none exceeds
@@ -124,8 +124,8 @@ func _fields(install: String) -> String:
 			if v == 0:
 				zero += 1
 			hi = maxi(hi, v)
-		assert(zero == 0, "%d records have no %s" % [zero, Sacred.Creatures.BASE_NAMES[k]])
-		assert(hi <= 100, "%s reaches %d, which is not an attribute" % [Sacred.Creatures.BASE_NAMES[k], hi])
+		expect(zero == 0, "%d records have no %s" % [zero, Sacred.Creatures.BASE_NAMES[k]])
+		expect(hi <= 100, "%s reaches %d, which is not an attribute" % [Sacred.Creatures.BASE_NAMES[k], hi])
 
 	# SPEED is an ORDERED pair of round numbers in all but two records. Pinned
 	# because it is the field an outside table calls walk and run, and a wrong
@@ -135,7 +135,7 @@ func _fields(install: String) -> String:
 		var sp: Vector2i = c.speed(id)
 		if sp.x <= sp.y:
 			ordered += 1
-	assert(ordered == SPEED_ORDERED,
+	expect(ordered == SPEED_ORDERED,
 		"SPEED ordering moved: want %d of %d, got %d" % [SPEED_ORDERED, COUNT, ordered])
 
 	# EXP is retail's own `A + level*B`, so it must GROW with level and equal A
@@ -146,10 +146,11 @@ func _fields(install: String) -> String:
 		if e.x > 0 and e.y > 0:
 			probe = id
 			break
-	assert(probe >= 0, "no creature declares both experience terms")
+	if not expect(probe >= 0, "no creature declares both experience terms"):
+		return ""
 	var pair: Vector2i = c.exp_pair(probe)
-	assert(c.experience(probe, 0) == pair.x, "exp at level 0 is not A")
-	assert(c.experience(probe, 10) == pair.x + 10 * pair.y, "exp does not follow A + level*B")
+	expect(c.experience(probe, 0) == pair.x, "exp at level 0 is not A")
+	expect(c.experience(probe, 10) == pair.x + 10 * pair.y, "exp does not follow A + level*B")
 
 	# The Damping blocks are SPARSE, which is what says they are a real field
 	# and not a misread of a dense one: 11 to 13 records carry each.
@@ -163,7 +164,7 @@ func _fields(install: String) -> String:
 				sum += v
 			if sum > 0:
 				used += 1
-		assert(used >= 8 and used <= 20,
+		expect(used >= 8 and used <= 20,
 			"%s damping is on %d records, expected the sparse 8..20" % [Sacred.Creatures.DAMP_NAMES[w], used])
 		damped += used
 
@@ -178,14 +179,15 @@ func _fields(install: String) -> String:
 	for id in c.ids():
 		if items2.name_of(id).to_upper() == "GHUL.GRN":
 			ghouls.append(id)
-	assert(ghouls.size() == GHOUL_VARIANTS,
-		"GHUL.GRN is named by %d creature records, expected %d" % [ghouls.size(), GHOUL_VARIANTS])
+	if not expect(ghouls.size() == GHOUL_VARIANTS,
+			"GHUL.GRN is named by %d creature records, expected %d" % [ghouls.size(), GHOUL_VARIANTS]):
+		return ""
 	var ghoul: int = ghouls[0]
-	assert(c.base_all(ghouls[0]) != c.base_all(ghouls[1]),
+	expect(c.base_all(ghouls[0]) != c.base_all(ghouls[1]),
 		"the two Ghoul records now have identical attributes -- the variant distinction is gone")
-	assert(c.class_of(ghoul) == 5, "the Ghoul is class %d, expected 5 (Untoter)" % c.class_of(ghoul))
+	expect(c.class_of(ghoul) == 5, "the Ghoul is class %d, expected 5 (Untoter)" % c.class_of(ghoul))
 	var gb: PackedInt32Array = c.base_all(ghoul)
-	assert(gb[Sacred.Creatures.B_STK] > 0 and gb[Sacred.Creatures.B_GES] > 0,
+	expect(gb[Sacred.Creatures.B_STK] > 0 and gb[Sacred.Creatures.B_GES] > 0,
 		"the Ghoul has no attributes")
 	return "flags_clean=%d/%d\tspeed_ordered=%d\tdamping_rows=%d\tghoul_base=%s" % [
 		COUNT - stray, COUNT, ordered, damped, gb]

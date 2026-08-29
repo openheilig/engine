@@ -36,3 +36,4 @@
 export/
 data/
 *.pck
+tmp/

@@ -9,6 +9,7 @@ shader_type spatial;
 // other -- object-vs-object order is submission order, and main.gd supplies it
 // by emitting one surface per sector, back-to-front, with each object's tiles
 // in mixed.pak order.
+
 render_mode unshaded, cull_disabled, blend_mix, depth_draw_opaque;
 
 // A Texture2DArray, one layer per distinct texture.pak page in this sector,
@@ -82,5 +83,19 @@ void fragment() {
 	// So blend, and discard only what is fully transparent.
 	if (c.r < 0.02) discard;
 	ALBEDO = srgb_to_linear(c.gba);
-	ALPHA = c.r;
+	// Row 1184 (object-vs-terrain depth): the retail oracle at
+	// tmp/roofverify/retail-118000.png shows pews and fence drawn as SOLID
+	// objects with binary alpha at the silhouette and a soft SHADOWDOT.TGA
+	// separate below. depth_draw_opaque writes depth only when the blended
+	// ALPHA is 1.0; a partial-alpha pew pixel leaves the depth buffer
+	// untouched and the terrain behind shows through. Force ALPHA=1.0 for
+	// any pixel above the discard threshold so depth IS written. The
+	// 0.02 discard already cuts the soft halo, so the visible result is
+	// the retail binary silhouette: solid pew, solid fence, hard alpha
+	// cut at the outline, no ghost. The "halo" the original
+	// depth_draw_opaque comment warned about is the partial-alpha
+	// fragments writing depth, which is exactly what the 0.02 discard
+	// already prevents; raising the rest to 1.0 writes depth for the
+	// pew's interior only.
+	ALPHA = 1.0;
 }

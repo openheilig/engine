@@ -2060,118 +2060,56 @@ func clip(entry: int, desync: int = 0) -> Dictionary:
 		push_error("Models.clip: entry %d carries no per-bone AnimationTransformTrackKeys records" % entry)
 		return {}
 
-	# VARIANT SELECT, whole-entry and never per record (row 776). Some clips
-	# store uniformly sampled 30fps transforms instead of variable-length
-	# per-channel tracks. Deciding per record would let a coincidence in one
-	# record pick a layout for it that the rest of the entry contradicts, so
-	# the sampled path is taken only when the documented one fails on at
-	# least one record AND the sampled one fits EVERY record.
-	var sampled := _clip_is_sampled(buf, dir, sec, key_nodes)
-
+	# PER-RECORD DISPATCH (Wire B, row 1168). For each AnimationTransformTrackKeys
+	# record, SAMPLED iff the count dwords at +24/+28/+32 are all zero AND the span
+	# is 12+68*N exactly; otherwise ORDINARY. Both branches decode independently.
+	# A hybrid entry (FX_E_IDLE_BH.GRN, FX_G_IDLE_BH.GRN, ...) carries BOTH
+	# ordinary and sampled records for the same bone ids, and this loop handles
+	# each on its own merits -- one of them failing no longer refuses the other.
+	#
+	# MERGE. Walk records in file order; for the same bone id, prefer sampled
+	# where present. Concretely: the first time a given id is seen, the record
+	# is kept; if a later record carries the SAME id and is sampled where the
+	# existing one is ordinary, the existing record is replaced. Both shapes
+	# stay in `records` keyed by bone id, so the result array length equals the
+	# number of distinct bone ids in the entry -- and for hybrid entries that is
+	# exactly the bone count, so clip_track_bone()'s positional bind now
+	# succeeds on them where the pre-wire decoder refused by count mismatch.
 	var records: Array[Dictionary] = []
 	var max_length := 0.0
+	var id_to_idx: Dictionary = {}
+	var id_is_sampled: Dictionary = {}
 	for ridx in key_nodes.size():
-		if sampled:
-			var srec := _clip_sampled_record(entry, buf, dir, sec, key_nodes[ridx], ridx)
-			if srec.is_empty():
-				return {}
-			records.append(srec)
-			var st: PackedFloat32Array = srec["times_pos"]
-			if st.size() > 0 and st[st.size() - 1] > max_length:
-				max_length = st[st.size() - 1]
-			continue
 		var j: int = key_nodes[ridx]
-		var off := sec + int(dir[j]["rel"]) + desync
+		var off := sec + int(dir[j]["rel"])
 		var span := _span_sec(dir, j, buf.size(), sec)
-		if off < 0 or span <= ANIM_RECORD_HEADER or off + span > buf.size():
-			push_error("Models.clip: entry %d record %d has an unusable span %d" % [entry, ridx, span])
+		var is_sampled := _is_sampled_record(buf, off, span)
+		var rec: Dictionary
+		if is_sampled:
+			rec = _clip_sampled_record(entry, buf, dir, sec, j, ridx)
+		else:
+			rec = _clip_ordinary_record(entry, buf, dir, sec, j, ridx, desync)
+		if rec.is_empty():
 			return {}
-		if off + ANIM_OFF_NUM_UNKNOWNS + 4 > buf.size():
-			push_error("Models.clip: entry %d record %d too short to read its count fields" % [entry, ridx])
-			return {}
-		var rid := buf.decode_u32(off)
-		var nt := buf.decode_u32(off + ANIM_OFF_NUM_TRANSLATES)
-		var nq := buf.decode_u32(off + ANIM_OFF_NUM_QUATERNIONS)
-		var nu := buf.decode_u32(off + ANIM_OFF_NUM_UNKNOWNS)
-		if nt > MAX_KEYFRAMES or nq > MAX_KEYFRAMES or nu > MAX_KEYFRAMES:
-			push_error("Models.clip: entry %d record %d declares a count above MAX_KEYFRAMES (nt=%d nq=%d nu=%d)" % [
-				entry, ridx, nt, nq, nu])
-			return {}
-		var implied := ANIM_RECORD_HEADER + 16 * nt + 20 * nq + ANIM_UNKNOWN_STRIDE * nu
-		if implied != span:
-			push_error("Models.clip: entry %d record %d implied size %d does not equal its span %d exactly (nt=%d nq=%d nu=%d)" % [
-				entry, ridx, implied, span, nt, nq, nu])
-			return {}
-
-		var p := off + ANIM_RECORD_HEADER
-		var times_pos := PackedFloat32Array()
-		times_pos.resize(nt)
-		for i in nt:
-			times_pos[i] = buf.decode_float(p + i * 4)
-		p += nt * 4
-		var times_rot := PackedFloat32Array()
-		times_rot.resize(nq)
-		for i in nq:
-			times_rot[i] = buf.decode_float(p + i * 4)
-		p += nq * 4
-		var times_other := PackedFloat32Array()
-		times_other.resize(nu)
-		for i in nu:
-			times_other[i] = buf.decode_float(p + i * 4)
-		p += nu * 4
-
-		var positions := PackedVector3Array()
-		positions.resize(nt)
-		for i in nt:
-			positions[i] = Vector3(buf.decode_float(p + i * 12), buf.decode_float(p + i * 12 + 4), buf.decode_float(p + i * 12 + 8))
-		p += nt * 12
-
-		var rotations: Array[Quaternion] = []
-		rotations.resize(nq)
-		for i in nq:
-			var q := Quaternion(buf.decode_float(p + i * 16), buf.decode_float(p + i * 16 + 4),
-				buf.decode_float(p + i * 16 + 8), buf.decode_float(p + i * 16 + 12))
-			var qlen := sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
-			if is_nan(qlen) or qlen < ANIM_QUAT_MIN:
-				push_error("Models.clip: entry %d record %d rotation %d cannot be normalized (|q|=%f)" % [
-					entry, ridx, i, qlen])
-				return {}
-			# Stored normalized: the drift is real data, but Godot's own
-			# rotation-track interpolation demands an exact unit quaternion
-			# and logs per sampled frame otherwise.
-			rotations[i] = q / qlen
-		p += nq * 16
-
-		# 36 bytes per key, UNINTERPRETED. The stride is measured (see
-		# ANIM_UNKNOWN_STRIDE); what the bytes MEAN is not. 9 floats is the
-		# shape of Granny's scale-shear 3x3, and that was the working guess,
-		# but read as a matrix the values are degenerate -- WOLF_ATTACK_BH_A
-		# yields determinants near zero and negative, which no scale-shear
-		# has. So they are handed back as raw floats and named for what is
-		# known about them. Nothing consumes them yet.
-		var others: Array[PackedFloat32Array] = []
-		others.resize(nu)
-		for i in nu:
-			var o := p + i * 36
-			var f := PackedFloat32Array()
-			f.resize(9)
-			for k in 9:
-				f[k] = buf.decode_float(o + k * 4)
-			others[i] = f
-		p += nu * 36
-		# p == off + span exactly, by the implied-size check above.
-
-		records.append({
-			"id": rid, "times_pos": times_pos, "times_rot": times_rot,
-			"times_other": times_other, "positions": positions,
-			"rotations": rotations, "others": others,
-		})
-		if nt > 0 and times_pos[nt - 1] > max_length:
-			max_length = times_pos[nt - 1]
+		var rid: int = rec["id"]
+		if id_to_idx.has(rid):
+			var existing_idx: int = id_to_idx[rid]
+			if is_sampled and not bool(id_is_sampled[rid]):
+				records[existing_idx] = rec
+				id_is_sampled[rid] = true
+			# else: keep the existing record (first-wins for ordinary; sampled
+			# already in place is not replaced by a later ordinary copy).
+		else:
+			id_to_idx[rid] = records.size()
+			id_is_sampled[rid] = is_sampled
+			records.append(rec)
+		var st: PackedFloat32Array = rec["times_pos"]
+		if st.size() > 0 and st[st.size() - 1] > max_length:
+			max_length = st[st.size() - 1]
 
 	return {
 		"bones": bone_count, "records": records, "length": max_length,
-		"source": "h=%d,nt=%d,nq=%d,nu=%d,ustride=%d,notrailer" % [
+		"source": "h=%d,nt=%d,nq=%d,nu=%d,ustride=%d,notrailer,per-record" % [
 			ANIM_RECORD_HEADER, ANIM_OFF_NUM_TRANSLATES, ANIM_OFF_NUM_QUATERNIONS,
 			ANIM_OFF_NUM_UNKNOWNS, ANIM_UNKNOWN_STRIDE],
 	}
@@ -2186,27 +2124,111 @@ func clip(entry: int, desync: int = 0) -> Dictionary:
 const ANIM_SAMPLED_HEADER := 12
 const ANIM_SAMPLED_KEY := 68
 
-## True iff this entry is the sampled variant: the documented
-## variable-length model fails somewhere AND every record fits 12 + 68N.
-## Both halves are required -- "fits 12+68N" alone is not decisive, since a
-## variable-length record can land on that size by coincidence.
-func _clip_is_sampled(buf: PackedByteArray, dir: Array[Dictionary], sec: int,
-		key_nodes: Array[int]) -> bool:
-	var documented_ok := true
-	for j in key_nodes:
-		var off := sec + int(dir[j]["rel"])
-		var span := _span_sec(dir, j, buf.size(), sec)
-		if span < ANIM_SAMPLED_HEADER or (span - ANIM_SAMPLED_HEADER) % ANIM_SAMPLED_KEY != 0:
-			return false
-		if off < 0 or off + ANIM_OFF_NUM_UNKNOWNS + 4 > buf.size():
-			return false
-		var nt := buf.decode_u32(off + ANIM_OFF_NUM_TRANSLATES)
-		var nq := buf.decode_u32(off + ANIM_OFF_NUM_QUATERNIONS)
-		var nu := buf.decode_u32(off + ANIM_OFF_NUM_UNKNOWNS)
-		if nt > MAX_KEYFRAMES or nq > MAX_KEYFRAMES or nu > MAX_KEYFRAMES \
-				or ANIM_RECORD_HEADER + 16 * nt + 20 * nq + ANIM_UNKNOWN_STRIDE * nu != span:
-			documented_ok = false
-	return not documented_ok
+## Per-record discriminator (Wire B, row 1168). True iff the count dwords at
+## +24/+28/+32 are all zero AND the span is 12 + 68*N. Span congruence alone
+## is NOT decisive: the row-1168 sweep counted 10,710 ordinary records that
+## also satisfy it; only the count-zero half is unambiguous.
+func _is_sampled_record(buf: PackedByteArray, off: int, span: int) -> bool:
+	if off < 0 or off + ANIM_OFF_NUM_UNKNOWNS + 4 > buf.size():
+		return false
+	var nt := buf.decode_u32(off + ANIM_OFF_NUM_TRANSLATES)
+	var nq := buf.decode_u32(off + ANIM_OFF_NUM_QUATERNIONS)
+	var nu := buf.decode_u32(off + ANIM_OFF_NUM_UNKNOWNS)
+	if nt != 0 or nq != 0 or nu != 0:
+		return false
+	if span < ANIM_SAMPLED_HEADER:
+		return false
+	return (span - ANIM_SAMPLED_HEADER) % ANIM_SAMPLED_KEY == 0
+
+## One ordinary (variable-length) record, in the same shape _clip_sampled_record()
+## returns so callers do not branch on which variant they got. Split out from the
+## clip() body for the Wire B refactor (row 1168) so the per-record loop stays
+## readable; the body is identical to the pre-Wire-B inline decode, character
+## for character.
+func _clip_ordinary_record(entry: int, buf: PackedByteArray, dir: Array[Dictionary],
+		sec: int, j: int, ridx: int, desync: int) -> Dictionary:
+	var off := sec + int(dir[j]["rel"]) + desync
+	var span := _span_sec(dir, j, buf.size(), sec)
+	if off < 0 or span <= ANIM_RECORD_HEADER or off + span > buf.size():
+		push_error("Models.clip: entry %d record %d has an unusable span %d" % [entry, ridx, span])
+		return {}
+	if off + ANIM_OFF_NUM_UNKNOWNS + 4 > buf.size():
+		push_error("Models.clip: entry %d record %d too short to read its count fields" % [entry, ridx])
+		return {}
+	var rid := buf.decode_u32(off)
+	var nt := buf.decode_u32(off + ANIM_OFF_NUM_TRANSLATES)
+	var nq := buf.decode_u32(off + ANIM_OFF_NUM_QUATERNIONS)
+	var nu := buf.decode_u32(off + ANIM_OFF_NUM_UNKNOWNS)
+	if nt > MAX_KEYFRAMES or nq > MAX_KEYFRAMES or nu > MAX_KEYFRAMES:
+		push_error("Models.clip: entry %d record %d declares a count above MAX_KEYFRAMES (nt=%d nq=%d nu=%d)" % [
+			entry, ridx, nt, nq, nu])
+		return {}
+	var implied := ANIM_RECORD_HEADER + 16 * nt + 20 * nq + ANIM_UNKNOWN_STRIDE * nu
+	if implied != span:
+		push_error("Models.clip: entry %d record %d implied size %d does not equal its span %d exactly (nt=%d nq=%d nu=%d)" % [
+			entry, ridx, implied, span, nt, nq, nu])
+		return {}
+
+	var p := off + ANIM_RECORD_HEADER
+	var times_pos := PackedFloat32Array()
+	times_pos.resize(nt)
+	for i in nt:
+		times_pos[i] = buf.decode_float(p + i * 4)
+	p += nt * 4
+	var times_rot := PackedFloat32Array()
+	times_rot.resize(nq)
+	for i in nq:
+		times_rot[i] = buf.decode_float(p + i * 4)
+	p += nq * 4
+	var times_other := PackedFloat32Array()
+	times_other.resize(nu)
+	for i in nu:
+		times_other[i] = buf.decode_float(p + i * 4)
+	p += nu * 4
+
+	var positions := PackedVector3Array()
+	positions.resize(nt)
+	for i in nt:
+		positions[i] = Vector3(buf.decode_float(p + i * 12), buf.decode_float(p + i * 12 + 4), buf.decode_float(p + i * 12 + 8))
+	p += nt * 12
+
+	var rotations: Array[Quaternion] = []
+	rotations.resize(nq)
+	for i in nq:
+		var q := Quaternion(buf.decode_float(p + i * 16), buf.decode_float(p + i * 16 + 4),
+			buf.decode_float(p + i * 16 + 8), buf.decode_float(p + i * 16 + 12))
+		var qlen := sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+		if is_nan(qlen) or qlen < ANIM_QUAT_MIN:
+			push_error("Models.clip: entry %d record %d rotation %d cannot be normalized (|q|=%f)" % [
+				entry, ridx, i, qlen])
+			return {}
+		# Stored normalized: the drift is real data, but Godot's own
+		# rotation-track interpolation demands an exact unit quaternion
+		# and logs per sampled frame otherwise.
+		rotations[i] = q / qlen
+	p += nq * 16
+
+	# 36 bytes per key, UNINTERPRETED. The stride is measured (see
+	# ANIM_UNKNOWN_STRIDE); what the bytes MEAN is not. 9 floats is the
+	# shape of Granny's scale-shear 3x3, and that was the working guess,
+	# but read as a matrix the values are degenerate -- WOLF_ATTACK_BH_A
+	# yields determinants near zero and negative, which no scale-shear
+	# has. So they are handed back as raw floats and named for what is
+	# known about them. Nothing consumes them yet.
+	var others: Array[PackedFloat32Array] = []
+	others.resize(nu)
+	for i in nu:
+		var o := p + i * 36
+		var f := PackedFloat32Array()
+		f.resize(9)
+		for k in 9:
+			f[k] = buf.decode_float(o + k * 4)
+		others[i] = f
+	return {
+		"id": rid, "times_pos": times_pos, "times_rot": times_rot,
+		"times_other": times_other, "positions": positions,
+		"rotations": rotations, "others": others,
+	}
 
 ## One sampled record, in the SAME shape the variable-length path returns so
 ## no caller needs to know which variant it came from. Every channel shares

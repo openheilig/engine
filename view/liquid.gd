@@ -82,6 +82,7 @@ const TEX_PX := 128.0
 
 var _pak: Pak
 var _cache: Dictionary = {}   ## material id -> ShaderMaterial (null when unbuildable)
+var _rcache: Dictionary = {}  ## reflection variant: same material, render_priority -1
 
 
 func _init(texture_pak: Pak) -> void:
@@ -97,6 +98,24 @@ func material_for(id: int) -> ShaderMaterial:
 		return _cache[id]
 	var mat := _build(id)
 	_cache[id] = mat
+	return mat
+
+
+## The reflection variant of a material: an identical ShaderMaterial clone with
+## render_priority -1 so it draws BEFORE the bed surface. Retail draws the
+## mirrored ambient quad first and the bed over it (row 1012); the lower
+## priority makes the port's transparent queue reproduce that order without a
+## second MeshInstance3D. Cached like material_for, including the null failure.
+func material_for_reflection(id: int) -> ShaderMaterial:
+	if _rcache.has(id):
+		return _rcache[id]
+	var base := material_for(id)
+	if base == null:
+		_rcache[id] = null
+		return null
+	var mat := base.duplicate() as ShaderMaterial
+	mat.render_priority = -1
+	_rcache[id] = mat
 	return mat
 
 

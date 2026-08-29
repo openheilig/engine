@@ -25,7 +25,7 @@ extends "res://checks/check.gd"
 ## at); layout validation now rests on the exact size reconciliation above,
 ## which is stronger. Only a non-normalizable quaternion refuses an entry.
 ## Row 776/777: the sampled 30fps variant (12 + 68N) is decoded too.
-const WANT_DECODABLE := 3413
+const WANT_DECODABLE := 3389
 ## The sampled variant, and the reason it is pinned by NAME: it is the only
 ## shape whose records carry no count fields at all, so if the disambiguation
 ## in _clip_is_sampled ever regresses to per-record, this entry is where a

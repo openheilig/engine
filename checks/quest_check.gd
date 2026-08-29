@@ -156,7 +156,8 @@ func _base_four(vec) -> void:
 
 ## The quest runs, end to end, out of its own bytes.
 func _run(vec, code: PackedByteArray) -> QuestLog:
-	assert(vec.has_quest(QUEST), "quest %d is not in this tree" % QUEST)
+	if not expect(vec.has_quest(QUEST), "quest %d is not in this tree" % QUEST):
+		return QuestLog.new()
 	expect(vec.title_of(QUEST) == TITLE,
 		"quest %d is titled '%s', expected '%s'" % [QUEST, vec.title_of(QUEST), TITLE])
 	var vm := ScriptVM.new()

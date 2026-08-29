@@ -406,6 +406,19 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 	var luv2 := PackedVector2Array()
 	var lcol2 := PackedColorArray()
 	var lidx2 := PackedInt32Array()
+	# Reflection pass (row 1012): retail draws a grey mirrored ambient quad
+	# FIRST, then the bed over it. For the port's flat water surface the mirror
+	# is geometrically a no-op (the iso diamond is symmetric under a vertical
+	# flip), so the reflection reuses the bed geometry with a grey tint and a
+	# fixed factor-8 depth fade, emitted into its own surface drawn behind.
+	var rpos := PackedVector3Array()
+	var ruv := PackedVector2Array()
+	var rcol := PackedColorArray()
+	var ridx := PackedInt32Array()
+	var rpos2 := PackedVector3Array()
+	var ruv2 := PackedVector2Array()
+	var rcol2 := PackedColorArray()
+	var ridx2 := PackedInt32Array()
 
 	for i in Sacred.SECT * Sacred.SECT:
 		var cell := i * Sacred.CELL
@@ -460,15 +473,41 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 			# times the SIGNED corner depth byte, clamped to 0..255 -- a
 			# negative multiplier over negative depth reads opaque on the open
 			# sea and thins to nothing at the shoreline.
-			var lmult: int = LiquidScript.ALPHA_MULT[lid10 if second else lid9]
+			var id := lid10 if second else lid9
+			# RGB is the cell's per-corner light, as everywhere. ALPHA is
+			# retail's depth fade (row 1011): the material's +0xD0 multiplier
+			# times the SIGNED corner depth byte, clamped to 0..255 -- a
+			# negative multiplier over negative depth reads opaque on the open
+			# sea and thins to nothing at the shoreline.
+			var lmult: int = LiquidScript.ALPHA_MULT[id]
+			var refl: bool = LiquidScript.REFLECTIVE[id]   # retail's pass-1 mirrored ambient quad (row 1012)
 			var col_liquid := PackedColorArray()
+			var col_refl := PackedColorArray()
 			for c in [1, 2, 3, 0]:
 				var ls := cells.decode_u8(cell + 0x14 + c) / 255.0
 				var d8 := cells.decode_u8(cell + 0x10 + c)
 				var depth := d8 - 256 if d8 > 127 else d8
 				var la := clampi(lmult * depth, 0, 255) / 255.0
 				col_liquid.append(Color(ls, ls, ls, la))
+				# Reflection: grey tint, fixed factor-8 depth fade (row 1012),
+				# independent of the record's alpha multiplier.
+				if refl:
+					var ra := clampi(-8 * depth, 0, 255) / 255.0
+					col_refl.append(Color(ls, ls, ls, ra))
 			var idx_liquid := PackedInt32Array([lv, lv + 1, lv + 2, lv, lv + 2, lv + 3])
+			if refl:
+				var rlv := rpos2.size() if second else rpos.size()
+				var idx_refl := PackedInt32Array([rlv, rlv + 1, rlv + 2, rlv, rlv + 2, rlv + 3])
+				if second:
+					rpos2.append_array(quad_liquid)
+					ruv2.append_array(uv_liquid)
+					rcol2.append_array(col_refl)
+					ridx2.append_array(idx_refl)
+				else:
+					rpos.append_array(quad_liquid)
+					ruv.append_array(uv_liquid)
+					rcol.append_array(col_refl)
+					ridx.append_array(idx_refl)
 			if second:
 				lpos2.append_array(quad_liquid)
 				luv2.append_array(uv_liquid)
@@ -617,6 +656,33 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 		# overlays paint OVER the props standing on them and wash them out.
 		bmat.render_priority = -1
 		mi.set_surface_override_material(1, bmat)
+	if not ridx.is_empty() or not ridx2.is_empty():
+		var rquads := 0
+		var rlids := PackedInt32Array()
+		for set in ([[lid9, rpos, ruv, rcol, ridx], [lid10, rpos2, ruv2, rcol2, ridx2]]):
+			if (set[4] as PackedInt32Array).is_empty():
+				continue
+			var rmat: ShaderMaterial = _liquid.material_for_reflection(set[0])
+			# Same decode-failure guard as the bed: a reflection with no
+			# material must not paint untextured white over the sea.
+			if rmat == null:
+				continue
+			var rarr := []
+			rarr.resize(Mesh.ARRAY_MAX)
+			rarr[Mesh.ARRAY_VERTEX] = set[1]
+			rarr[Mesh.ARRAY_TEX_UV] = set[2]
+			rarr[Mesh.ARRAY_COLOR] = set[3]
+			rarr[Mesh.ARRAY_INDEX] = set[4]
+			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, rarr)
+			# render_priority -1 (set on the material) draws this BEFORE the
+			# bed surface, matching retail's pass-1-then-bed choreography.
+			mi.set_surface_override_material(mesh.get_surface_count() - 1, rmat)
+			rquads += (set[4] as PackedInt32Array).size() / 6
+			rlids.append(set[0])
+		if rquads > 0:
+			mi.set_meta("liquid_reflection_quads", rquads)
+			mi.set_meta("liquid_reflection_materials", rlids)
+	
 	if not lidx.is_empty() or not lidx2.is_empty():
 		var lquads := 0
 		var lids := PackedInt32Array()

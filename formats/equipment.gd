@@ -92,6 +92,26 @@ func size_of(pool: int) -> int:
 func filled_pools() -> PackedInt32Array:
 	var out := PackedInt32Array()
 	for i in _pools.size():
-		if not _pools[i].is_empty():
-			out.append(i)
+		out.append(i)
+	return out
+
+## Draw the items a creature of `creature` wears from `pool`. The members
+## repeat on purpose -- see the class doc -- so the returned array preserves
+## every repeat: a caller that wants a SET dedupes, a caller that wants the
+## WEIGHTED DRAW ships the array to its RNG as-is.
+##
+## `creature` is carried alongside `pool` for symmetry with the spawner
+## call sites, which already know which creature they are dressing. Nothing
+## here filters on it: the equipment pool table has no measured reverse
+## lookup from creature id to pool (autoresearch row 1166), so a creature
+## field would be invention rather than read.
+##
+## An empty `Array[int]` is returned for an out-of-range pool or a pool
+## with no members, exactly as members_of() does.
+func dress_creature(creature: int, pool: int) -> Array[int]:
+	var src := members_of(pool)
+	var out: Array[int] = []
+	out.resize(src.size())
+	for i in src.size():
+		out[i] = src[i]
 	return out

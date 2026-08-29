@@ -117,7 +117,7 @@ func _census(models) -> Dictionary:
 ## No decoded mesh may index past its own bone list.
 func _fits(_models, census: Dictionary) -> void:
 	var loose: Array = census["loose"]
-	assert(loose.is_empty(),
+	expect(loose.is_empty(),
 		"%d decoded meshes index past their bone list: %s" % [loose.size(), loose])
 
 
@@ -126,7 +126,7 @@ func _fits(_models, census: Dictionary) -> void:
 ## construction, so a non-zero value is proof the looser constraint is doing
 ## real work rather than being an untested widening.
 func _prefix(_models, census: Dictionary) -> void:
-	assert(census["prefix"] > 0,
+	expect(census["prefix"] > 0,
 		"no decoded mesh uses fewer bones than its list holds -- the pairing has collapsed back to an equality search")
 
 

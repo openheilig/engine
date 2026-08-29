@@ -49,6 +49,7 @@ const Pak := preload("res://formats/pak.gd")
 const Tiles := preload("res://formats/tiles.gd")
 const World := preload("res://formats/world.gd")
 const Statics := preload("res://formats/statics.gd")
+const TriggerType := preload("res://formats/trigger_type.gd")
 const Mixed := preload("res://formats/mixed.gd")
 const Regions := preload("res://formats/regions.gd")
 const Footprints := preload("res://formats/footprints.gd")
@@ -71,6 +72,8 @@ const SpawnLevels := preload("res://formats/spawn_levels.gd")
 const Sectors := preload("res://formats/sectors.gd")
 const Resources := preload("res://formats/resources.gd")
 
+## Wire F NPC dressing consumer; see godot-port/world/npc_dressing.gd.
+const NpcDressing := preload("res://world/npc_dressing.gd")
 
 const CFG := "user://openheilig.cfg"
 

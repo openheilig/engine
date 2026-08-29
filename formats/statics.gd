@@ -22,6 +22,15 @@ func _init(pak: Pak) -> void:
 func count() -> int:
 	return _pak.count()
 
+## Sacred.Walkable._door_decision needs the blocker's +0x08 / +0x1f / +0x27
+## / +0x2b bytes directly; delegating to Sacred.Pak.blob() is the only path
+## that does not double-cache the whole archive.
+func blob(i: int) -> PackedByteArray:
+	if i <= 0 or i >= _pak.count():
+		return PackedByteArray()
+	return _pak.blob(i)
+
+
 ## Offset of nextStaticId inside the 64-byte record. A cell's WldxEntry +0x04
 ## names only the HEAD of a chain of statics placed at that spot; the rest
 ## hang off this field and were invisible to this port until 2026-08-13.
@@ -70,3 +79,28 @@ func get_object(i: int) -> Dictionary:
 		# Godot's Y is up, Sacred's screen Y is down.
 		"pos": Vector2(r.decode_s32(0x0e), -r.decode_s32(0x12)),
 	}
+
+## The 32-bit flags word at record +0x08. Bit 0x200 marks a static as a
+## walkability blocker (the same discriminator cWorld::canWalk uses on the
+## static chain at a door-bit cell, rows 1148/1151). Returns 0 for an
+## absent or undersized record, never -1.
+func flags(idx: int) -> int:
+	if idx <= 0 or idx >= _pak.count():
+		return 0
+	var r := _pak.blob(idx)
+	if r.size() < 64:
+		return 0
+	return r.decode_u32(8)
+
+## The 16-bit collision-class bitmask at record +0x2b, the field cWorld::
+## canWalk reads as the per-static "object_mask" (rows 1148/1151). Returns
+## 0 for an absent or undersized record -- zero intersection with any
+## type mask is then the BLOCKED half of the polarity-corrected gate
+## (row 1155: walkable iff (object_mask & type_mask) != 0).
+func mask(idx: int) -> int:
+	if idx <= 0 or idx >= _pak.count():
+		return 0
+	var r := _pak.blob(idx)
+	if r.size() < 64:
+		return 0
+	return r.decode_u32(0x2b)
