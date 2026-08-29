@@ -516,70 +516,55 @@ func attach_skinned(models: Sacred.Models, entry: int, texture: int = -1) -> Mes
 
 ## --- Drop shadow ------------------------------------------------------------
 ##
-## Retail draws a character's drop shadow as a soft round blob at the foot:
-## SHADOWDOT.TGA (64x64 white soft-dot with an alpha gradient, texture.pak
-## entry 14928), tinted black, as a ground-parallel quad. Measured extents
-## off retail's start-scene captures: ~105x40 under the hero, ~40x18 under
-## the novizin. cGranny::renderShadow (0x80FDBDC, decompiled) confirms a
-## second pass of the character's geometry with a flattening matrix; the
-## full matrix semantics resisted direct transcription, so the visual target
-## (the blob) is implemented with the game's own texture at the measured
-## extents, and every constant here is calibrated through the masked
-## hero-box gate. SHADOW_HIDE=1 hides the blobs for diff measurement.
-const SHADOW_BLOB_HERO := Vector2(105.0, 40.0)
-const SHADOW_BLOB_NPC := Vector2(40.0, 18.0)
+## Retail's cGranny::renderShadow (0x80FDBDC, decompiled) re-draws the
+## character's own posed mesh projected onto the ground. This pass duplicates
+## every skinned piece, overrides a squash shader (world_vertex_coords):
+## VERTEX.y compresses toward the foot line (factor k, calibrated), depth
+## becomes the ground depth — the blob climbs the legs exactly as retail's
+## does. SHADOW_HIDE=1 hides the pass for diff measurement; SHADOW_K and
+## SHADOW_ALPHA were the calibration knobs (0.25 / 0.5 landed).
+const SHADOW_SHADER := preload("res://shaders/hero_shadow.gdshader")
+const SHADOW_FOOT_LIFT := 39.0   ## measured: rendered feet sit 39 above the cell y
 
-var _shadow_mat: StandardMaterial3D = null
-var _shadow_quad: MeshInstance3D = null
-## Gate-tunable during calibration: SHADOW_DX / SHADOW_DY / SHADOW_ALPHA.
-var _shadow_dx := float(OS.get_environment("SHADOW_DX"))
-var _shadow_dy := float(OS.get_environment("SHADOW_DY"))
-var _shadow_alpha := (float(OS.get_environment("SHADOW_ALPHA"))
-	if OS.get_environment("SHADOW_ALPHA") != "" else 0.7)
+var _shadow_mat: ShaderMaterial = null
+var _shadow_instances: Array[MeshInstance3D] = []
 
-func enable_drop_shadow(foot: Vector3, blob: Vector2) -> void:
+func enable_drop_shadow(foot_y: float, ground_z: float) -> void:
 	if _skeleton == null:
 		return
 	if _shadow_mat == null:
-		var id := Sacred.TextureFormat.find_model_texture(_texture_pak, "SHADOWDOT.TGA")
-		if id < 0:
-			printerr("shadow: SHADOWDOT not in texture.pak -- no shadow drawn")
-			return
-		var img := Sacred.TextureFormat.decode_texture(_texture_pak, id)
-		if img == null:
-			printerr("shadow: SHADOWDOT failed to decode -- no shadow drawn")
-			return
-		_shadow_mat = StandardMaterial3D.new()
-		_shadow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		_shadow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		_shadow_mat.albedo_texture = ImageTexture.create_from_image(img)
-		# The texture is a white soft dot; black multiplies it to darkness.
-		_shadow_mat.albedo_color = Color(0.0, 0.0, 0.0, _shadow_alpha)
-		_shadow_mat.no_depth_test = true
-		_shadow_mat.render_priority = 10
-	if _shadow_quad == null:
-		var quad := QuadMesh.new()
-		quad.size = blob
-		quad.orientation = PlaneMesh.FACE_Z
-		_shadow_quad = MeshInstance3D.new()
-		_shadow_quad.mesh = quad
-		_shadow_quad.material_override = _shadow_mat
-		_shadow_quad.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		add_child(_shadow_quad)
-	update_shadow_ground(foot)
+		_shadow_mat = ShaderMaterial.new()
+		_shadow_mat.shader = SHADOW_SHADER
+		_shadow_mat.set_shader_parameter("k",
+			float(OS.get_environment("SHADOW_K")) if OS.get_environment("SHADOW_K") != "" else 0.2)
+		_shadow_mat.set_shader_parameter("alpha",
+			float(OS.get_environment("SHADOW_ALPHA")) if OS.get_environment("SHADOW_ALPHA") != "" else 0.5)
+	for old in _shadow_instances:
+		if is_instance_valid(old):
+			old.queue_free()
+	_shadow_instances.clear()
+	for piece in _skeleton.get_children():
+		var mi := piece as MeshInstance3D
+		if mi == null or mi.mesh == null:
+			continue
+		var dup := MeshInstance3D.new()
+		dup.mesh = mi.mesh
+		dup.skin = mi.skin
+		dup.skeleton = mi.skeleton
+		dup.material_override = _shadow_mat
+		dup.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if OS.get_environment("SHADOW_HIDE") != "":
+			dup.visible = false   # the gate's hide-arm: diff frames with/without
+		_skeleton.add_child(dup)
+		_shadow_instances.append(dup)
+	update_shadow_ground(foot_y + SHADOW_FOOT_LIFT, ground_z)
 
-## Repositions the blob at the character's foot (world px + ground depth).
-## The node carries the coordinate basis at identity position, so the world
-## placement divides back through the basis -- the same idiom as placement.
-func update_shadow_ground(foot: Vector3) -> void:
-	if _shadow_quad == null:
+## The foot line moves with the character (placement + idle bounce).
+func update_shadow_ground(foot_y: float, ground_z: float) -> void:
+	if _shadow_mat == null:
 		return
-	# The node's basis rotates local axes (coordinate_basis), so a child quad
-	# must be placed and oriented through the basis inverse to come out
-	# world-aligned: a FACE_Z quad under the raw basis is edge-on to the
-	# camera and invisible.
-	var inv := transform.basis.inverse()
-	_shadow_quad.transform = Transform3D(inv, inv * (foot + Vector3(_shadow_dx, _shadow_dy, 0.5)))
+	_shadow_mat.set_shader_parameter("foot_y", foot_y)
+	_shadow_mat.set_shader_parameter("ground_z", ground_z)
 
 ## The material for one draw batch. `slot` is a 0-based index into
 ## Models.texture_names(), or -1 for "no texture known". Clay whenever the
