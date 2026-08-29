@@ -188,7 +188,8 @@ const RECORD_FRAME_BUDGET := 20000        ## generous upper bound; --autoplay=60
 var _path_window: PathWindow = null
 var _goal_cell := PathWindow.NO_GOAL      ## BFS-derived once per record/replay run; NO_GOAL if none could be derived
 var _supported_route := false             ## --walk-route=supported-in-out; test-only measured-cell route
-var _anim_phase := -1.0                   ## --anim-phase=F; the hero's idle phase as a FRACTION of the clip, fitted against retail (row 1191); <0 = the engine's phase-0 start
+var _anim_phase := -1.0
+var _art_icon_tex: Texture2D = null    ## the hero's art icon, applied once the HUD exists                   ## --anim-phase=F; the hero's idle phase as a FRACTION of the clip, fitted against retail (row 1191); <0 = the engine's phase-0 start
 const GOAL_REQUEST_TICK := 250            ## the one scripted tick that requests a path (well after spawn, well before autoplay ends)
 ## Measured 06-02 OZELT1 footprint in sector 53,28: the direct-cell route is
 ## explicitly a deterministic harness fallback because 06-03 measured 0/20
@@ -748,6 +749,8 @@ func _ready() -> void:
 						_dress_player(install, Sacred.Models.new(models_pak), items)
 						_animate_hero(Sacred.Models.new(models_pak))
 			_build_hud(tex_pak)
+			if _art_icon_tex != null:
+				_hud.set_art_icon(_art_icon_tex)
 			_build_sector_env(install)
 			# _run_quests is in this list because the quest cast is rigs like any
 			# other: without the light they build and render as black cut-outs,
@@ -840,6 +843,9 @@ func _sync_hud_health(actor: ActorState) -> void:
 		return
 	var fraction := 1.0 if actor.hp_max <= 0 else float(actor.hp) / float(actor.hp_max)
 	_hud.set_health(fraction)
+	if _encounter != null and not _encounter.hero_arts.is_empty():
+		var a: Dictionary = _encounter.hero_arts[0]
+		_hud.set_art_fraction(Regen.fraction(a["remaining"], a["total"]))
 
 
 ## The ONLY Sim per-frame advance call site outside godot-port/world/ -- a
@@ -1244,6 +1250,24 @@ func _begin_encounter(install: String, items) -> void:
 		return
 	_encounter.begin()
 	print(_encounter.status_line())
+	# The hero's first combat art shows its icon in the skill slot (row 1050:
+	# the slot carries the art's own icon, sliced at the regeneration
+	# waterline). The icon name comes from the art table inside the
+	# executable; the image is a loose texture.pak entry under that name.
+	if not _encounter.hero_arts.is_empty():
+		var arts := CombatArts.new(install)
+		var icon_name: String = arts.icon(int(_encounter.hero_arts[0]["id"]))
+		var tp := Sacred.Pak.new(install.path_join("pak/texture.pak"))
+		var tid := Sacred.TextureFormat.find_model_texture(tp, icon_name)
+		print("articon\ticon=%s tid=%d" % [icon_name, tid])
+		if tid >= 0:
+			var img := Sacred.TextureFormat.decode_texture(tp, tid)
+			if img != null:
+				# The HUD is built AFTER the encounter begins (line order in
+				# _ready), so the icon is held and applied by _build_hud.
+				_art_icon_tex = ImageTexture.create_from_image(img)
+		else:
+			print("articon\ttid negative for %s" % icon_name)
 	# --fight=N runs the loop to its end so a headless run can show the whole
 	# thing. Seeded, so two runs of the same command produce the same fight.
 	if _fight_swings > 0:

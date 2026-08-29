@@ -393,6 +393,47 @@ func _wings(tex_pak, cache: Dictionary) -> void:
 ##
 ## Defaults to full and stays there until called, which is both what retail
 ## draws at spawn and a no-op against every frame captured so far.
+## The hero's combat-art icon in the first skill slot. Row 1050: the slot
+## carries the art's own icon, sliced at the regeneration waterline — the
+## clip refills bottom-up as the art's clock runs toward ready. The icon
+## texture is the art's own (CombatArts.icon), decoded by the caller.
+var _art_clip: Control = null
+var _art_icon_rect: TextureRect = null
+
+func set_art_icon(tex: Texture2D) -> void:
+	print("articon\thud set_art_icon tex=", tex, " root=", _root != null)
+	if tex == null or _root == null:
+		return
+	if _art_clip != null:
+		_art_clip.queue_free()
+		_art_clip = null
+	_art_clip = Control.new()
+	_art_clip.clip_contents = true
+	_art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_art_clip.position = Vector2(SKILL_X0, SLOT_Y)
+	_art_clip.size = Vector2(63, 63)
+	_root.add_child(_art_clip)
+	_art_icon_rect = TextureRect.new()
+	_art_icon_rect.texture = tex
+	_art_icon_rect.stretch_mode = TextureRect.STRETCH_SCALE
+	_art_icon_rect.size = Vector2(63, 63)
+	_art_icon_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_art_clip.add_child(_art_icon_rect)
+	_art_icon_rect.position = Vector2.ZERO
+	print("articon\tclip at ", _art_clip.position, " size ", _art_clip.size)
+
+## The regenerated fraction, 0..1: the icon's clip refills bottom-up. At 1.0
+## the whole icon shows (retail's spawn frame state — the art is ready).
+func set_art_fraction(f: float) -> void:
+	if _art_clip == null:
+		return
+	var h := clampf(f, 0.0, 1.0) * 63.0
+	_art_clip.position.y = SLOT_Y + (63.0 - h)
+	_art_clip.size.y = h
+	if _art_icon_rect != null:
+		_art_icon_rect.position.y = -(63.0 - h)
+
+
 func set_health(frac: float) -> void:
 	if _ring_full == null:
 		return

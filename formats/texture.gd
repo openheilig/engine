@@ -87,8 +87,31 @@ static func decode_texture(pak: Pak, id: int, render: bool = false) -> Image:
 	if kind != TYPE_ARGB4444:
 		push_error("Sacred.decode_texture: id %d has unsupported type %d" % [id, kind])
 		return null
-	var px := Common.inflate(buf.slice(80), w * h * 2)
-	if px.size() != w * h * 2:
+	# The zlib stream does not sit at one fixed offset: model textures carry a
+	# 64-byte name (stream at +80) while the small interface entries carry a
+	# 32-byte name (stream at +52 -- GUI_MOVE_ATTACKE measured). Scan the
+	# header window for the stream and take the first candidate that inflates
+	# to the exact size.
+	var want := w * h * 2
+	# The +80 read stays FIRST: a header-window scan can hit a false 78 9c
+	# pair inside a big stream's own bytes and decode garbage over the whole
+	# world (measured: the sector terrain vanished). The scan only runs when
+	# +80 fails -- exactly the small-interface-entry case, whose stream sits
+	# at +52 (32-byte name; GUI_MOVE_ATTACKE measured).
+	var px := Common.inflate(buf.slice(80), want)
+	if px.size() != want:
+		# Manual byte scan: PackedByteArray.find() on a packed-array needle
+		# raises at runtime on this Godot build, which took the whole world
+		# down with it.
+		var head := buf.slice(32, 80)
+		var z := -1
+		for i in range(head.size() - 1):
+			if head[i] == 0x78 and head[i + 1] == 0x9c:
+				z = 32 + i
+				break
+		if z >= 0:
+			px = Common.inflate(buf.slice(z), want)
+	if px.size() != want:
 		push_error("Sacred.decode_texture: id %d inflated to %d, expected %d" % [id, px.size(), w * h * 2])
 		return null
 	if render:
