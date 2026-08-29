@@ -1229,13 +1229,20 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 	# SERA_S_* kit meshes (SERA_S_BOOTS/LEGS/ARMS/SHOULDER in models.pak).
 	# Gated on SHADOW_HIDE's style: SERA_KIT=0 opts out for the set-6 view.
 	if OS.get_environment("SERA_KIT") != "0":
-		var kit := ["SERA_S_BOOTS.GRN", "SERA_S_LEGS.GRN", "SERA_S_ARMS.GRN", "SERA_S_SHOULDER.GRN"]
+		var kit := {
+			"SERA_S_BOOTS.GRN": "BOOTS_LEATHER.TGA",
+			"SERA_S_LEGS.GRN": "LEGS_KURZHEMD.TGA",
+			"SERA_S_ARMS.GRN": "ARMS_KURZHEMD.TGA",
+			"SERA_S_SHOULDER.GRN": "SHOULDER_KURZHEMD.TGA",
+		}
 		var hair := models.index_of("SeraHair01.grn")
 		if hair >= 0:
 			_player_view.wear(models, "SeraHair01.grn")
 		var worn_kit := 0
-		for piece in kit:
-			if _player_view.wear(models, piece):
+		for piece: String in kit:
+			var tex: int = Sacred.TextureFormat.find_model_texture(
+				Sacred.Pak.new(install.path_join("pak/texture.pak")), kit[piece])
+			if _player_view.wear(models, piece, tex):
 				worn_kit += 1
 		print("startkit\tworn=%d/%d" % [worn_kit, kit.size()])
 	print("dress\tset=%d\tmembers=%d\tworn=%d\tarmed=%d\tworn_refused=%d\tarm_refused=%d\tunresolved=%d\tskipped=%d" % [
