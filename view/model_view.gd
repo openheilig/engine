@@ -538,7 +538,7 @@ func enable_drop_shadow(foot_y: float, ground_z: float) -> void:
 		_shadow_mat.set_shader_parameter("k",
 			float(OS.get_environment("SHADOW_K")) if OS.get_environment("SHADOW_K") != "" else 0.2)
 		_shadow_mat.set_shader_parameter("alpha",
-			float(OS.get_environment("SHADOW_ALPHA")) if OS.get_environment("SHADOW_ALPHA") != "" else 0.5)
+			float(OS.get_environment("SHADOW_ALPHA")) if OS.get_environment("SHADOW_ALPHA") != "" else 0.45)
 	for old in _shadow_instances:
 		if is_instance_valid(old):
 			old.queue_free()
