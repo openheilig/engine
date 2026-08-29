@@ -514,6 +514,66 @@ func attach_skinned(models: Sacred.Models, entry: int, texture: int = -1) -> Mes
 	worn_attached += 1
 	return mi
 
+## --- Drop shadow ------------------------------------------------------------
+##
+## Retail draws a character's drop shadow by laying its OWN posed mesh flat on
+## the ground: a second pass of the same skinned geometry where the height
+## above the feet shears into the screen axes (x + 0.5h, y - 0.5h), the whole
+## thing is translated by (-size/2, +size/2), and the depth becomes the ground
+## depth at the character's cell (cGranny::renderShadow, 0x80FDBDC,
+## decompiled; the vertex law lives in shaders/hero_shadow.gdshader). The
+## shadow-size field is retail's per-renderable value (struct +240); the
+## alpha is calibrated by the masked hero-box gate.
+const SHADOW_SHADER := preload("res://shaders/hero_shadow.gdshader")
+## The shadow plane's lift above the cell origin, in world px. Calibrated
+## against the retail blob position through the masked hero-box gate; the
+## rendered feet swing +-40 around this through the idle cycle.
+const SHADOW_FOOT_LIFT := 39.0
+
+var _shadow_mat: ShaderMaterial = null
+var _shadow_instances: Array[MeshInstance3D] = []
+
+func enable_drop_shadow(foot_y: float, ground_z: float, size: float = 96.0) -> void:
+	if _skeleton == null:
+		return
+	if _shadow_mat == null:
+		_shadow_mat = ShaderMaterial.new()
+		_shadow_mat.shader = SHADOW_SHADER
+	for old in _shadow_instances:
+		if is_instance_valid(old):
+			old.queue_free()
+	_shadow_instances.clear()
+	for piece in _skeleton.get_children():
+		var mi := piece as MeshInstance3D
+		if mi == null or mi.mesh == null:
+			continue
+		var dup := MeshInstance3D.new()
+		dup.mesh = mi.mesh
+		dup.skin = mi.skin
+		dup.skeleton = mi.skeleton
+		_shadow_mat.render_priority = 10
+		dup.material_override = _shadow_mat
+		dup.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if OS.get_environment("SHADOW_HIDE") != "":
+			dup.visible = false   # the gate's hide-arm: diff frames with/without
+		_skeleton.add_child(dup)
+		_shadow_instances.append(dup)
+	# The foot line sits a measured lift above the cell origin: the rendered
+	# vertices occupy p.y + ~39..119 through the idle cycle (pose-dependent),
+	# and retail's blob hangs below the feet, so the shadow plane is calibrated
+	# at +80; alpha 0.5 -- both against the masked hero-box gate (row 1192).
+	update_shadow_ground(foot_y + SHADOW_FOOT_LIFT, ground_z)
+	_shadow_mat.set_shader_parameter("size", size)
+
+## The two constants that move with the character: the feet's world screen-y
+## and the ground depth. Called from PlayerView.update on every placement.
+func update_shadow_ground(foot_y: float, ground_z: float) -> void:
+	if _shadow_mat == null:
+		return
+	_shadow_mat.set_shader_parameter("foot_y", foot_y)
+	_shadow_mat.set_shader_parameter("ground_z", ground_z)
+
+
 
 ## The material for one draw batch. `slot` is a 0-based index into
 ## Models.texture_names(), or -1 for "no texture known". Clay whenever the
@@ -592,23 +652,36 @@ func _skin_material(models: Sacred.Models, entry: int, slot: int) -> StandardMat
 	textured_surfaces += 1
 	return mat
 
+
+## Returns the mean Y of triangles in submesh `pm` from index buffer `idx`,
+## reading vertex_mesh to find which triangles belong to `pm`. Used to sort
+## the per-group surface emit into back-to-front painter's order so
+## no_depth_test=true keeps the rig from reading as torn (row 1184).
+func _submesh_mean_y(m: Dictionary, idx: PackedInt32Array, vmesh: PackedInt32Array, pm: int) -> float:
+	var pos: PackedVector3Array = m["positions"]
+	var n := 0
+	var s := 0.0
+	for t in idx.size() / 3:
+		if vmesh[idx[t * 3]] != pm:
+			continue
+		s += pos[idx[t * 3]].y + pos[idx[t * 3 + 1]].y + pos[idx[t * 3 + 2]].y
+		n += 3
+	return s / n if n > 0 else 0.0
+
 func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool:
 	var b := models.coordinate_basis(entry)
 	basis_located = models.last_basis_located
 	transform = Transform3D(b, Vector3.ZERO)
-
 	var m := models.mesh_arrays(entry)
 	if m.is_empty():
 		push_error("ModelView: entry %d has no decodable mesh" % entry)
 		return false
-
 	var pos: PackedVector3Array = m["positions"]
 	var nrm: PackedVector3Array = m["normals"]
 	var uv: PackedVector2Array = m["uvs"]
 	var idx: PackedInt32Array = m["indices"]
 	vertex_count = int(m["vertex_count"])
 	triangle_count = int(m["triangle_count"])
-
 	var arr := []
 	arr.resize(Mesh.ARRAY_MAX)
 	arr[Mesh.ARRAY_VERTEX] = pos
@@ -617,7 +690,6 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 	if not uv.is_empty():
 		arr[Mesh.ARRAY_TEX_UV] = uv
 	arr[Mesh.ARRAY_INDEX] = idx
-
 	# Must precede add_surface_from_arrays: ARRAY_BONES/ARRAY_WEIGHTS are
 	# surface arrays, not something attachable afterwards.
 	if not _build_rig(models, entry):
@@ -692,7 +764,20 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 		#
 		# tri_index is exact -- across a submesh's groups it covers 0..n-1 once --
 		# so there is no ordering assumption left here at all.
-		for pm2 in port_order:
+		# PAINTER'S-ORDER (findings row 1184): the surfaces are emitted in
+		# port_order, which is the order sub-meshes appear in the index buffer --
+		# not back-to-front, so the back-facing halves of the body draw AFTER
+		# the front-facing halves, and the rig reads as torn. Sort by sub-mesh
+		# mean Y DESCENDING so the back of the body draws first and the front
+		# of the body draws last. With no_depth_test=true the transparent queue
+		# takes this order as-is, which is exactly the regime object sprites
+		# already live in.
+		var _pm2_with_y: Array = []
+		for _pm3 in port_order:
+			_pm2_with_y.append([_pm3, _submesh_mean_y(m, idx, vmesh, _pm3)])
+		_pm2_with_y.sort_custom(func(a, b): return a[1] > b[1])
+		for _pm2_pair in _pm2_with_y:
+			var pm2: int = _pm2_pair[0]
 			# Triangles of this submesh no group named. Retail binds a texture
 			# per batch, so geometry outside every batch has no material to
 			# draw with -- but dropping it silently is how a character loses a
@@ -737,27 +822,26 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 				var sub := arr.duplicate()
 				sub[Mesh.ARRAY_INDEX] = gi
 				mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sub)
-				surface_texture.append("<clay>")
+				var mat_name: String = mat_names[int(g2["material"])] if g2["material"] >= 0 and g2["material"] < mat_names.size() else "<unknown>"
+				surface_texture.append(mat_name)
 				surface_material.append(int(g2["material"]))
 				mats.append(_skin_material(models, entry, int(g2["material"])))
 			if not split:
 				break
-			# TRIANGLES NO GROUP CLAIMS, and the one case where they can still
-			# be drawn correctly. A batch is what names a texture, so geometry
-			# outside every batch has no stated material -- but the entry as a
-			# whole may leave no room for doubt: when it names exactly ONE
-			# texture, every triangle uses that one whatever the batches say,
-			# so the leftovers are drawn with it. That is also what the
-			# pre-split path did for these entries, so single-texture models
-			# (doors, vases, chests -- most of the corpus) keep every triangle
-			# they had.
-			#
-			# With SEVERAL textures named there is no such answer and the
-			# leftovers are counted, not drawn. Guessing clay was tried and is
-			# visibly wrong: ELVE_SORCESS's six unclaimed 14-triangle submeshes
-			# render as a column of pale lumps down her spine. `ungrouped_triangles`
-			# publishes the residue either way, so the open question -- whether
-			# retail's own draw loop reaches them at all -- stays measurable.
+			# TRIANGLES NO GROUP CLAIMS -- SKIPPED, NOT DRAWN AS CLAY. A batch
+			# is what names a texture, so geometry outside every batch has no
+			# stated material to draw with. The earlier port drew those triangles
+			# as <clay> for entries naming exactly one texture (the single-texture
+			# fallback): doors, vases, chests kept every triangle they had.
+			# That rule is REFUTED: ELVE_SORCESS's six unclaimed 14-triangle
+			# submeshes rendered as a column of pale lumps down her spine, and
+			# retail's own draw loop binds glDrawElements to dword_9551F14 from
+			# sub_8624508 at 0x8625404 with one indexed GL_TRIANGLES call per
+			# declared batch -- no implicit material, no separate pass reaches
+			# leftovers on any single-texture entry either (row 1167). Counting
+			# but skipping all unclaimed geometry is the correct rule.
+			# `ungrouped_triangles` publishes the residue so the count is
+			# measurable even though no surface is emitted for it.
 			var rest := PackedInt32Array()
 			for t4 in int(port_faces[pm2]):
 				if claimed.has(t4):
@@ -768,23 +852,22 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 				rest.append(idx[rt * 3])
 				rest.append(idx[rt * 3 + 1])
 				rest.append(idx[rt * 3 + 2])
-			if not rest.is_empty():
-				ungrouped_triangles += rest.size() / 3
-				if textures_named == 1:
-					var sub2 := arr.duplicate()
-					sub2[Mesh.ARRAY_INDEX] = rest
-					mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sub2)
-					surface_texture.append("<clay>")
-					surface_material.append(0)
-					mats.append(_skin_material(models, entry, 0))
-	if not split:
+	if not split and ungrouped_triangles == 0:
+		# Single-texture fallback -- only when the per-group split failed AND
+		# there are no ungrouped triangles. The legacy code emitted a single
+		# "<clay>" surface for any entry that did not split, but that fallback
+		# is what wire_c_ungrouped_check removes. When the split succeeded the
+		# per-group surfaces above stay intact; when it failed AND there are
+		# leftovers, retail draws nothing for them so the surface count is
+		# whatever the partial split produced.
 		mesh = ArrayMesh.new()
 		mats.clear()
 		textured_surfaces = 0
 		surface_texture.clear()
 		surface_material.clear()
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-		surface_texture.append("<clay>")
+		var fallback_name: String = mat_names[0] if mat_names.size() > 0 else ""
+		surface_texture.append(fallback_name)
 		surface_material.append(0 if textures_named == 1 else -1)
 		mats.append(_skin_material(models, entry, 0 if textures_named == 1 else -1))
 	surfaces = mesh.get_surface_count()

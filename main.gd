@@ -39,14 +39,15 @@ const DebugOverlayScript := preload("res://debug_overlay.gd")
 ## ponytail: a constant until there is a UI to choose with.
 const START_CLASS := "type_npc_seraphim"
 
-## bin/sets.bin record the player starts dressed in. 6 is "Uriel's Legacy", the
-## Seraphim suite -- nine members, seven garments and two blades. A set rather
-## than a list of mesh names because retail already decided what goes together,
-## and because it keeps this constant honest: change START_CLASS and this is
-## the one other line that has to move.
-## ponytail: a full starting kit is not what a new retail character has. It is
-## here so the composition path is exercised by the default run; a real
-## inventory replaces it.
+## bin/sets.bin record whose members the player is built from. 6 is "Uriel's
+## Legacy", the Seraphim suite -- nine members, seven garments and two blades.
+## A set rather than a list of mesh names because retail already decided what
+## goes together, and because it keeps this constant honest: change START_CLASS
+## and this is the one other line that has to move.
+## ponytail: a full starting kit is not what a new retail character has -- she
+## is bare with one blade (findings row 1101) -- so the garments are SKIPPED
+## by default and only --dress-garments wears them. START_SET still selects the
+## blade(s) equipped in the default run; a real inventory replaces this.
 const START_SET := 6
 
 ## Script tree -> the class's whole-body mesh in models.pak. These are the
@@ -187,6 +188,7 @@ const RECORD_FRAME_BUDGET := 20000        ## generous upper bound; --autoplay=60
 var _path_window: PathWindow = null
 var _goal_cell := PathWindow.NO_GOAL      ## BFS-derived once per record/replay run; NO_GOAL if none could be derived
 var _supported_route := false             ## --walk-route=supported-in-out; test-only measured-cell route
+var _anim_phase := -1.0                   ## --anim-phase=F; the hero's idle phase as a FRACTION of the clip, fitted against retail (row 1191); <0 = the engine's phase-0 start
 const GOAL_REQUEST_TICK := 250            ## the one scripted tick that requests a path (well after spawn, well before autoplay ends)
 ## Measured 06-02 OZELT1 footprint in sector 53,28: the direct-cell route is
 ## explicitly a deterministic harness fallback because 06-03 measured 0/20
@@ -290,13 +292,18 @@ var _show_player := true   ## --noplayer: suppress building the player view enti
 var _hide_player_mesh := false
 ## --noanim: build the hero but leave it in its rest pose. See the flag parse.
 var _animate_player := true
-## --nodress: build the hero as her BARE RIG, wearing and carrying nothing.
-## Retail's own starting equipment comes from two tables filled by an
-## `equip=<CLASS>,<slot>,<itemid>` line in the balance text, and NO shipped
-## file carries such a line -- so a stock retail character starts bare and
-## this flag, not START_SET, is what reproduces her. See
-## research/formats/balance-bin.md and findings row 1101.
-var _dress_player_enabled := true
+## The hero's dress state. Findings row 1101: a stock retail Seraphim starts
+## BARE -- no `equip=` line ships in the balance text -- and carries exactly
+## ONE blade. Three settings:
+##   default           bare body + the set's one dockable blade (retail match)
+##   --nodress         bare rig, wearing and carrying nothing
+##   --dress-garments  Uriel's Legacy kit (garments + blades) -- the old
+##                      default, kept reachable so the garment path is still
+##                      exercised by tests/parity, not dead code.
+## (START_SET still selects which set's members are iterated; only the GARMENTS
+## are skipped by default now. See research/formats/balance-bin.md.)
+var _dress_player_enabled := true   ## --nodress: suppress all dressing
+var _wear_garments := false         ## --dress-garments: also wear the kit's garments
 ## (There is deliberately no `_last_heading` here any more. Holding the last
 ## non-zero heading in the SCENE SCRIPT could not work: nothing in an ordinary
 ## run ever writes ActorState.heading -- click-to-move goes through
@@ -399,6 +406,7 @@ func _ready() -> void:
 	# certain (row 609): a body whose clip splays it must still be drawable.
 	_animate_player = not ("--noanim" in argv)
 	_dress_player_enabled = not ("--nodress" in argv)
+	_wear_garments = "--dress-garments" in argv
 	_show_hud = not ("--nohud" in argv)
 	var force_interior := "--force-interior" in argv
 	for a in argv:
@@ -502,6 +510,12 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--anim-falsify="):
 			anim_falsify = a.trim_prefix("--anim-falsify=")
+	# --anim-phase=F (0..1): the hero's IDLE phase as a fraction of the clip.
+	# The fit against retail's own idle frames lands as a constant; negative
+	# (the default) keeps the engine's phase-0 start.
+	for a in argv:
+		if a.begins_with("--anim-phase="):
+			_anim_phase = clampf(float(a.trim_prefix("--anim-phase=")), 0.0, 1.0)
 	# 05-12 Task 2: settles, in GDScript, which within-file mapping (directory
 	# position, id-1, id) a clip record's bone actually is -- re-derived
 	# rather than cited from planning, against the bone's own stored rest
@@ -1193,8 +1207,14 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 			skipped += 1
 			continue
 		if models.has_mesh_weights(e):
-			_player_view.wear(models, nm, items.texture_of(rec))
+			# Garments are skipped by default: a stock retail Seraphim wears
+			# none (findings row 1101). Only --dress-garments wears them.
+			if _wear_garments:
+				_player_view.wear(models, nm, items.texture_of(rec))
 		else:
+			# Rigid piece (blade): dock on the next free hand socket. The
+			# second Wind blade is refused (no off-hand socket on SERAPHIM),
+			# leaving exactly one blade docked -- retail's armed=1.
 			_player_view.equip(models, nm, hand, items.texture_of(rec))
 			hand += 1
 	print("dress\tset=%d\tmembers=%d\tworn=%d\tarmed=%d\tworn_refused=%d\tarm_refused=%d\tunresolved=%d\tskipped=%d" % [
@@ -3329,12 +3349,16 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		add_child(pv.node)
 		var cell: Vector2 = pick["cell"]
 		pv.update(cell)
-		# YAW 0 IS A STAND-IN, not retail's facing. _build_npcs does the same
-		# and for the same reason: nothing in the hook says which way she looks.
-		# Retail's capture has her turned away from the camera and the port's
-		# faces it, so this is a known, measured difference -- see the `quest`
-		# entry in research/engine/game-wiring.md.
-		pv.set_yaw(0.0)
+		# Her FACING is her Goto travel direction. The hook creates her and
+		# only then NPC_Gotos her to cell (3237,2514); retail's fourth capture
+		# caught her still walking there (y 340-419), and the settled captures
+		# show her back to the camera -- both match travel from the only origin
+		# the hook ties her to, the hero's own spawn cell (row 1106: drawn
+		# there, her feet land on retail's foot row). face() carries the
+		# render-calibrated -Z convention, so this is measured direction in,
+		# measured convention through -- not a chosen constant.
+		pv.face(cell, IsoCamera.cell_to_world(cell)
+			- IsoCamera.cell_to_world(Vector2(start_cell)))
 		# Shared with the rolled and scripted casts so the tree frees these rigs
 		# by exactly the same route -- _build_npcs' own stated reason.
 		_creature_views.append(pv)
@@ -3984,4 +4008,10 @@ func _drive_hero_action(p: ActorState) -> void:
 	# is a fact about the model map (SERAPHIM.GRN resolves no WALK, row 1053)
 	# and looks identical on screen to this code not running at all.
 	var ok := _player_view.play_action(_anim_models, _anim_rigs, want)
+	if ok and want == "IDLE" and _anim_phase >= 0.0:
+		# The fitted spawn phase (row 1191): retail's hero does not idle from
+		# phase 0; the sweep against her own frames pins this constant.
+		var mv := _player_view.node as ModelView
+		if mv != null:
+			mv.seek_anim(_anim_phase * maxf(0.001, mv.anim_length))
 	print("hero_action\t%s->%s\t%s" % [was, want, "playing" if ok else "refused"])

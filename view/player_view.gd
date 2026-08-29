@@ -60,6 +60,7 @@ var triangle_count := 0
 
 var _mesh: MeshInstance3D = null
 var _skeleton: Skeleton3D = null
+var _shadow_on := false                 ## the drop shadow enables once, then only refreshes
 var _scale := 1.0
 ## Root-bone rest origins, captured once so update() only ever adds this
 ## call's placement on top of the model's own unscaled rest pose -- never on
@@ -161,6 +162,7 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 	vertex_count = mv.vertex_count
 	triangle_count = mv.triangle_count
 	rest_yaw_rad = rest_yaw(models, model_index)
+
 
 	# Scale so the rig's bounding box height equals SectorView's existing
 	# character-proxy constant (SORTCUBE_PX) -- borrowed, not restated, per
@@ -381,6 +383,15 @@ func update(cell: Vector2) -> void:
 	var p := IsoCamera.cell_to_world(cell)
 	var ground_z := SectorView.ground_depth(p)
 	_mesh.sorting_offset = ground_z
+	# The drop shadow rides every placement: enabled on the first update (one
+	# duplicate of each skinned piece under the skeleton), then only its two
+	# moving constants refresh. Retail draws it for every character without a
+	# flag, so there is no opt-in here either.
+	if not _shadow_on:
+		_shadow_on = true
+		(node as ModelView).enable_drop_shadow(p.y, ground_z)
+	else:
+		(node as ModelView).update_shadow_ground(p.y, ground_z)
 
 	if _skeleton == null or _root_bones.is_empty() or _placement == null:
 		return
