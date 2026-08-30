@@ -60,6 +60,8 @@ const START_SET := 6
 ## SUCCU, NOSFE, DRACUL, WEREW). She is an Underworld class, so her mesh is
 ## presumably not in this pak at all. A wrong guess here would draw the wrong
 ## body silently, so the map has a hole and _apply_retail_start says so.
+var _export_sera := false               ## --export-sera=path: dump the hero mesh as OBJ for Bevy
+var _export_sera_path := ""
 const CLASS_MODEL := {
 	"type_npc_daemonin": "DAEMONIA.GRN",
 	"type_npc_darkelve": "DUNKELELVE.GRN",
@@ -518,7 +520,10 @@ func _ready() -> void:
 		if a.begins_with("--anim-phase="):
 			_anim_phase = clampf(float(a.trim_prefix("--anim-phase=")), 0.0, 1.0)
 	# 05-12 Task 2: settles, in GDScript, which within-file mapping (directory
-	# position, id-1, id) a clip record's bone actually is -- re-derived
+	for a in argv:
+		if a.begins_with("--export-sera="):
+			_export_sera = true
+			_export_sera_path = a.trim_prefix("--export-sera=")
 	# rather than cited from planning, against the bone's own stored rest
 	# translation (decoded by different code from a different structure).
 	var anim_key_report := ""
@@ -748,6 +753,8 @@ func _ready() -> void:
 							_player_view.vertex_count, _player_view.triangle_count])
 						_dress_player(install, Sacred.Models.new(models_pak), items)
 						_animate_hero(Sacred.Models.new(models_pak))
+						if _export_sera:
+							_export_hero_obj(_export_sera_path)
 			_build_hud(tex_pak)
 			if _art_icon_tex != null:
 				_hud.set_art_icon(_art_icon_tex)
@@ -4061,3 +4068,115 @@ func _drive_hero_action(p: ActorState) -> void:
 		if mv != null:
 			mv.seek_anim(_anim_phase * maxf(0.001, mv.anim_length))
 	print("hero_action\t%s->%s\t%s" % [was, want, "playing" if ok else "refused"])
+
+
+## Exports the hero's full scene tree to glTF (.glb) for Bevy.
+## Uses Godot's built-in GLTFDocument — the same code path that powers
+## the editor's glTF export. Captures all skinned meshes, materials,
+## and textures in one standard-format file.
+var _ex_v := 1
+var _ex_t := 1
+var _ex_n := 1
+var _ex_surf := 0
+
+func _export_hero_obj(out_path: String) -> void:
+	_ex_v = 1
+	_ex_t = 1
+	_ex_n = 1
+	_ex_surf = 0
+	var mv := _player_view.node
+	if mv == null:
+		printerr("export: hero node null")
+		get_tree().quit(1)
+		return
+	var f := FileAccess.open(out_path + ".obj", FileAccess.WRITE)
+	var m := FileAccess.open(out_path + ".mtl", FileAccess.WRITE)
+	if f == null or m == null:
+		printerr("export: cannot open output")
+		get_tree().quit(1)
+		return
+	m.store_line("# Seraphim materials\n")
+	_export_mesh_children(mv, f, m, out_path)
+	f.close()
+	m.close()
+	print("export\tdone surfaces=%d verts=%d" % [_ex_surf, _ex_v])
+	get_tree().quit(0)
+
+func _export_mesh_children(node: Node, f: FileAccess, m: FileAccess, out_path: String) -> void:
+	for child in node.get_children():
+		if child is MeshInstance3D:
+			var mi := child as MeshInstance3D
+			if mi.mesh == null:
+				continue
+			for s in mi.mesh.get_surface_count():
+				var arrays: Array = mi.mesh.surface_get_arrays(s)
+				if arrays.is_empty():
+					continue
+				var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+				var norms: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+				var uvs: PackedVector2Array = arrays[Mesh.ARRAY_TEX_UV]
+				var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+				# CPU skinning: reproduce exactly what the GPU does for a skinned
+				# surface — sum w * (bone_global_pose * bind_pose) * v — so the
+				# exported OBJ carries the posed world-space vertices.
+				var xf: Transform3D = mi.global_transform
+				var skel: Skeleton3D = null
+				if mi.skin != null and mi.skin.get_bind_count() > 0 and mi.skeleton != null:
+					skel = mi.get_node_or_null(mi.skeleton) as Skeleton3D
+				if skel != null:
+					var bones: PackedInt32Array = arrays[Mesh.ARRAY_BONES]
+					var weights: PackedFloat32Array = arrays[Mesh.ARRAY_WEIGHTS]
+					if bones.size() >= verts.size() * 4:
+						var posed_v := PackedVector3Array()
+						posed_v.resize(verts.size())
+						var posed_n := PackedVector3Array()
+						posed_n.resize(norms.size())
+						for vi in verts.size():
+							var p := Vector3.ZERO
+							var nn := Vector3.ZERO
+							for k in 4:
+								var w: float = weights[vi * 4 + k]
+								if w > 0.0:
+									var ki: int = bones[vi * 4 + k]
+									var bp: Transform3D = skel.get_bone_global_pose(mi.skin.get_bind_bone(ki)) * mi.skin.get_bind_pose(ki)
+									p += (bp * verts[vi]) * w
+									nn += (bp.basis * norms[vi]) * w
+							posed_v[vi] = p
+							posed_n[vi] = nn.normalized()
+						verts = posed_v
+						norms = posed_n
+					xf = skel.global_transform
+				var gname := "surf_%d" % _ex_surf
+				var mat: Material = mi.get_surface_override_material(s)
+				if mat == null:
+					mat = mi.mesh.surface_get_material(s)
+				if mat == null:
+					mat = mi.material_override
+				if mat is StandardMaterial3D:
+					var sm := mat as StandardMaterial3D
+					if sm.albedo_texture != null:
+						var img: Image = sm.albedo_texture.get_image()
+						if img != null:
+							img.save_png(out_path.get_base_dir() + "/tex_%d.png" % _ex_surf)
+							gname = "tex_%d" % _ex_surf
+				m.store_line("newmtl %s\nKa 0.5 0.5 0.5\nKd 0.8 0.8 0.8\nillum 2\n" % gname)
+				f.store_line("g %s" % gname)
+				f.store_line("usemtl %s" % gname)
+				for v in verts:
+					var wp: Vector3 = xf * v
+					f.store_line("v %f %f %f" % [wp.x, wp.y, wp.z])
+				for n in norms:
+					var wn: Vector3 = xf.basis * n
+					f.store_line("vn %f %f %f" % [wn.x, wn.y, wn.z])
+				for uv in uvs:
+					f.store_line("vt %f %f" % [uv.x, 1.0 - uv.y])
+				for i in range(0, indices.size(), 3):
+					f.store_line("f %d/%d/%d %d/%d/%d %d/%d/%d" % [
+						indices[i] + _ex_v, indices[i] + _ex_t, indices[i] + _ex_n,
+						indices[i+1] + _ex_v, indices[i+1] + _ex_t, indices[i+1] + _ex_n,
+						indices[i+2] + _ex_v, indices[i+2] + _ex_t, indices[i+2] + _ex_n])
+				_ex_v += verts.size()
+				_ex_t += uvs.size()
+				_ex_n += norms.size()
+				_ex_surf += 1
+		_export_mesh_children(child, f, m, out_path)
