@@ -766,8 +766,6 @@ func _ready() -> void:
 							_player_view.vertex_count, _player_view.triangle_count])
 						_dress_player(install, Sacred.Models.new(models_pak), items)
 						_animate_hero(Sacred.Models.new(models_pak))
-						if _export_sera:
-							_export_hero_obj(_export_sera_path)
 			_build_hud(tex_pak)
 			if _art_icon_tex != null:
 				_hud.set_art_icon(_art_icon_tex)
@@ -783,6 +781,8 @@ func _ready() -> void:
 				_build_npcs(install, Sacred.Models.new(models_pak), player_cell)
 			if models_pak.is_open():
 				_build_quest_cast(install, Sacred.Models.new(models_pak), items, tex_pak)
+			if _export_sera:
+				_export_pending = true
 
 	if region != Vector3i.ZERO:
 		_view.load_region(region.x, region.y, region.z)
@@ -827,6 +827,12 @@ func _exit_tree() -> void:
 
 
 func _process(delta: float) -> void:
+	if _export_pending:
+		_export_frame += 1
+		if _export_frame >= 3:
+			_export_pending = false
+			_export_hero_obj(_export_sera_path)
+			return
 	if _view != null:
 		_view.stream(delta)
 	if not _probe_active and not _replay_active:
@@ -4025,6 +4031,15 @@ var _ex_v := 1
 var _ex_t := 1
 var _ex_n := 1
 var _ex_surf := 0
+## Texture-name prefix for the current export pass ("" for the hero,
+## "_castN_" for a quest-cast rig) so a cast texture cannot overwrite the
+## hero's tex_%d.png files.
+var _ex_prefix := ""
+## --export-sera runs from the FIRST _process frame, not _ready: the rig
+## placement (PlayerView.update) and the drop shadow only exist after the
+## first tick, and the meta sidecar must carry the placed values.
+var _export_pending := false
+var _export_frame := 0
 
 func _export_hero_obj(out_path: String) -> void:
 	_ex_v = 1
@@ -4046,8 +4061,54 @@ func _export_hero_obj(out_path: String) -> void:
 	_export_mesh_children(mv, f, m, out_path)
 	f.close()
 	m.close()
-	print("export\tdone surfaces=%d verts=%d" % [_ex_surf, _ex_v])
+	_write_rig_meta(out_path, _player_view)
+	print("export\thero done surfaces=%d verts=%d" % [_ex_surf, _ex_v])
+	# The QUEST CAST rigs beside her (the novizin), same world-space pose the
+	# live run drew -- each with its own counters and a tex-name prefix so the
+	# texture files cannot collide with the hero's.
+	for i in _creature_views.size():
+		var cast_view: PlayerView = _creature_views[i]
+		if cast_view.node == null:
+			continue
+		_ex_v = 1
+		_ex_t = 1
+		_ex_n = 1
+		_ex_surf = 0
+		_ex_prefix = "_cast%d_" % i
+		var cf := FileAccess.open(out_path + "_cast%d.obj" % i, FileAccess.WRITE)
+		var cm := FileAccess.open(out_path + "_cast%d.mtl" % i, FileAccess.WRITE)
+		if cf == null or cm == null:
+			printerr("export: cannot open cast output %d" % i)
+			continue
+		cm.store_line("# Cast material %d\n" % i)
+		_export_mesh_children(cast_view.node, cf, cm, out_path + "_cast%d" % i)
+		cf.close()
+		cm.close()
+		_write_rig_meta(out_path + "_cast%d" % i, cast_view)
+		print("export\tcast%d done surfaces=%d verts=%d" % [i, _ex_surf, _ex_v])
+	_ex_prefix = ""
 	get_tree().quit(0)
+
+## The placement facts the OBJ cannot carry: the RigPlacement modifier
+## (scale, yaw, world offset) runs after the mixer and is therefore NOT baked
+## into the exported vertices. The Bevy side applies M = spin*scale+offset
+## itself, from this file.
+func _write_rig_meta(out_path: String, pv: PlayerView) -> void:
+	var mf := FileAccess.open(out_path + ".meta", FileAccess.WRITE)
+	if mf == null or pv._placement == null:
+		printerr("export: cannot write rig meta for %s" % out_path)
+		return
+	mf.store_line("scale=%f" % pv._placement.rig_scale)
+	mf.store_line("yaw=%f" % pv._placement.yaw)
+	mf.store_line("offset=%f,%f,%f" % [pv._placement.local_offset.x,
+		pv._placement.local_offset.y, pv._placement.local_offset.z])
+	var node: Node3D = pv.node
+	var xf: Transform3D = node.global_transform
+	var q: Quaternion = xf.basis.get_rotation_quaternion().normalized()
+	mf.store_line("node_origin=%f,%f,%f" % [xf.origin.x, xf.origin.y, xf.origin.z])
+	mf.store_line("node_quat=%f,%f,%f,%f" % [q.w, q.x, q.y, q.z])
+	mf.close()
+
 
 func _export_mesh_children(node: Node, f: FileAccess, m: FileAccess, out_path: String) -> void:
 	for child in node.get_children():
@@ -4104,8 +4165,8 @@ func _export_mesh_children(node: Node, f: FileAccess, m: FileAccess, out_path: S
 					if sm.albedo_texture != null:
 						var img: Image = sm.albedo_texture.get_image()
 						if img != null:
-							img.save_png(out_path.get_base_dir() + "/tex_%d.png" % _ex_surf)
-							gname = "tex_%d" % _ex_surf
+							img.save_png(out_path.get_base_dir() + "/tex_%s%d.png" % [_ex_prefix, _ex_surf])
+							gname = "tex_%s%d" % [_ex_prefix, _ex_surf]
 				m.store_line("newmtl %s\nKa 0.5 0.5 0.5\nKd 0.8 0.8 0.8\nillum 2\n" % gname)
 				f.store_line("g %s" % gname)
 				f.store_line("usemtl %s" % gname)
