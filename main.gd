@@ -4169,7 +4169,7 @@ func _export_mesh_children(node: Node, f: FileAccess, m: FileAccess, out_path: S
 					var wn: Vector3 = xf.basis * n
 					f.store_line("vn %f %f %f" % [wn.x, wn.y, wn.z])
 				for uv in uvs:
-					f.store_line("vt %f %f" % [uv.x, 1.0 - uv.y])
+					f.store_line("vt %f %f" % [uv.x, uv.y])
 				for i in range(0, indices.size(), 3):
 					f.store_line("f %d/%d/%d %d/%d/%d %d/%d/%d" % [
 						indices[i] + _ex_v, indices[i] + _ex_t, indices[i] + _ex_n,
