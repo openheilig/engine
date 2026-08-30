@@ -234,6 +234,62 @@ func texture_of(record: int) -> int:
 func category_of(record: int) -> int:
 	return _category.get(record, -1)
 
+## --- Equipment slots --------------------------------------------------------
+##
+## Retail's cCreature carries an 18-slot equipment array at +0x1A4
+## (granny-grn.md, "The base body already wears boots"): 0x00..0x06 run
+## helmet/body/belt/arms/legs/shoes/gauntlets, main hand is 0x0D, off hand
+## 0x0C, mount 0x12. The category byte above FEEDS that mapping rather than
+## being it -- which is the "open work" the doc comment on category_of names.
+## Closed 2026-08-30 by a full-corpus census (tmp/census_slots.gd): every
+## equipment category's sample names name the body part outright --
+## Daemonia_Armor01_Shoes = 18, ..._Legs = 23, ..._Gloves = 24, ..._Shoulder
+## = 21 -- and the Armalion prior (worn for slots 0,1,2,3,7) puts shoulder at
+## 7, the one worn slot outside 0x00..0x06.
+enum Slot {
+	HELMET = 0x00, BODY = 0x01, BELT = 0x02, ARMS = 0x03,
+	LEGS = 0x04, SHOES = 0x05, GAUNTLETS = 0x06, SHOULDER = 0x07,
+	OFF_HAND = 0x0C, MAIN_HAND = 0x0D, MOUNT = 0x12,
+}
+
+## category byte -> slot. Absent categories are not equipment: 0 empty
+## records, 1/15 gibs, 3 base bodies, 4 chests, 7 heads/statues, 8 rings,
+## 9 bottles, 10 doors, 12 FX, 16 scrolls, 20 brooches/amulets, 25 wings
+## (picker-screen display only, main.gd skips them), 26/28 upgrade wares,
+## 27 arrows, 33 dwarf cannon.
+const _CATEGORY_TO_SLOT := {
+	17: Slot.HELMET, 6: Slot.BODY, 19: Slot.BELT, 22: Slot.ARMS,
+	23: Slot.LEGS, 18: Slot.SHOES, 24: Slot.GAUNTLETS, 21: Slot.SHOULDER,
+	5: Slot.MAIN_HAND, 13: Slot.OFF_HAND, 29: Slot.MOUNT,
+}
+
+## The slot the record's category equips, or -1 when the category is not
+## equipment. This is the resolver's first hop: record -> slot, then
+## name_of / texture_of -> model and texture -> scene graph.
+func slot_of(record: int) -> int:
+	return _CATEGORY_TO_SLOT.get(category_of(record), -1)
+
+## WORN garments displace the base body's own same-part surfaces -- the
+## hiding rule granny-grn.md records as implemented nowhere ("the viewer
+## does not implement hiding at all, it stacks"). BONE-ATTACHED pieces
+## (blades 5, shields 13, mount gear 29) hang off bones and hide nothing.
+func is_worn(record: int) -> bool:
+	var s := slot_of(record)
+	return s >= Slot.HELMET and s <= Slot.SHOULDER
+
+func is_bone_attached(record: int) -> bool:
+	var s := slot_of(record)
+	return s == Slot.MAIN_HAND or s == Slot.OFF_HAND or s == Slot.MOUNT
+
+## The base-body material-name tokens each worn slot displaces. Names are
+## per-class (SERAPHIM's groups are Angel_body/Angel_arms/Angel_head/
+## Angel_hair; legs and shoes are unprefixed), so matching is by case-less
+## token, never exact string. SHOULDER and BELT displace nothing: the base
+## body has no shoulder or belt group to hide.
+const SLOT_HIDE_TOKENS := {
+	Slot.BODY: ["body"], Slot.LEGS: ["leg"], Slot.SHOES: ["shoe"],
+	Slot.ARMS: ["arm"], Slot.HELMET: ["head"], Slot.GAUNTLETS: ["hand"],
+}
 
 ## Every items.pak record naming `mesh`, in record order. One mesh is named by
 ## many items precisely because each carries a different skin, so a caller that
