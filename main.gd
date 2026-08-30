@@ -50,6 +50,19 @@ const START_CLASS := "type_npc_seraphim"
 ## blade(s) equipped in the default run; a real inventory replaces this.
 const START_SET := 6
 
+## The base body's `shoes` batch (270 tris, Sera_boots.tga) is EMITTED, not
+## hidden -- measured 2026-08-30 by four-way A/B across both engines: the
+## legs group's own texture paints the boots with SEMI-TRANSPARENT alpha in
+## the shin region, so hiding the batch (the pre-2026-08-30 state) leaves the
+## hero ghost-legged below the knee; the opaque batch is what retail draws
+## over that ghost. Two costs measured with the batch emitted: Bevy (alpha
+## ignored, opaque materials) never needed it; and the hero's squash-shadow
+## projects the batch as dark spikes under the feet -- a shadow-calibration
+## followup (SHADOW_K/SHADOW_ALPHA or a per-surface shadow exclusion), not a
+## reason to hide the boots. Worn garments hide their slots' base surfaces
+## dynamically (set_materials_hidden_by_token) on top of this.
+const BASE_HIDE := []
+
 ## Script tree -> the class's whole-body mesh in models.pak. These are the
 ## short, underscore-free rig names (`SERAPHIM.GRN`, `GLADIATOR.GRN`); the
 ## long `SERAPHIM_LEATHER_02.GRN` family beside them is ARMOUR worn over one,
@@ -743,7 +756,7 @@ func _ready() -> void:
 					# pak is passed. Every other rig in the world already got it;
 					# the player was the one rig that did not.
 					_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model,
-						tex_pak, _player_hidden_materials(install, items))
+						tex_pak, PackedStringArray(BASE_HIDE))
 					if _player_view.node != null:
 						add_child(_player_view.node)
 						if _hide_player_mesh:
@@ -1119,42 +1132,29 @@ func _region_arg() -> Vector3i:
 	return Vector3i.ZERO
 
 
-## Base-body material names hidden by the outfit before PlayerView builds its
-## mesh. Retail draws a covered slot's garment INSTEAD of the base surface,
-## never both (row 1125). Only boots -> `shoes` is measured: SERAPHIM.GRN's
-## material table names that surface explicitly, and its own Sera_boots.tga
-## proves the bare body already carries boot geometry. The other five armour
-## categories remain visible until their slot mappings are measured.
-## ponytail: one measured mapping; extend from retail A/B captures, not category
-## names that merely sound plausible.
-func _player_hidden_materials(install: String, items: Sacred.Items) -> PackedStringArray:
-	var out := PackedStringArray()
-	if not _dress_player_enabled or items == null:
-		return out
-	var sets := Sacred.Sets.new(install)
-	if not sets.found:
-		return out
-	for rec in sets.members_of(START_SET):
-		if items.category_of(rec) == Sacred.Items.CATEGORY_BOOTS:
-			out.append("shoes")
-			break
-	return out
-
-
-## Dresses the player in a REAL retail outfit rather than a hand-picked list of
-## mesh names: START_SET is a bin/sets.bin record, its members are items.pak
-## records, and an items.pak record's name field is the .GRN. Nothing here
-## names a file.
+## Dresses the hero in the MEASURED new-game appearance (retail, user
+## confirmed 2026-08-30): the base body's own painted outfit and its own
+## shoes batch, one blade, nothing else equipped. The class template's item
+## list (hero01.ptx) is the starting INVENTORY -- potions, a torch, the
+## SeraHair01 headgear and one blade record that does not resolve in
+## items.pak -- and of those only the headwear surfaces on the body; the
+## drawn blade is the set's own weapon member, which matches retail's pixels
+## (the template's blade record sits in the ~15% of save-item ids
+## pax-saves.md could not map). --dress-garments wears the set's garments
+## through the resolver as composition test coverage.
 ##
-## The garment/weapon split is MEASURED, not spelled out: a piece that declares
-## vertex weights is skinned and goes on the skeleton, one that does not is a
-## rigid prop and goes on a hand socket -- exactly the distinction
-## granny-grn.md draws between armour and weapons. Set 6 mixes both, seven
-## garments and the two Wind blades, so a caller could not sort them by name.
+## The resolver is the slot model (items.gd): category byte -> slot -> worn
+## vs bone-attached. Wings (25) land in no slot and skip with no special
+## case -- the picker-screen-only rule the census measured. Garments worn
+## through the resolver hide the base-body surfaces their slot displaces
+## (ModelView.set_materials_hidden_by_token), so a worn boot no longer
+## stacks on the body's own shoes -- and with nothing worn, nothing hides,
+## which is exactly the state whose broken static version left the hero
+## without feet.
 func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) -> void:
 	if _player_view == null or items == null:
 		return
-	# The guard lives HERE and not at the two call sites, so a third caller
+	# The guard lives HERE and not at the call sites, so a third caller
 	# cannot be added that quietly ignores the flag.
 	if not _dress_player_enabled:
 		print("dress\tset=none\tmembers=0\tworn=0\tarmed=0\tworn_refused=0\tarm_refused=0\tunresolved=0\tskipped=0")
@@ -1164,18 +1164,9 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 		push_warning("dress: bin/sets.bin did not decode -- drawing the bare rig")
 		return
 	var members := sets.members_of(START_SET)
-	if members.is_empty():
-		push_warning("dress: set %d has no members" % START_SET)
-		return
-	# Two failure kinds, counted APART because they mean different things. A
-	# member whose mesh name does not resolve is a broken chain -- sets.bin to
-	# items.pak to models.pak -- and should be zero. A member the rig refuses is
-	# an ordinary outcome the view already counts: a blade with no grip for the
-	# hand it was offered, or a garment whose weights did not decode. Summing
-	# them made the first version of this line report "unresolved=3" for a set
-	# in which every member resolved.
 	var unresolved := 0
 	var skipped := 0
+	var worn := 0
 	var hand := 1
 	for rec in members:
 		var nm: String = items.name_of(rec)
@@ -1183,90 +1174,46 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 		if nm == "" or e < 0:
 			unresolved += 1
 			continue
-		# WINGS ARE IN THE SET AND RETAIL DOES NOT DRAW THEM IN THE WORLD. The
-		# port drew two large dark spread wings over her because its only test
-		# was "declares vertex weights", which SeraWings01.grn does.
-		#
-		# ⚠️ THIS COMMENT USED TO CLAIM the same retail new-game frame shows her
-		# wearing helmet, armour, belt, shoulder, gloves and boots -- eight of
-		# set 6's nine members. IT DOES NOT (row 1120). Retail's new Seraphim
-		# wears NOTHING and carries TWO blades, both point-down, the long one in
-		# her right hand; the blue bra, gold necklace, briefs, thigh bands and
-		# white knee boots that look like kit are all painted by SERAPHIM.GRN's
-		# own Sera_body/Sera_legs/Sera_boots textures. Her character-select
-		# portrait DOES add the wings, so they are a picker-screen display and
-		# the skip below stays right for the world -- but it is right for a
-		# different reason than the one written here.
-		#
-		# So the whole START_SET path is drawing an outfit retail does not have:
-		# worn=6 armed=1 against retail's worn=0 armed=2.
-		#
-		# Skipped on the DECODED CATEGORY, not on the name. items.pak +0x2e sorts
-		# the corpus into ~27 kinds (Sacred.Items.category_of), and 25 is wings:
-		# seven records in 32,768, every one a SeraWings*. The eight members that
-		# ARE drawn carry ordinary equipment categories -- chest 6, helm 17,
-		# boots 18, belt 19, shoulder 21, arms 22, and 5/13 for the two blades.
-		# Corroborated sideways: every armour category is 100% skinned and every
-		# prop category 100% rigid across 908 and 300-odd records respectively.
-		#
-		# THIS IS A STOPGAP AND THE COMMENT SAYS SO. Armalion's cCreature dresses
-		# from THIRTEEN EQUIPMENT SLOTS (PC_EQUIPMENT_MAX), dispatching on
-		# equipment_getSlotType: worn for slots 0,1,2,3,7, bone-attached for
-		# 4,5,6,9,10,11,12, and NEITHER for slot 8 alone. A set is a matched item
-		# family, not an outfit; the port reads one as an outfit because it has
-		# no slot model yet. When it grows one, wings land in whatever slot type
-		# 0 turns out to be and this special case goes away.
-		if items.category_of(rec) == Sacred.Items.CATEGORY_WINGS:
-			skipped += 1
-			continue
-		if models.has_mesh_weights(e):
-			# Garments are skipped by default: a stock retail Seraphim wears
-			# none (findings row 1101). Only --dress-garments wears them.
+		if items.is_worn(rec):
+			# WORN garments stay off at the start scene (row 1101); the
+			# resolver classifies them without a name table.
 			if _wear_garments:
-				_player_view.wear(models, nm, items.texture_of(rec))
-		else:
+				if _player_view.wear(models, nm, items.texture_of(rec)):
+					worn += 1
+					_hide_worn_slot(items, rec)
+			else:
+				skipped += 1
+		elif items.is_bone_attached(rec):
 			# Rigid piece (blade): dock on the next free hand socket. The
 			# second Wind blade is refused (no off-hand socket on SERAPHIM),
-			# leaving exactly one blade docked -- retail's armed=1.
+			# leaving exactly one blade docked.
 			_player_view.equip(models, nm, hand, items.texture_of(rec))
 			hand += 1
-	# MEASURED START APPEARANCE (the template's own item list, hero01.ptx):
-	# items [5171 x3 (potions), 5633 (torch), 4007 (SeraHair01), 7901 (blade)]
-	# -- and the white boots/thigh bands/arm bands retail renders are the
-	# SERA_S_* kit meshes (SERA_S_BOOTS/LEGS/ARMS/SHOULDER in models.pak).
-	# Gated on SHADOW_HIDE's style: SERA_KIT=0 opts out for the set-6 view.
-	if OS.get_environment("SERA_KIT") != "0":
-		var kit := {
-			"SERA_S_BOOTS.GRN": "BOOTS_LEATHER.TGA",
-			"SERA_S_LEGS.GRN": "LEGS_KURZHEMD.TGA",
-			"SERA_S_ARMS.GRN": "ARMS_KURZHEMD.TGA",
-			"SERA_S_SHOULDER.GRN": "SHOULDER_KURZHEMD.TGA",
-		}
-		var hair := models.index_of("SeraHair01.grn")
-		if hair >= 0:
-			_player_view.wear(models, "SeraHair01.grn")
-		var worn_kit := 0
-		for piece: String in kit:
-			var tex: int = Sacred.TextureFormat.find_model_texture(
-				Sacred.Pak.new(install.path_join("pak/texture.pak")), kit[piece])
-			if _player_view.wear(models, piece, tex):
-				worn_kit += 1
-		print("startkit\tworn=%d/%d" % [worn_kit, kit.size()])
+		else:
+			# No slot: wings and every non-equipment category. The census
+			# measured 25 (wings) as picker-screen display only.
+			skipped += 1
+	# Headwear from the class template: the one inventory item that
+	# surfaces on the body at the start scene.
+	var hero := Sacred.Hero.new(install.path_join("templates/hero01.ptx"))
+	if hero.found:
+		for rec in hero.items():
+			if items.is_worn(rec) and items.slot_of(rec) == Sacred.Items.Slot.HELMET \
+					and _player_view.wear(models, items.name_of(rec), items.texture_of(rec)):
+				worn += 1
+				_hide_worn_slot(items, rec)
 	print("dress\tset=%d\tmembers=%d\tworn=%d\tarmed=%d\tworn_refused=%d\tarm_refused=%d\tunresolved=%d\tskipped=%d" % [
 		START_SET, members.size(), _player_view.worn(), _player_view.equipped(),
 		_player_view.worn_refused(), _player_view.equipped_refused(), unresolved, skipped])
 
 
-## Moves start_cell to START_CLASS's own StartPosition record, and picks the
-## body mesh for that class. Non-fatal: an install whose tree has no such
-## record keeps the fallback literal, and says so, rather than aborting a run
-## over a cosmetic default.
-## Builds the MVP encounter and opens its quest. Non-fatal throughout: a run
-## whose install is missing a piece draws the world and says what it could not
-## assemble, rather than aborting.
-##
-## The hostile is spawned into the SAME registry the player is in, so it is a
-## real actor under the same sim rules and not a second, parallel world.
+## Hide the base-body surfaces a successfully-worn record's slot displaces.
+func _hide_worn_slot(items: Sacred.Items, rec: int) -> void:
+	var tokens: Array = Sacred.Items.SLOT_HIDE_TOKENS.get(items.slot_of(rec), [])
+	if not tokens.is_empty():
+		_player_view.hide_base_surfaces(PackedStringArray(tokens))
+
+
 func _begin_encounter(install: String, items) -> void:
 	if _registry == null:
 		return
@@ -1893,7 +1840,7 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 		var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 		if models_pak.is_open():
 			_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model,
-				null, _player_hidden_materials(install, items))
+				null, PackedStringArray(BASE_HIDE))
 			if _player_view.node != null:
 				add_child(_player_view.node)
 				print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [

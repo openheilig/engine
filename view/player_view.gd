@@ -468,6 +468,14 @@ func worn_refused() -> int:
 ## How many equipped pieces docked, and how many were refused because this body
 ## names no socket for that hand. A refusal is the honest outcome, not a
 ## failure: see ModelView.SOCKET_HAND for why the hand bone is not a substitute.
+## Dynamic garment-hiding (row 1125, slot-driven): hide the base-body
+## surfaces the tokens name after a garment successfully binds. No-op when
+## the body was not skinned (no Skeleton/Mesh).
+func hide_base_surfaces(tokens: PackedStringArray) -> void:
+	if node is ModelView:
+		(node as ModelView).set_materials_hidden_by_token(tokens, true)
+
+
 func equipped() -> int:
 	return (node as ModelView).sockets_attached if node != null else 0
 

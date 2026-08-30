@@ -530,6 +530,46 @@ func attach_skinned(models: Sacred.Models, entry: int, texture: int = -1) -> Mes
 	worn_attached += 1
 	return mi
 
+## Dynamic garment-hiding (row 1125's rule, slot-driven): after a garment
+## binds, hide the base-body surfaces its slot displaces by swapping their
+## override material for an invisible one; show_base_surfaces restores the
+## originals. Token matching is case-less substring against the surface's
+## material name -- per-class names differ (Angel_body vs Gladiator_body),
+## so exact strings cannot work. The emit-time hide_materials array stays
+## for build-time hiding; this is the runtime half, driven by which slots
+## ACTUALLY hold a piece rather than by what the set contains (the static
+## derivation hid base shoes even when nothing was worn -- findings row with
+## this change).
+var _hidden_orig := {}
+var _invisible_mat: StandardMaterial3D = null
+
+func set_materials_hidden_by_token(tokens: PackedStringArray, hidden: bool) -> void:
+	var mesh_mi: MeshInstance3D = get_node_or_null("Skeleton/Mesh") as MeshInstance3D
+	if mesh_mi == null:
+		mesh_mi = get_node_or_null("Mesh") as MeshInstance3D
+	if mesh_mi == null:
+		return
+	if _invisible_mat == null:
+		_invisible_mat = StandardMaterial3D.new()
+		_invisible_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_invisible_mat.albedo_color = Color(0.0, 0.0, 0.0, 0.0)
+	for s in surface_texture.size():
+		var nm := String(surface_texture[s]).to_lower()
+		var hit := false
+		for tok in tokens:
+			if nm.contains(String(tok).to_lower()):
+				hit = true
+				break
+		if not hit:
+			continue
+		if hidden:
+			if not _hidden_orig.has(s):
+				_hidden_orig[s] = mesh_mi.get_surface_override_material(s)
+			mesh_mi.set_surface_override_material(s, _invisible_mat)
+		elif _hidden_orig.has(s):
+			mesh_mi.set_surface_override_material(s, _hidden_orig[s])
+			_hidden_orig.erase(s)
+
 ## --- Drop shadow ------------------------------------------------------------
 ##
 ## Retail's cGranny::renderShadow (0x80FDBDC, decompiled) re-draws the
@@ -551,8 +591,12 @@ func enable_drop_shadow(foot_y: float, ground_z: float) -> void:
 	if _shadow_mat == null:
 		_shadow_mat = ShaderMaterial.new()
 		_shadow_mat.shader = SHADOW_SHADER
+		# k recalibrated 2026-08-30 (0.2 -> 0.1): with the base shoes batch
+		# emitted, 0.2 let its squashed shadow vertices overshoot the foot
+		# line as dark spikes; 0.05 flattens the blob smaller than retail's,
+		# 0.1 is the compromise (findings row with this change).
 		_shadow_mat.set_shader_parameter("k",
-			float(OS.get_environment("SHADOW_K")) if OS.get_environment("SHADOW_K") != "" else 0.2)
+			float(OS.get_environment("SHADOW_K")) if OS.get_environment("SHADOW_K") != "" else 0.1)
 		_shadow_mat.set_shader_parameter("alpha",
 			float(OS.get_environment("SHADOW_ALPHA")) if OS.get_environment("SHADOW_ALPHA") != "" else 0.45)
 	for old in _shadow_instances:
