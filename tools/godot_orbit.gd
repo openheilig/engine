@@ -54,9 +54,13 @@ func _init() -> void:
 	for g in groups:
 		var mi := MeshInstance3D.new()
 		mi.mesh = g["mesh"]
+		# Retail's character lighting (player_view.gd _style): UNSHADED with the
+		# full-light ramp constant -- no directional shading, or down-facing
+		# normals (legs, back) go dark the way retail never draws them.
 		var mat := StandardMaterial3D.new()
 		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		mat.roughness = 0.85
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(191.0 / 255.0, 191.0 / 255.0, 213.0 / 255.0)
 		var tex_path: String = g["texture"]
 		if tex_path != "":
 			var img := Image.load_from_file(tex_path)
