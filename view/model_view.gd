@@ -474,6 +474,7 @@ func attach_skinned(models: Sacred.Models, entry: int, texture: int = -1) -> Mes
 	# a wider measurement than five pieces to set a cut on.
 	var skin := Skin.new()
 	var agreed := 0
+	var uses_foot := false
 	for i in piece._skin.get_bind_count():
 		var pb := piece._skin.get_bind_bone(i)
 		var nm := piece._skeleton.get_bone_name(pb)
@@ -482,12 +483,27 @@ func attach_skinned(models: Sacred.Models, entry: int, texture: int = -1) -> Mes
 			piece.free()
 			worn_refused += 1
 			return null
+		if nm.ends_with("Foot"):
+			uses_foot = true
 		var pr := piece._skeleton.get_bone_rest(pb)
 		var wr := _skeleton.get_bone_rest(b)
 		if pr.origin.distance_to(wr.origin) < FIT_WITHIN \
 				and pr.basis.get_rotation_quaternion().angle_to(wr.basis.get_rotation_quaternion()) < FIT_WITHIN:
 			agreed += 1
-		skin.add_bind(b, _skeleton.get_bone_global_rest(b).affine_inverse())
+	# Foot-weighted garments (boots) sit far from the wearer's rest for their
+	# weighted bones (row 1121: 1/4 agree), so the wearer-rest bind leaves them
+	# at the piece's authored floor position -- on the ground. Those retarget
+	# through the piece's own rest inverse, the granny name-remap; vertices
+	# weighted to a single bone are rigid with that bone under it, which is
+	# where they must land. Multi-bone upper garments keep the wearer-rest
+	# bind row 1122 calibrated against retail's pixels.
+	for i in piece._skin.get_bind_count():
+		var pb := piece._skin.get_bind_bone(i)
+		var b := _skeleton.find_bone(piece._skeleton.get_bone_name(pb))
+		if uses_foot:
+			skin.add_bind(b, piece._skeleton.get_bone_global_rest(pb).affine_inverse())
+		else:
+			skin.add_bind(b, _skeleton.get_bone_global_rest(b).affine_inverse())
 	if agreed == 0:
 		# This garment was cut for a different body. Refused rather than bound
 		# to a skeleton whose bones sit somewhere else.
