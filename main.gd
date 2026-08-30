@@ -990,6 +990,12 @@ func _door_transition(goal: Vector2i) -> bool:
 	if destination == Vector2i(-1, -1):
 		return false
 	actor.cell = Vector2(destination) + Vector2(0.5, 0.5)
+	if inside:
+		# The teleport skips the authored STEP cell a walking exit would
+		# tick; restore the left building to EXTERIOR explicitly, or its
+		# roof stays off while the hero stands outside (measured,
+		# drive-swapfix: derive never sees the STEP edge through the jump).
+		_sim.interior.restore_remembered()
 	print("door_transition\tcell=%d,%d\tfrom=%s\tto=%d,%d" % [
 		goal.x, goal.y, Interior.state_name(Interior.State.INTERIOR if inside else Interior.State.EXTERIOR),
 		destination.x, destination.y])

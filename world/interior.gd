@@ -144,6 +144,20 @@ func derive(cell: Vector2) -> void:
 		_remembered = resolved
 
 
+## The door-teleport path (main.gd's _door_transition) moves the actor past
+## the authored STEP cell a walking exit would tick, so derive() never sees
+## the STEP edge and the left building stays INTERIOR -- its roof stays off
+## while the hero stands outside (measured 2026-08-30, drive-swapfix: the
+## trace flips EXTERIOR->INTERIOR at spawn and never back). The caller
+## invokes this after an OUTWARD crossing: the remembered building returns
+## to EXTERIOR, exactly what the STEP edge in derive() does.
+func restore_remembered() -> void:
+	if _remembered.is_empty():
+		return
+	_set_group(_remembered, State.EXTERIOR, _regions, Vector2i.ZERO)
+	_remembered = []
+
+
 ## Applies one whole-complex state change, recording the per-key transitions.
 func _set_group(group: Array, state: int, candidates: Dictionary, ci: Vector2i) -> void:
 	for key: int in group:
