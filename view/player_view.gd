@@ -305,6 +305,14 @@ func _style(mesh: MeshInstance3D) -> void:
 		# the right INPUT and the ramp is what would bring the top end down.
 		#
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		# ...AND THE RAMP, WHICH IS THE OTHER HALF OF THAT MECHANISM.
+		#
+		# sub_41B5B0 indexes three 256-entry per-channel tables with its
+		# accumulated light scalar. Their BUILDER is sub_417FA0 at 0x4188C0-0x4189ED:
+		# one loop, i from 0 to 255, filling all six tables (two sets of three) from
+		# four float constants, which read 0.25 (flt_88F7C4), 64.0 (flt_88F914),
+		# 1/3 (flt_88F910) and 0.75 (flt_88F90C):
+		#
 		# NO DEPTH TEST, BECAUSE A CHARACTER IS A UNIT, NOT TERRAIN (row 1014).
 		#
 		# The rig is true 3D: placed at the cell, the Seraphim's body spans
@@ -361,6 +369,11 @@ func _style(mesh: MeshInstance3D) -> void:
 		# finally at matching size, the port read BRIGHTER than retail at every
 		# percentile of the hero mask (p10 through p90, ratios 1.18 to 1.53), and
 		# 1/0.749 = 1.34 sits inside that band.
+		# POST-RAMP MEASUREMENT (2026-08-30, same segmentation instrument as the
+		# overshoot numbers above): hero-mask V percentiles -- port p10/p50/p90 =
+		# 51/136/204 against retail 31/115/214. The top-end overshoot is closed
+		# (p90 -4.7%); the low end runs brighter than retail's, which is the
+		# shadow-side difference the per-rig light evaluation below is for.
 		mat.albedo_color = RETAIL_LIGHT_FULL
 
 
