@@ -111,6 +111,23 @@ const RETAIL_HUMANOID_PX := 133.0
 ## four float constants are transcribed; spelled as a constant here so the call
 ## site is not three magic fractions.
 const RETAIL_LIGHT_FULL := Color(191.0 / 255.0, 191.0 / 255.0, 213.0 / 255.0)
+## The character light SCALAR feeding that ramp. The port historically
+## applied i=255 (full); retail's own start-scene hero measures materially
+## darker -- sub_41B510 (the 2.28 twin of the 2.30 sub_41B5B0 note, in
+## analysis/decomp/win228eng chunks/00002) evaluates base ambient 32 plus
+## per-light `radius - distance + 32` contributions over the renderer's
+## light array, and the chapel's candles put the hero well below full.
+## MEASURED, not derived: HERO_LIGHT sweeps against the masked hero box
+## (the same instrument that calibrated the shadow constants). Upgrade
+## path: port the light-list evaluation itself -- the corpus has the
+## whole chain (this+40464 records, sub_41C480 init).
+const HERO_LIGHT := 145
+## The ramp evaluated at HERO_LIGHT: R = G = floor(i*0.25 + base + 64),
+## B = floor(i*(1/3) + base + 64), base = 64 at the brightness maximum.
+static func _ramp_color(i: int) -> Color:
+	var r := floori(float(i) * 0.25 + 128.0)
+	var b := floori(float(i) / 3.0 + 128.0)
+	return Color(float(r) / 255.0, float(r) / 255.0, float(b) / 255.0)
 ## Preloaded by PATH rather than referenced by class_name -- see the note at
 ## the top of rig_placement.gd.
 const RigPlacementScript := preload("res://view/rig_placement.gd")
@@ -374,7 +391,13 @@ func _style(mesh: MeshInstance3D) -> void:
 		# 51/136/204 against retail 31/115/214. The top-end overshoot is closed
 		# (p90 -4.7%); the low end runs brighter than retail's, which is the
 		# shadow-side difference the per-rig light evaluation below is for.
-		mat.albedo_color = RETAIL_LIGHT_FULL
+		# The scalar defaults to the MEASURED HERO_LIGHT; HERO_LIGHT env
+		# overrides for calibration sweeps (the shadow knobs' pattern).
+		var light_i := HERO_LIGHT
+		var env_i := OS.get_environment("HERO_LIGHT")
+		if env_i != "":
+			light_i = int(env_i)
+		mat.albedo_color = _ramp_color(light_i)
 
 
 ## Every MeshInstance3D under `n`, styled. A worn piece is a whole ModelView
@@ -402,9 +425,9 @@ func update(cell: Vector2) -> void:
 	# flag, so there is no opt-in here either.
 	if not _shadow_on:
 		_shadow_on = true
-		(node as ModelView).enable_drop_shadow(p.y, ground_z)
+		(node as ModelView).enable_drop_shadow(p.x, p.y, ground_z)
 	else:
-		(node as ModelView).update_shadow_ground(p.y, ground_z)
+		(node as ModelView).update_shadow_ground(p.x, p.y, ground_z)
 
 	if _skeleton == null or _root_bones.is_empty() or _placement == null:
 		return

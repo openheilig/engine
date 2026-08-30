@@ -585,7 +585,7 @@ const SHADOW_FOOT_LIFT := 39.0   ## measured: rendered feet sit 39 above the cel
 var _shadow_mat: ShaderMaterial = null
 var _shadow_instances: Array[MeshInstance3D] = []
 
-func enable_drop_shadow(foot_y: float, ground_z: float) -> void:
+func enable_drop_shadow(foot_x: float, foot_y: float, ground_z: float) -> void:
 	if _skeleton == null:
 		return
 	if _shadow_mat == null:
@@ -599,6 +599,10 @@ func enable_drop_shadow(foot_y: float, ground_z: float) -> void:
 			float(OS.get_environment("SHADOW_K")) if OS.get_environment("SHADOW_K") != "" else 0.1)
 		_shadow_mat.set_shader_parameter("alpha",
 			float(OS.get_environment("SHADOW_ALPHA")) if OS.get_environment("SHADOW_ALPHA") != "" else 0.45)
+		# Lateral stretch about the character's axis: retail's blob measures
+		# ~105 px wide, wider than the body a pure squash can cover.
+		_shadow_mat.set_shader_parameter("stretch",
+			float(OS.get_environment("SHADOW_STRETCH")) if OS.get_environment("SHADOW_STRETCH") != "" else 2.2)
 	for old in _shadow_instances:
 		if is_instance_valid(old):
 			old.queue_free()
@@ -617,12 +621,13 @@ func enable_drop_shadow(foot_y: float, ground_z: float) -> void:
 			dup.visible = false   # the gate's hide-arm: diff frames with/without
 		_skeleton.add_child(dup)
 		_shadow_instances.append(dup)
-	update_shadow_ground(foot_y + SHADOW_FOOT_LIFT, ground_z)
+	update_shadow_ground(foot_x, foot_y + SHADOW_FOOT_LIFT, ground_z)
 
 ## The foot line moves with the character (placement + idle bounce).
-func update_shadow_ground(foot_y: float, ground_z: float) -> void:
+func update_shadow_ground(foot_x: float, foot_y: float, ground_z: float) -> void:
 	if _shadow_mat == null:
 		return
+	_shadow_mat.set_shader_parameter("foot_x", foot_x)
 	_shadow_mat.set_shader_parameter("foot_y", foot_y)
 	_shadow_mat.set_shader_parameter("ground_z", ground_z)
 
