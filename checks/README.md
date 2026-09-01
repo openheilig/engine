@@ -10,8 +10,18 @@ godot --headless --path . --script res://checks/<name>.gd
 
 Every one states its own question and command line in its header comment.
 
-**All 43 pass, and every one needs nothing but the retail install** — measured
-by running the loop below end to end on 2026-08-25.
+~~**All 43 pass, and every one needs nothing but the retail install** —
+measured by running the loop below end to end on 2026-08-25.~~
+**STALE since before 2026-09-01:** `clip_layout_check` is RED on master —
+`HORS_DYING_A.GRN`, its own pinned sampled-variant entry, refuses to
+decode (`Models.clip: entry … not a walkable motion entry`), failing the
+check's line-94 assert. Stash-proven pre-existing: identical failure on
+the tree before the interpolation commit (2d52ff6) touched either file it
+did. Logged as an open decoder defect (findings row 1220,
+open-questions.md); everything else in this directory passed the loop the
+last time it was run end to end. The lesson this file itself teaches
+applies to its own claim: a README that describes a gate as green hides a
+gate that has gone red.
 
 This file used to say that `pax_check` was the exception, needing a
 third-party `$SACRED_CHARS` corpus and exiting 1 without one. That stopped
