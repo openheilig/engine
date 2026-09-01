@@ -1845,6 +1845,20 @@ const ANIM_RECORD_HEADER := 52
 const ANIM_OFF_NUM_TRANSLATES := 24
 const ANIM_OFF_NUM_QUATERNIONS := 28
 const ANIM_OFF_NUM_UNKNOWNS := 32
+## Interpolation modes (+0x0C/+0x10/+0x14) and knot-time selectors
+## (+0x24/+0x28/+0x2C) of the 52-byte header. Corpus census 2026-09-01
+## (row 1219): position and quaternion modes are 2 (quadratic corner-cutting
+## B-spline) on ALL 255,461 ordinary tracks; scale-shear splits 1:171,384 /
+## 2:82,815 / 0:1,262; mode 3 never occurs. Selectors distinguish the three
+## knot-time vectors; the times are stored per channel either way, so a
+## consumer reads the arrays and does not need to chase the selector.
+const ANIM_OFF_POS_MODE := 12
+const ANIM_OFF_QUAT_MODE := 16
+const ANIM_OFF_SCALE_MODE := 20
+const ANIM_OFF_POS_TSEL := 36
+const ANIM_OFF_QUAT_TSEL := 40
+const ANIM_OFF_SCALE_TSEL := 44
+
 ## THERE IS NO TRAILER. This constant and its bimodal 48/72 successor were
 ## both wrong, and row 767 says why: the residual they were absorbing is
 ## 24 * numUnknowns, so it is not a fixed block at all. See
@@ -2154,11 +2168,16 @@ func _clip_ordinary_record(entry: int, buf: PackedByteArray, dir: Array[Dictiona
 		return {}
 	if off + ANIM_OFF_NUM_UNKNOWNS + 4 > buf.size():
 		push_error("Models.clip: entry %d record %d too short to read its count fields" % [entry, ridx])
-		return {}
 	var rid := buf.decode_u32(off)
+	var pos_mode := buf.decode_u32(off + ANIM_OFF_POS_MODE)
+	var quat_mode := buf.decode_u32(off + ANIM_OFF_QUAT_MODE)
+	var scale_mode := buf.decode_u32(off + ANIM_OFF_SCALE_MODE)
 	var nt := buf.decode_u32(off + ANIM_OFF_NUM_TRANSLATES)
 	var nq := buf.decode_u32(off + ANIM_OFF_NUM_QUATERNIONS)
 	var nu := buf.decode_u32(off + ANIM_OFF_NUM_UNKNOWNS)
+	var pos_tsel := buf.decode_u32(off + ANIM_OFF_POS_TSEL)
+	var quat_tsel := buf.decode_u32(off + ANIM_OFF_QUAT_TSEL)
+	var scale_tsel := buf.decode_u32(off + ANIM_OFF_SCALE_TSEL)
 	if nt > MAX_KEYFRAMES or nq > MAX_KEYFRAMES or nu > MAX_KEYFRAMES:
 		push_error("Models.clip: entry %d record %d declares a count above MAX_KEYFRAMES (nt=%d nq=%d nu=%d)" % [
 			entry, ridx, nt, nq, nu])
@@ -2228,6 +2247,10 @@ func _clip_ordinary_record(entry: int, buf: PackedByteArray, dir: Array[Dictiona
 		"id": rid, "times_pos": times_pos, "times_rot": times_rot,
 		"times_other": times_other, "positions": positions,
 		"rotations": rotations, "others": others,
+		"pos_mode": pos_mode, "quat_mode": quat_mode,
+		"scale_mode": scale_mode,
+		"pos_tsel": pos_tsel, "quat_tsel": quat_tsel,
+		"scale_tsel": scale_tsel,
 	}
 
 ## One sampled record, in the SAME shape the variable-length path returns so
@@ -2278,7 +2301,13 @@ func _clip_sampled_record(entry: int, buf: PackedByteArray, dir: Array[Dictionar
 		others[i] = f
 	return {"id": buf.decode_u32(off), "times_pos": times, "times_rot": times,
 		"times_other": times, "positions": positions, "rotations": rotations,
-		"others": others}
+		"others": others,
+		# A sampled record declares no modes and no selectors: its keys are
+		# dense whole-pose frames, and linear between adjacent frames is the
+		# only reading. The fields exist so both record shapes carry the same
+		# keys and a consumer never has to probe.
+		"pos_mode": 1, "quat_mode": 1, "scale_mode": 1,
+		"pos_tsel": -1, "quat_tsel": -1, "scale_tsel": -1}
 
 ## The rule 05-02 measured: the maximum, across all records, of that
 ## record's last translate-track time. 0.0 for a non-clip or any malformed

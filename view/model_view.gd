@@ -1230,6 +1230,104 @@ func _fill_weights(models: Sacred.Models, entry: int, m: Dictionary, arr: Array)
 ## find_bone(name) PLUS ONE instead of the exact match; "drop" skips the name
 ## lookup entirely and binds every track to skeleton bone 0. Both are for
 ## --anim-falsify= only and must never run outside that flag.
+
+# ---------------------------------------------------------------------
+## Interpolation mode 2, decoded 2026-09-01 (row 1219): a corner-cutting
+## quadratic B-spline. The keys are CONTROL POINTS, not points on the curve
+## -- at each knot the curve equals the time-weighted blend of that knot's
+## two neighbours (uniform case: their average), and the value inside a span
+## is a three-key weighted blend.open-grn's runtime sampler documents the
+## exact basis and the vendor pads (leading time pads so every real key has
+## two left neighbours; trailing duplicates) pin the first/last key times to
+## k0/kLast exactly -- which is what keeps anim_check's t=0-is-bind-pose
+## property true under this reading. Corpus: position and quaternion mode is
+## 2 on ALL 255,461 ordinary tracks; even key counts exist (9,956 position
+## records), which REFUTES the rival Bézier-triples reading needing odd
+## counts; all recorded key times are strictly ascending, which is all this
+## basis needs.
+##
+## Godot Animation tracks interpolate linearly through keys and offer no
+## custom basis, so the curve is honoured by SUBDIVISION: QUAD_SUBDIV linear
+## keys per key span. ponytail: subdivision error falls as 1/S^2 and S=8 is
+## already orders of magnitude below a pixel at any camera distance; the
+## upgrade is an exact evaluation track if Godot ever grows one.
+const QUAD_SUBDIV := 8
+
+static func _quad_weights(ta: float, tb: float, tc: float, td: float,
+		t: float) -> Vector3:
+	## The runtime's quadratic basis over the bracket (tb, tc) with the
+	## neighbouring control times ta and td. Returns (-1, 0, 0) as the
+	## refuse signal -- the caller falls back to the linear path.
+	if tc - tb <= 0.0 or tc - ta <= 0.0:
+		return Vector3(-1, 0, 0)
+	var f1 := (t - tb) / (tc - tb)
+	var f2 := (t - ta) / (tc - ta)
+	var g := f1 + f2 - f1 * f2
+	var h := 0.0
+	if td > tb:
+		h = ((t - tb) / (td - tb)) * f1
+	return Vector3(1.0 - g, g - h, h)
+
+func _resample_quad_rot(times: PackedFloat32Array, keys: Array) -> Array:
+	## One mode-2 rotation channel -> [t, Quaternion] pairs at QUAD_SUBDIV
+	## per span. [] = refused (non-ascending times); caller falls back loud.
+	var out: Array = []
+	var n := times.size()
+	if n == 0:
+		return out
+	for i in range(1, n):
+		if times[i] <= times[i - 1]:
+			push_error("ModelView: mode-2 track has non-ascending times at key %d" % i)
+			return []
+	for j in n - 1:
+		var ia := maxi(j - 1, 0)
+		var ic := mini(j + 1, n - 1)
+		var idd := mini(j + 2, n - 1)
+		var ta: float = times[ia]
+		var td: float = times[idd]
+		var ka: Quaternion = keys[ia]
+		var kb: Quaternion = keys[j]
+		var kc: Quaternion = keys[ic]
+		# The runtime aligns each neighbour to the bracket's upper key
+		# hemisphere before blending; without this a crossing q sign
+		# flips the curve mid-span.
+		if ka.dot(kc) < 0.0:
+			ka = -ka
+		if kb.dot(kc) < 0.0:
+			kb = -kb
+		for s in QUAD_SUBDIV:
+			var t: float = lerpf(times[j], times[ic], float(s) / QUAD_SUBDIV)
+			var w := _quad_weights(ta, times[j], times[ic], times[idd], t)
+			out.append([t, (w.x * ka + w.y * kb + w.z * kc).normalized()])
+	out.append([times[n - 1], keys[n - 1]])
+	return out
+
+func _resample_quad_pos(times: PackedFloat32Array, keys: PackedVector3Array) -> Array:
+	## The position-channel twin of _resample_quad_rot (no hemisphere fix).
+	var out: Array = []
+	var n := times.size()
+	if n == 0:
+		return out
+	for i in range(1, n):
+		if times[i] <= times[i - 1]:
+			push_error("ModelView: mode-2 position track has non-ascending times at key %d" % i)
+			return []
+	for j in n - 1:
+		var ia := maxi(j - 1, 0)
+		var ic := mini(j + 1, n - 1)
+		var idd := mini(j + 2, n - 1)
+		var ta: float = times[ia]
+		var td: float = times[idd]
+		var ka: Vector3 = keys[ia]
+		var kb: Vector3 = keys[j]
+		var kc: Vector3 = keys[ic]
+		for s in QUAD_SUBDIV:
+			var t: float = lerpf(times[j], times[ic], float(s) / QUAD_SUBDIV)
+			var w := _quad_weights(ta, times[j], times[ic], times[idd], t)
+			out.append([t, w.x * ka + w.y * kb + w.z * kc])
+	out.append([times[n - 1], keys[n - 1]])
+	return out
+
 func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "") -> Dictionary:
 	var fail := {"animation": null, "bound": 0, "tracks": 0, "unbound_names": PackedStringArray()}
 	if _skeleton == null:
@@ -1276,8 +1374,22 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 		if times_pos.size() > 0 and BIND_POSITION_TRACKS:
 			var pt := anim.add_track(Animation.TYPE_POSITION_3D)
 			anim.track_set_path(pt, path)
-			for i in times_pos.size():
-				anim.position_track_insert_key(pt, times_pos[i], positions[i])
+			var pos_keys: Array = []
+			var pos_mode: int = int(r.get("pos_mode", 1))
+			if pos_mode == 2:
+				pos_keys = _resample_quad_pos(times_pos, positions)
+				if pos_keys.is_empty():
+					pos_mode = 1  # refusal logged at the resampler
+			if pos_mode == 2:
+				for pair in pos_keys:
+					anim.position_track_insert_key(pt, pair[0], pair[1])
+			else:
+				if pos_mode == 0:
+					anim.track_set_interpolation_type(pt, Animation.INTERPOLATION_NEAREST)
+				elif pos_mode > 1:
+					push_error("ModelView.build_animation: position mode %d is outside the decoded corpus (0..2); playing linear" % pos_mode)
+				for i in times_pos.size():
+					anim.position_track_insert_key(pt, times_pos[i], positions[i])
 			tracks += 1
 		var times_rot: PackedFloat32Array = r["times_rot"]
 		var rotations: Array = r["rotations"]
@@ -1298,26 +1410,34 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 			# replay it on the model's rest:
 			#
 			#   pose = model_rest * (clip_rest^-1 * key)
-			#
-			# At t=0 a clip's first key is its rest (measured: 5855 of 5916
-			# unambiguous records), so the delta is the identity and the pose is
-			# exactly the bind pose -- the property that was violated before and
-			# that anim_check.gd now pins.
 			var clip_rest: Quaternion = ((clip_bone_list[bi]["rest"] as Transform3D)
 				.basis.get_rotation_quaternion()).normalized()
 			var model_rest: Quaternion = (_skeleton.get_bone_rest(skel_idx)
 				.basis.get_rotation_quaternion()).normalized()
 			var retarget := model_rest * clip_rest.inverse()
-			for i in times_rot.size():
-				# clip() only checks unit-length to within ANIM_QUAT_EPS
-				# (0.07 -- a decode-validity discriminator, not a precision
-				# claim). Godot's own rotation-track interpolation demands
-				# an exact unit quaternion and logs an ERROR per sampled
-				# frame otherwise; normalized() re-scales the SAME
-				# already-accepted rotation rather than changing what was
-				# decoded or loosening what clip() itself checks.
-				anim.rotation_track_insert_key(rt, times_rot[i],
-					(retarget * (rotations[i] as Quaternion).normalized()).normalized())
+			var rot_keys: Array = []
+			var quat_mode: int = int(r.get("quat_mode", 1))
+			if quat_mode == 2:
+				rot_keys = _resample_quad_rot(times_rot, rotations)
+				if rot_keys.is_empty():
+					quat_mode = 1  # refusal logged at the resampler
+			if quat_mode == 2:
+				for pair in rot_keys:
+					anim.rotation_track_insert_key(rt, pair[0],
+						(retarget * (pair[1] as Quaternion).normalized()).normalized())
+			else:
+				if quat_mode == 0:
+					anim.track_set_interpolation_type(rt, Animation.INTERPOLATION_NEAREST)
+				elif quat_mode > 1:
+					push_error("ModelView.build_animation: rotation mode %d is outside the decoded corpus (0..2); playing linear" % quat_mode)
+				# clip() only checks unit-length to within a decode
+				# discriminator, not a precision claim; Godot's rotation
+				# tracks demand exact units and log per frame otherwise.
+				# normalized() re-scales the SAME already-accepted rotation
+				# rather than changing what was decoded.
+				for i in times_rot.size():
+					anim.rotation_track_insert_key(rt, times_rot[i],
+						(retarget * (rotations[i] as Quaternion).normalized()).normalized())
 			tracks += 1
 
 	return {"animation": anim, "bound": bound, "tracks": tracks, "unbound_names": unbound}
