@@ -7,6 +7,10 @@ extends RefCounted
 ##   +0x08 u32  flags, 9 distinct values
 ##   +0x0e i32  ox   <- NOT 4-byte aligned
 ##   +0x12 i32  oy   <- NOT 4-byte aligned
+##   +0x2e..0x32 u8[5] miniature parameters when flags & 0x20:
+##     without 0x40: atlas x, atlas y, square size (pixels); last two unused
+##     with 0x40: columns, rows, rotation (1/256 turn), timing divisor, frames
+##   The +0x2b visibility/collision mask is independent of those parameters.
 ##
 ## ox/oy are absolute isometric SCREEN coordinates: ox = 48*(cx-cy),
 ## oy = 24*(cx+cy) plus a sub-cell offset. They, not the referencing cell, are
@@ -22,8 +26,9 @@ func _init(pak: Pak) -> void:
 func count() -> int:
 	return _pak.count()
 
-## Sacred.Walkable._door_decision needs the blocker's +0x08 / +0x1f / +0x27
-## / +0x2b bytes directly; delegating to Sacred.Pak.blob() is the only path
+## The +0x08 / +0x1f / +0x27 / +0x2b fields are exposed raw because more
+## than one consumer reads them (equipment/dressing weighting and the
+## interior support path); delegating to Sacred.Pak.blob() is the only path
 ## that does not double-cache the whole archive.
 func blob(i: int) -> PackedByteArray:
 	if i <= 0 or i >= _pak.count():
@@ -63,10 +68,10 @@ func chain(i: int) -> Array[Dictionary]:
 		if o.is_empty():
 			break
 		out.append(o)
-		cur = _pak.blob(cur).decode_u32(NEXT_OFF)
+		cur = o["next"]
 	return out
 
-## {type, flags, pos} for a static index, or an empty Dictionary if absent.
+## {type, flags, mask, pos, miniature} for a static index, or {} if absent.
 func get_object(i: int) -> Dictionary:
 	if i <= 0 or i >= _pak.count():
 		return {}
@@ -74,8 +79,17 @@ func get_object(i: int) -> Dictionary:
 	if r.size() < 64:
 		return {}
 	return {
+		"id": i,
+		"sector": r.decode_u16(12),
+		"child_head": r.decode_u32(23),
+		"parent": r.decode_u32(27),
+		"next": r.decode_u32(31),
+		"trigger": r.decode_u32(39),
+		"region_ordinal": r[45],
 		"type": r.decode_u32(4),
 		"flags": r.decode_u32(8),
+		"mask": r.decode_u16(0x2b),
+		"miniature": r.slice(46, 51) if (r.decode_u32(8) & 0x20) != 0 else PackedByteArray(),
 		# Godot's Y is up, Sacred's screen Y is down.
 		"pos": Vector2(r.decode_s32(0x0e), -r.decode_s32(0x12)),
 	}
