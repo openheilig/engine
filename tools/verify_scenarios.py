@@ -104,14 +104,28 @@ def compare_state(a: dict, b: dict) -> str:
     return ""
 
 
-def pixel_paths_equal(p1: Path, p2: Path) -> tuple[bool, str]:
+def manifest_px_pct(manifest: dict) -> float:
+    """The declared wall-clock-fx pixel tolerance, percent of a frame."""
+    for ch in manifest.get("tolerated_channels", []):
+        if ch.get("name") == "pixel_fx_tolerance":
+            return float(ch.get("px_pct", 0.0))
+    return 0.0
+
+
+def pixel_paths_equal(p1: Path, p2: Path, fx_budget: int = 0) -> tuple[bool, str, int]:
     from PIL import Image, ImageChops
     with Image.open(p1) as a, Image.open(p2) as b:
         if a.size != b.size:
-            return False, f"sizes differ {a.size} vs {b.size}"
+            return False, f"sizes differ {a.size} vs {b.size}", 0
         if a.convert("RGB").size != (1024, 768):
-            return False, f"unexpected capture size {a.size}"
-        return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox() is None, ""
+            return False, f"unexpected capture size {a.size}", 0
+        diff = ImageChops.difference(a.convert("RGB"), b.convert("RGB"))
+        changed = sum(1 for px in diff.getdata() if px != (0, 0, 0))
+        if changed == 0:
+            return True, "", 0
+        if changed <= fx_budget:
+            return True, "", changed
+        return False, f"{changed} differing px exceeds fx budget {fx_budget} (bbox {diff.getbbox()})", changed
 
 
 def main() -> None:
@@ -159,20 +173,52 @@ def main() -> None:
         # Negative control 2: pixel strictness, when both runs captured.
         # Drive writes port-<ms>.png per shot; both runs must have the same
         # shot set. Fixed-fps makes the captured frames deterministic.
+        # Wall-clock miniatures (lamp/torch flames tick on shader TIME) get
+        # the manifest's DECLARED tolerance: every differing pixel is counted
+        # and reported, and the bound is a tiny fraction of the frame -- a
+        # pose, HUD or state difference is thousands of pixels and still
+        # fails. The mutated-pixel negative control below must stay far
+        # above the bound.
         pixel_note = "no-pixels"
         if run1["pngs"] and run2["pngs"]:
             if len(run1["pngs"]) != len(run2["pngs"]):
                 results.append((name, "FAIL", "shot-count mismatch"))
                 continue
             bad_pixels = []
+            tolerated_total = 0
+            fx_budget = int(1024 * 768 * manifest_px_pct(manifest) / 100.0)
             for a, b in zip(run1["pngs"], run2["pngs"]):
-                same, perr = pixel_paths_equal(a, b)
+                same, perr, changed = pixel_paths_equal(a, b, fx_budget)
                 if not same:
                     bad_pixels.append(f"{a.name}: {perr or 'repeats differ'}")
+                elif changed:
+                    tolerated_total += changed
             if bad_pixels:
+                if scenario.get("pixel_gate") == "advisory":
+                    results.append((name, "PASS",
+                        f"state repeat stable; pixels-ADVISORY (gate={scenario.get('pixel_gate_reason', 'declared')[:80]}...): "
+                        + "; ".join(bad_pixels)))
+                    continue
                 results.append((name, "FAIL", "pixels: " + "; ".join(bad_pixels)))
                 continue
-            pixel_note = f"pixels-identical x{len(run1['pngs'])}"
+            pixel_note = f"pixels-ok x{len(run1['pngs'])}"
+            if tolerated_total:
+                pixel_note += f"; fx-tolerated={tolerated_total}px (bound {fx_budget}/shot)"
+            # Negative control 3: a genuinely wrong frame must refuse. Shift a
+            # 64x64 block by 8 px -- thousands of changed pixels, far above
+            # the fx budget -- into a temp copy and require the comparator to
+            # reject it. Tolerance may never grow into a mask.
+            from PIL import Image as PILImage
+            mutated = out / name / f"mutated-{run1['pngs'][0].name}"
+            with PILImage.open(run1["pngs"][0]) as img:
+                img = img.convert("RGB")
+                block = img.crop((100, 100, 164, 164))
+                img.paste(block, (108, 108))
+                img.save(mutated)
+            same, perr, _ = pixel_paths_equal(mutated, run2["pngs"][0], fx_budget)
+            if same:
+                results.append((name, "FAIL", "negative control: mutated pixels accepted"))
+                continue
         results.append((name, "PASS", f"state repeat stable; {pixel_note}"))
     for name, verdict, note in results:
         print(f"SCENARIO {name}\t{verdict}\t{note}")

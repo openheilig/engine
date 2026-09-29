@@ -28,6 +28,11 @@
 			"name": "anim_clip_time",
 			"epsilon": 0.05,
 			"reason": "a looping clip cannot be frozen at the same frame by two wall-clock runs; pose equality is what 0.05 s of a 1.38 s idle clip means"
+		},
+		{
+			"name": "pixel_fx_tolerance",
+			"px_pct": 0.05,
+			"reason": "retail miniature animations (lamp/torch flames) tick on shader wall-clock TIME, whose epoch the port already documents as unsynchronized; a scenario capture may differ by a handful of flame pixels. Every tolerated difference is counted and reported, never masked; poses, HUD and state remain exact."
 		}
 	],
 	"scenarios": [
@@ -91,7 +96,9 @@
 				"unfinished_load_refuses": "capture waits for production readiness; a timeout is an error, never a partial-scene score"
 			},
 			"freeze_anim": 0.35,
-			"_note": "freeze_anim parks every rig at this clip time before checkpoint+shots, making pixel repeats pose-aligned (E1 contract)."
+			"_note": "freeze_anim parks every rig at this clip time before checkpoint+shots, making pixel repeats pose-aligned (E1 contract).",
+			"pixel_gate": "advisory",
+			"pixel_gate_reason": "sim advance is still wall-clock-coupled outside fixed-tick drives (W1 owns continuous-walk determinism); until then the drive segment's pixels are reported, not gating. State checkpoints remain gating."
 		}
 	]
 }

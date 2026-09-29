@@ -164,7 +164,17 @@ static func run(host: Node, argv: Array) -> void:
 	if not await host._await_settled():
 		return
 
+	# E1: --drive-clock=frames makes the WHOLE timeline count engine frames
+	# (16.67 ms each, the fixed-fps step) instead of wall-clock ms. Under
+	# --fixed-fps the simulation advances per frame, so a wall-clock timeline
+	# fires its clicks at sim times that depend on the machine's frame rate
+	# -- two runs click at different ticks and compare different walks. A
+	# frame clock is deterministic by construction; a throughput measurement
+	# must never use it (Q0), which is why it is opt-in per run.
+	var frame_clock := "--drive-clock=frames" in argv
+	const FRAME_MS := 1000.0 / 60.0
 	var t0 := Time.get_ticks_msec()
+	var frames := 0
 	var last_ms: int = 0
 	for s in steps:
 		last_ms = maxi(last_ms, int(s["ms"]))
@@ -177,12 +187,15 @@ static func run(host: Node, argv: Array) -> void:
 	var pos := Vector2(RETAIL_W, RETAIL_H) * 0.5
 	var releases: Array[Dictionary] = []   ## scheduled key-ups: {ms, name, is_action}
 
-	print("drive\tsteps=%d\tshots=%d\tout=%s" % [steps.size(), shots.size(), out])
+	print("drive\tsteps=%d\tshots=%d\tout=%s%s" % [steps.size(), shots.size(), out,
+		"\tclock=frames" if frame_clock else ""])
 	while true:
 		await RenderingServer.frame_post_draw
 		if not is_instance_valid(host):
 			return
-		var t := Time.get_ticks_msec() - t0
+		frames += 1
+		var t := int(round(frames * FRAME_MS)) if frame_clock \
+			else Time.get_ticks_msec() - t0
 
 		while si < steps.size() and int(steps[si]["ms"]) <= t:
 			var step: Dictionary = steps[si]
