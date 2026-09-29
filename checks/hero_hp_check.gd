@@ -15,19 +15,36 @@ extends "res://checks/check.gd"
 ##                 * base^(span*0.0039963233 + 1.5)
 ##                 * 0.3225806451612903 )
 ##
-## The field NAMES stay offset-based on purpose: the creature initializer's
-## two attribute orders differ, and the b74/b80 -> template-attribute join
-## has not been observed. Inputs are BLOCK OFFSETS, not named attributes.
-## The creature tail (difficulty re-scale) is deliberately NOT here.
+## The field NAMES are now JOINED, two classes discriminating the mapping:
+## b74 = STK (attribute 0), b80 = REPHY (attribute 3):
+##   Seraphim  attrs[STK,REPHY] = (22,22), live b74/b80 = 22/22, max 119
+##   Gladiator attrs[STK,REPHY] = (33,25), live b74/b80 = 33/25, max 147
+## (b80 disambiguates on the Gladiator: only REPHY is 25 there.) The check
+## below re-derives the join from the templates themselves, so a template
+## edit cannot silently invalidate it.
 
 func _init() -> void:
 	super()
 	var fails := 0
-	# THE live witness: hero start state -> 119.
-	var got := ActorStats.max_hp(22, 22, 22, 22, 1)
-	if got != 119:
-		fails += 1
-		printerr("HERO HP MISMATCH: retail observed 119, formula gives %d" % got)
+	# THE live witnesses: two classes, retail-observed maxima.
+	var cases := [[22, 22, 119, "hero01", 0, 3], [33, 25, 147, "hero00", 0, 3]]
+	for c: Array in cases:
+		var got := ActorStats.max_hp(c[0], c[1], c[0], c[1], 1)
+		if got != int(c[2]):
+			fails += 1
+			printerr("HERO HP MISMATCH %s: retail observed %d, formula gives %d"
+				% [c[3], c[2], got])
+	# The join, re-derived from retail data: for each witnessed template the
+	# live-observed block pair must equal (attrs[0], attrs[3]) = (STK, REPHY).
+	var install := Sacred.find_install()
+	assert(not install.is_empty(), "retail install is required")
+	for c: Array in cases:
+		var h := Sacred.Hero.new(install.path_join("templates/" + str(c[3]) + ".ptx"))
+		var attrs := h.attributes()
+		if attrs[c[4]] != int(c[0]) or attrs[c[5]] != int(c[1]):
+			fails += 1
+			printerr("JOIN BROKEN for %s: template (STK,REPHY)=(%d,%d), live block was (%d,%d)"
+				% [c[3], attrs[c[4]], attrs[c[5]], c[0], c[1]])
 	# Level scaling stays integer in the base terms: level 11 doubles each
 	# level-scaled contribution (b*10/10 == b), which must RAISE max HP.
 	if ActorStats.max_hp(22, 22, 22, 22, 11) <= 119:

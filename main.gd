@@ -38,6 +38,11 @@ const DebugOverlayScript := preload("res://debug_overlay.gd")
 ## this is the placeholder that a selection screen replaces.
 ## ponytail: a constant until there is a UI to choose with.
 const START_CLASS := "type_npc_seraphim"
+## The template file START_CLASS creates from. Rides beside START_CLASS as
+## the same placeholder: a class-selection UI replaces both with the real
+## class -> template -> type join (types are NOT file order -- hero02.ptx
+## is the type-9 template).
+const START_TEMPLATE := "hero01.ptx"
 
 ## bin/sets.bin record whose members the player is built from. 6 is "Uriel's
 ## Legacy", the Seraphim suite -- nine members, seven garments and two blades.
@@ -93,6 +98,9 @@ var _checkpoint_ref := ""               ## --checkpoint-ref=PATH: reference to c
 var _checkpoint_made := false           ## true once world_moved() has run -- a scenario
                                         ## run that never reaches its checkpoint must
                                         ## refuse, not quietly capture
+var _scenario_freeze_at := NAN          ## manifest freeze_anim: park every rig at this
+                                        ## clip time before checkpoint+shots so pixel
+                                        ## repeats compare the same pose (NAN = no freeze)
 ## The live quest log and cast the new-game hook produced. Null until
 ## _begin_encounter/_build_quest_cast run; the Checkpoint reads whatever the
 ## scenario actually reached.
@@ -685,6 +693,8 @@ func _ready() -> void:
 				_scenario_steps = s.get("steps", [])
 				for m in s.get("shots_ms", []):
 					_scenario_shots.append(int(m))
+				if s.has("freeze_anim"):
+					_scenario_freeze_at = float(s["freeze_anim"])
 				found = true
 				break
 		if not found:
@@ -833,7 +843,22 @@ func _ready() -> void:
 			push_warning("player: no walkable spawn cell found -- drawing nothing")
 		else:
 			var player_cell: Vector2 = spawn["cell"]
-			_player_id = _registry.spawn(_first_real_record_id(), player_cell, 100, 100)
+			# C1: the hero's max HP is DERIVED, not invented. The template's
+			# (STK, REPHY) pair drives the transcribed sub_81F4FFA base
+			# formula -- live-witnessed on two classes (Seraphim 119,
+			# Gladiator 147; checks/hero_hp_check.gd). A bare new hero has
+			# base == live, so the template pair feeds both. The template
+			# file rides beside START_CLASS until a class-selection UI owns
+			# the pairing (same posture as the hero01 headwear read).
+			var hero_hp := 100
+			var hero := Sacred.Hero.new(install.path_join("templates/" + START_TEMPLATE))
+			if hero.found and hero.attributes().size() >= 4:
+				var stk: int = hero.attributes()[0]
+				var rephy: int = hero.attributes()[3]
+				hero_hp = ActorStats.max_hp(stk, rephy, stk, rephy,
+					hero.level if hero.level > 0 else 1)
+			_player_id = _registry.spawn(_first_real_record_id(), player_cell, hero_hp, hero_hp)
+			print("player\thp=%d\tderived=ActorStats.max_hp(%s)" % [hero_hp, START_TEMPLATE])
 			_sim.walk = walk
 			_sim.focus_actor_id = _player_id
 			_path_window = PathWindow.new(walk)
@@ -976,6 +1001,23 @@ func _run_scenario() -> void:
 			% [_player_id, _quest_log != null])
 		get_tree().quit(1)
 		return
+	# POSE ALIGNMENT. A looping clip's phase depends on how many wall-clock
+	# frames progressive loading consumed before the settle -- the exact
+	# mechanism that made the old benchmark refuse its own repeats. When the
+	# manifest names a freeze time, every animated rig is parked there BEFORE
+	# the checkpoint and the shots, so `anim_clip_time` is exactly that time
+	# in both runs and the pixel channel compares the same pose.
+	var freeze := _scenario_freeze_at
+	if not is_nan(freeze):
+		var pmv: ModelView = null
+		if _player_view != null:
+			pmv = _player_view.node as ModelView
+		if pmv != null:
+			pmv.freeze_anim(freeze)
+		for id: int in _scripted_views:
+			var svm: ModelView = _scripted_views[id].node as ModelView
+			if svm != null:
+				svm.freeze_anim(freeze)
 	var c: ScenarioCheckpoint = ScenarioCheckpoint.new()
 	c.capture(self)
 	if not _checkpoint_made:
@@ -1008,7 +1050,7 @@ func _run_scenario() -> void:
 				PackedStringArray(s["args"].map(func(x) -> String: return str(x))))]
 		await Drive.run(self, ["--drive=" + script, "--shots=" + ",".join(
 			_scenario_shots.map(func(m: int) -> String: return str(m))),
-			"--drive-out=" + dir])
+			"--drive-out=" + dir, "--drive-clock=frames"])
 	else:
 		await _maybe_screenshot()
 
@@ -1412,7 +1454,7 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 			skipped += 1
 	# Headwear from the class template: the one inventory item that
 	# surfaces on the body at the start scene.
-	var hero := Sacred.Hero.new(install.path_join("templates/hero01.ptx"))
+	var hero := Sacred.Hero.new(install.path_join("templates/" + START_TEMPLATE))
 	if hero.found:
 		for rec in hero.items():
 			if items.is_worn(rec) and items.slot_of(rec) == Sacred.Items.Slot.HELMET \
