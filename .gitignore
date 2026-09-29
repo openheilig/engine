@@ -29,6 +29,12 @@
 # engine has any business carrying, and it holds no path into the install --
 # it resolves its own directory and lets Sacred.find_install() do the rest.
 !run.sh
+# E1's authored scenario harness. The manifest defines scenarios by input
+# grammar and expected authoritative state -- it names no retail bytes. The
+# runner is plain Python against the public engine CLI. Both are hand-written;
+# private captures and reference checkpoints stay in the workspace's tmp/.
+!tools/scenarios.json
+!tools/verify_scenarios.py
 
 # 3. Belt and braces: regenerable or retail-derived, named so the intent
 #    survives an edit to the rules above.
@@ -37,3 +43,6 @@ export/
 data/
 *.pck
 tmp/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

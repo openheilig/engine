@@ -1,0 +1,97 @@
+{
+	"schema": 1,
+	"_comment": "E1 semantic scenario manifest. Each scenario is identity + route + checkpoint + negative controls. Input grammar is drive.gd's; shots are milliseconds from the settle boundary. Every scenario names the deterministic channels its captures are compared under. owned_by: tools/checkpoint.gd (engine sidecar writer) and tools/verify_scenarios.py (comparison runner).",
+	"identity": {
+		"godot_version": "4.7.2.stable.arch_linux.ed1daf0bf",
+		"renderer": "forward_plus",
+		"driver": "vulkan",
+		"audio_driver": "Dummy",
+		"resolution": "1024x768",
+		"install": "user-supplied retail Sacred Gold install; its identity is recorded per run, never assumed"
+	},
+	"deterministic_channels": [
+		"player_cell",
+		"player_facing",
+		"player_hp",
+		"player_hp_max",
+		"player_flags",
+		"next_actor_id",
+		"actor_count",
+		"cast_handles",
+		"quest_states",
+		"quest_lines",
+		"sim_tick",
+		"anim_clip_name"
+	],
+	"tolerated_channels": [
+		{
+			"name": "anim_clip_time",
+			"epsilon": 0.05,
+			"reason": "a looping clip cannot be frozen at the same frame by two wall-clock runs; pose equality is what 0.05 s of a 1.38 s idle clip means"
+		}
+	],
+	"scenarios": [
+		{
+			"name": "spawn-settled",
+			"route": "default",
+			"steps": [],
+			"shots_ms": [
+				0
+			],
+			"checkpoint": {
+				"expect": {
+					"player_cell": [
+						3236.5,
+						2511.5
+					],
+					"quest_states": {},
+					"cast_handles": {
+						"res:17095": 679
+					},
+					"_note": "quest 74's OnEnter writes no state bit (audit row: OnExit writes 3); quest_states stays empty at spawn. expect blocks are asserted by future runner versions, not decorative."
+				}
+			},
+			"controls": {
+				"wrong_state_refuses": "a reference whose cast_handles or quest_states differ must fail comparison, not pixel-compare"
+			},
+			"freeze_anim": 0.35,
+			"_note": "freeze_anim parks every rig at this clip time before checkpoint+shots, making pixel repeats pose-aligned (E1 contract)."
+		},
+		{
+			"name": "click-walk-arrive",
+			"route": "default",
+			"steps": [
+				{
+					"ms": 500,
+					"verb": "move",
+					"args": [
+						"640",
+						"400"
+					]
+				},
+				{
+					"ms": 700,
+					"verb": "click",
+					"args": [
+						"640",
+						"400"
+					]
+				}
+			],
+			"shots_ms": [
+				2500,
+				6000
+			],
+			"checkpoint": {
+				"arrive": "player cell within 0.6 of the clicked cell's centre and sim state quiescent (no pending goal)",
+				"expect_anim": "WALK during travel frames; IDLE once arrived"
+			},
+			"controls": {
+				"lost_input_refuses": "if the click never produced a click_goal fact line, the run refuses rather than capturing a standstill and calling it the reference",
+				"unfinished_load_refuses": "capture waits for production readiness; a timeout is an error, never a partial-scene score"
+			},
+			"freeze_anim": 0.35,
+			"_note": "freeze_anim parks every rig at this clip time before checkpoint+shots, making pixel repeats pose-aligned (E1 contract)."
+		}
+	]
+}
