@@ -36,13 +36,10 @@ const KEY_DSIZE := Common.KEY_DSIZE
 
 ## Atlas geometry -- re-exported from formats/texture.gd.
 const SLOT_COUNT := TextureFormat.SLOT_COUNT
-const SLOT_W := TextureFormat.SLOT_W
-const SLOT_H := TextureFormat.SLOT_H
 const SLOT_DX := TextureFormat.SLOT_DX
 const SLOT_DY := TextureFormat.SLOT_DY
 const SLOT_STAGGER := TextureFormat.SLOT_STAGGER
 const ATLAS := TextureFormat.ATLAS
-const SLOT_INSET := TextureFormat.SLOT_INSET
 
 ## The readers.
 const Pak := preload("res://formats/pak.gd")
@@ -50,10 +47,12 @@ const Tiles := preload("res://formats/tiles.gd")
 const World := preload("res://formats/world.gd")
 const Statics := preload("res://formats/statics.gd")
 const TriggerType := preload("res://formats/trigger_type.gd")
+const Triggers := preload("res://formats/triggers.gd")
 const Mixed := preload("res://formats/mixed.gd")
 const Regions := preload("res://formats/regions.gd")
 const Footprints := preload("res://formats/footprints.gd")
 const Items := preload("res://formats/items.gd")
+const Weapons := preload("res://formats/weapons.gd")
 const Models := preload("res://formats/models.gd")
 const Pax := preload("res://formats/pax.gd")
 const Hero := preload("res://formats/hero.gd")
@@ -83,17 +82,34 @@ const CFG := "user://openheilig.cfg"
 ## user://opensacred.cfg), then the workspace sibling. Returns "" if none of
 ## them holds a real install.
 ##
-## A path given with --install= is remembered, so it is needed once and not on
-## every run. Nothing else writes the config.
+## R0 (2026-09-29): an EXPLICIT --install= that fails is a hard error naming
+## that root -- never a silent fall-through to a remembered path, which is how
+## the wrong corpus used to load. The remaining candidates keep the old
+## best-effort order. is_install() keeps its two-file meaning for callers that
+## only want "can the terrain reader open something"; the full profile is
+## available via last_profile().
 static func find_install() -> String:
+	last_profile = null
 	var cli := _cli_install()
-	if cli != "" and is_install(cli):
+	if cli != "":
+		last_profile = InstallProfile.probe(cli)
+		if not last_profile.ok():
+			push_error("OpenHeilig: explicit --install=%s was refused:\n%s"
+				% [cli, last_profile.error_text()])
+			return ""
 		save_install(cli)
 		return cli
 	for candidate in [_cfg_install(), _sibling_install()]:
 		if candidate != "" and is_install(candidate):
+			last_profile = InstallProfile.probe(candidate)
 			return candidate
 	return ""
+
+
+## The profile of the install find_install() resolved, or null. The
+## composition root prints it at startup; capability gaps are DECLARED there,
+## not discovered mid-render.
+static var last_profile: InstallProfile = null
 
 
 ## An install is anything that has the two files the terrain reader needs.
@@ -143,8 +159,8 @@ static func inflate(z: PackedByteArray, out_size: int) -> PackedByteArray:
 	return Common.inflate(z, out_size)
 
 
-## Normalised UV rect of atlas slot n, on formats/texture.gd.
-static func slot_uv(n: int) -> Rect2:
+## Retail atlas UVs in mesh order N, E, S, W, on formats/texture.gd.
+static func slot_uv(n: int) -> PackedVector2Array:
 	return TextureFormat.slot_uv(n)
 
 
