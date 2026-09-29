@@ -90,8 +90,12 @@ static func probe(path: String) -> InstallProfile:
 		# yet (audit §8); record the real gap, never a crash and never a
 		# silent degrade.
 		if p.executable_format == "pe":
+			# The gfx element TABLE is located by content scan in any build
+			# (formats/ui_elements.gd); only the element NAME bands remain
+			# ELF-specific. The gap is narrower than "no UI tables": art-slot
+			# column routing falls back to the skill side, declared here.
 			p.capability_gaps.append(
-				"ui_tables: PE executable found but this engine reads UI element tables from ELF32 only (formats/ui_elements.gd)")
+				"ui_element_names: PE name bands not decoded; art-slot column routing falls back to skill (formats/ui_elements.gd names_resolved=false)")
 		elif p.executable_found and p.executable_format != "":
 			p.capability_gaps.append(
 				"ui_tables: unrecognized executable format '%s'" % p.executable_format)
