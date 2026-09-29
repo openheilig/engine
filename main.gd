@@ -75,6 +75,29 @@ const BASE_HIDE := []
 ## body silently, so the map has a hole and _apply_retail_start says so.
 var _export_sera := false               ## --export-sera=path: dump the hero mesh as OBJ for Bevy
 var _export_sera_path := ""
+
+# --- E1 semantic scenario state (tools/scenarios.json, tools/checkpoint.gd) ---
+## The scenario triple a --scenario= run carries. Empty in every other mode;
+## read by Checkpoint.capture and printed on the scenario fact lines. A
+## --scenario= without --checkpoint-out= is refused: a scenario run that
+## captures pixels but records no authoritative state is exactly the
+## loading-relative comparison that refused its own repeats.
+var _scenario_name := ""
+var _scenario_route := ""
+var _scenario_checkpoint := ""
+var _scenario_expect := {}              ## the manifest's expect block for this scenario
+var _scenario_steps := []               ## the manifest's drive steps, handed to Drive.run
+var _scenario_shots: Array[int] = []    ## the manifest's shots, milliseconds from settle
+var _checkpoint_path := ""              ## --checkpoint-out=PATH: the JSON sidecar destination
+var _checkpoint_ref := ""               ## --checkpoint-ref=PATH: reference to compare against
+var _checkpoint_made := false           ## true once world_moved() has run -- a scenario
+                                        ## run that never reaches its checkpoint must
+                                        ## refuse, not quietly capture
+## The live quest log and cast the new-game hook produced. Null until
+## _begin_encounter/_build_quest_cast run; the Checkpoint reads whatever the
+## scenario actually reached.
+var _quest_log: QuestLog = null
+var _quest_cast: QuestCast = null
 const CLASS_MODEL := {
 	"type_npc_daemonin": "DAEMONIA.GRN",
 	"type_npc_darkelve": "DUNKELELVE.GRN",
@@ -89,12 +112,22 @@ const CLASS_MODEL := {
 ## _apply_retail_start; falls back to PlayerView's own default so a tree with
 ## no mapping still draws a body rather than nothing.
 var _player_model := PlayerView.MODEL_NAME
+var _player_type := 0
+var _shadow_items: Sacred.Items
+var _shadow_creatures: Sacred.Creatures
+var _shadow_statics: Sacred.Statics
+## The retained native render configuration (byte 0x08906DA0), not an
+## always-blob switch: support and creature flags still select the branch.
+const ACTOR_SHADOW_DETAIL := 2
+var _player_shadow_heading := Vector2(NAN, NAN)
+var _player_shadow_last_facing := Vector2(NAN, NAN)
 
 ## START_CLASS's StartPosition cell, or (-1,-1) when the tree declares none.
 ## Separate from start_cell because start_cell is a Vector2 the camera pans to
 ## and may be moved by other modes, while this stays the exact integer cell the
 ## file gave, which is what _resolve_spawn tests for walkability.
 var _retail_start := Vector2i(-1, -1)
+var _retail_start_layer := 0
 
 ## The MVP encounter (world/encounter.gd): the hostile, the NPC beside it and
 ## quest 74, all at START_CLASS's own start. Built once the player exists, and
@@ -179,7 +212,7 @@ var _probe_ticks := 0                     ## --actor-probe=N; <= 0 disables the 
 var _probe_route := "a"                   ## --probe-route=a|b
 var _probe_active := false                ## true while _actor_probe() drives ticks by exact count
 const PROBE_FOCUS := Vector2(3232.0, 3232.0)  ## middle of sector 50,50
-const PROBE_FRAME_BUDGET := 600           ## matches _maybe_screenshot's settle budget
+const VIEW_SETTLE_TIMEOUT_MS := 120000
 
 # Phase 4: record / replay. Nothing below is read unless --record= or
 # --replay= is present -- every other mode's behaviour is byte-for-byte
@@ -204,7 +237,7 @@ var _path_window: PathWindow = null
 var _goal_cell := PathWindow.NO_GOAL      ## BFS-derived once per record/replay run; NO_GOAL if none could be derived
 var _supported_route := false             ## --walk-route=supported-in-out; test-only measured-cell route
 var _anim_phase := -1.0
-var _art_icon_tex: Texture2D = null    ## the hero's art icon, applied once the HUD exists                   ## --anim-phase=F; the hero's idle phase as a FRACTION of the clip, fitted against retail (row 1191); <0 = the engine's phase-0 start
+var _art_elements: Array = []         ## the hero's first art's EMPTY/LOAD/FULL element triple, applied once the HUD exists
 const GOAL_REQUEST_TICK := 250            ## the one scripted tick that requests a path (well after spawn, well before autoplay ends)
 ## Measured 06-02 OZELT1 footprint in sector 53,28: the direct-cell route is
 ## explicitly a deterministic harness fallback because 06-03 measured 0/20
@@ -296,7 +329,14 @@ var _show_npcs := false
 ## rather than simply going quiet.
 var _run_quests := true
 var _creature_views: Array[PlayerView] = []
+var _scripted_objects_by_sector: Dictionary[int, Array] = {}
+var _scripted_models: Sacred.Models = null
+var _scripted_object_jobs: Array[Dictionary] = []
 var _creature_cells: Array[Vector2] = []
+## Scripted-cast rigs keyed by their simulation actor id. Filled by
+## _build_quest_cast; _process follows these actors every frame exactly like
+## the hero, so a scripted NPC_Goto becomes real movement.
+var _scripted_views: Dictionary[int, PlayerView] = {}
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
 ## --hideplayer: build the player view and keep the camera following it
 ## exactly like the ordinary case, but never make its mesh visible. A
@@ -400,6 +440,9 @@ func _ready() -> void:
 	var items_pak := Sacred.Pak.new(install.path_join("pak/items.pak"))
 	if items_pak.is_open():
 		items = Sacred.Items.new(items_pak)
+	_shadow_items = items
+	_shadow_creatures = Sacred.Creatures.new(install.path_join("pak"))
+	_shadow_statics = statics
 	_records = RecordStore.new(items, mixed)
 	# The per-cell OVERLAY TILE layer (row 695). 188 MB, so it is read by
 	# handle and never bulk-loaded; a missing or unreadable file just means the
@@ -424,7 +467,6 @@ func _ready() -> void:
 	_dress_player_enabled = not ("--nodress" in argv)
 	_wear_garments = "--dress-garments" in argv
 	_show_hud = not ("--nohud" in argv)
-	var force_interior := "--force-interior" in argv
 	for a in argv:
 		if a.begins_with("--walk-route="):
 			var route_name := a.trim_prefix("--walk-route=")
@@ -434,7 +476,6 @@ func _ready() -> void:
 				printerr("walk-route\tunsupported=%s" % route_name)
 				get_tree().quit(1)
 				return
-	var inverse_locality_probe := "--inverse-locality-probe" in argv
 	var show_regions := "--regions" in argv
 	# --flags1e: paint WldxEntry +0x1e as an overlay (row 708). Debug only.
 	var show_flags1e := "--flags1e" in argv
@@ -459,10 +500,6 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--onlyflag="):
 			only_flag = int(a.trim_prefix("--onlyflag="))
-	var band_count := 1
-	for a in argv:
-		if a.begins_with("--bands="):
-			band_count = clampi(int(a.trim_prefix("--bands=")), 1, SectorView.BAND_MAX)
 	var sortcube := Vector2i(-1, -1)
 	for a in argv:
 		if a.begins_with("--sortcube="):
@@ -517,6 +554,19 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--anim="):
 			anim_name = a.trim_prefix("--anim=")
+	var native_motion := -1
+	for a in argv:
+		if a.begins_with("--motion="):
+			var value := a.trim_prefix("--motion=")
+			if not value.is_valid_int() or int(value) < 0 or int(value) >= 256:
+				printerr("motion\t--motion requires an integer enum in 0..255")
+				get_tree().quit(1)
+				return
+			native_motion = int(value)
+	if native_motion >= 0 and (grn_name.is_empty() or not anim_name.is_empty()):
+		printerr("motion\tuse --motion with --grn, without --anim")
+		get_tree().quit(1)
+		return
 	# 05-12 Task 2 counterfactual: deliberately breaks the clip-bone-name to
 	# model-bone-name join build_animation() performs, to show that join is
 	# load-bearing. "offset" resolves to find_bone(name) PLUS ONE; "drop"
@@ -595,6 +645,12 @@ func _ready() -> void:
 			_falsify_mode = a.trim_prefix("--falsify-mode=")
 		elif a.begins_with("--falsify="):
 			_falsify_tick = int(a.trim_prefix("--falsify="))
+		elif a.begins_with("--scenario="):
+			_scenario_name = a.trim_prefix("--scenario=")
+		elif a.begins_with("--checkpoint-out="):
+			_checkpoint_path = a.trim_prefix("--checkpoint-out=")
+		elif a.begins_with("--checkpoint-ref="):
+			_checkpoint_ref = a.trim_prefix("--checkpoint-ref=")
 		elif a.begins_with("--crowd="):
 			_has_crowd = true
 			_crowd_arg = a.trim_prefix("--crowd=")
@@ -602,10 +658,53 @@ func _ready() -> void:
 
 	_registry = ActorRegistry.new()
 	_sim = Sim.new(_tick_hz)
+	if statics != null:
+		_sim.interior = Interior.new(world, statics,
+			Sacred.Triggers.new(install.path_join("world/triggers.pak")))
+
+	# E1: resolve the scenario from the manifest BEFORE any mode dispatch, so
+	# an ill-formed scenario name or a missing sidecar destination fails the
+	# run at parse time rather than after minutes of streaming.
+	if _scenario_name != "":
+		if _checkpoint_path == "":
+			push_error("scenario: --scenario=%s without --checkpoint-out= is refused -- "
+				+ "a pixel-only scenario run is the failure mode this harness exists to prevent"
+				% _scenario_name)
+			get_tree().quit(1)
+			return
+		var manifest := _load_scenario_manifest("res://tools/scenarios.json")
+		if manifest.is_empty():
+			get_tree().quit(1)
+			return
+		var found := false
+		for s: Dictionary in manifest.get("scenarios", []):
+			if str(s.get("name", "")) == _scenario_name:
+				_scenario_route = str(s.get("route", "default"))
+				_scenario_checkpoint = _scenario_name
+				_scenario_expect = s.get("checkpoint", {})
+				_scenario_steps = s.get("steps", [])
+				for m in s.get("shots_ms", []):
+					_scenario_shots.append(int(m))
+				found = true
+				break
+		if not found:
+			push_error("scenario: '%s' is not in tools/scenarios.json" % _scenario_name)
+			get_tree().quit(1)
+			return
+		print("scenario\tname=%s\troute=%s\tsteps=%d\tshots=%d\tout=%s" % [
+			_scenario_name, _scenario_route, _scenario_steps.size(),
+			_scenario_shots.size(), _checkpoint_path])
 
 	# Streaming mode otherwise prints nothing at all, so a successful run and a
 	# silently-failed one look identical from the terminal.
 	print("OpenHeilig\t%s" % install)
+	# R0: the profile is DECLARED at startup, gaps included -- a Windows tree
+	# whose UI tables cannot be read announces that here, not as a mid-render
+	# missing-table error.
+	if Sacred.last_profile != null:
+		print(Sacred.last_profile.summary_line())
+		for gap in Sacred.last_profile.capability_gaps:
+			push_warning("install capability gap: %s" % gap)
 	print("  world\t%d of %d sectors present, %dx%d grid" % [
 		world.count(), world.size.x * world.size.y, world.size.x, world.size.y])
 	print("  tiles\t%d records -> %d textures" % [tiles.count(), tex_pak.count()])
@@ -623,6 +722,7 @@ func _ready() -> void:
 		if a.begins_with("--fight="):
 			_fight_swings = maxi(0, a.trim_prefix("--fight=").to_int())
 	_apply_retail_start(install)
+	_player_type = _resolve_player_type()
 
 	if figure_name != "":
 		await _show_figure(install, figure_name, figure_stage, anim_name, figure_yaw, figure_surface)
@@ -633,7 +733,7 @@ func _ready() -> void:
 		return
 
 	if grn_name != "":
-		await _show_model(install, grn_name, anim_name, anim_falsify, anim_key_report, anim_rigcheck)
+		await _show_model(install, grn_name, anim_name, anim_falsify, anim_key_report, anim_rigcheck, native_motion)
 		return
 
 	if clip_name != "":
@@ -664,9 +764,6 @@ func _ready() -> void:
 		_family_scan(world, statics, items, family_scan.split(",", false))
 		return
 
-	if inverse_locality_probe:
-		await _inverse_locality_probe(install, tex_pak, tiles, world, statics, mixed, items, footprints)
-		return
 
 	if _has_crowd:
 		await _run_crowd(install, world, tex_pak, tiles, statics, mixed, items)
@@ -684,11 +781,12 @@ func _ready() -> void:
 	_view.name = "SectorView"
 	_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {
 		"stats": stats, "markers": markers, "objects": objects,
-		"force_interior": force_interior, "regions": show_regions, "flags1e": show_flags1e, "classhi": show_classhi, "exterior": exterior, "hide_levels": hide_levels,
+		"interior": _sim.interior, "regions": show_regions, "flags1e": show_flags1e, "classhi": show_classhi, "exterior": exterior, "hide_levels": hide_levels,
 		"spawns": _spawn_tiers(install) if show_spawns else {},
-		"only_flag": only_flag, "band_count": band_count, "sortcube": sortcube,
+		"only_flag": only_flag, "sortcube": sortcube,
 		"floor_pak": floor_pak,
-	}, footprints)
+	})
+	_view.sector_built.connect(_draw_scripted_objects.bind(_view, install))
 	add_child(_view)
 
 	# F3 overlay. Hidden until pressed, so captures and gates see the frame
@@ -700,6 +798,13 @@ func _ready() -> void:
 	# capture can carry it: those runs never see a keystroke.
 	overlay.visible = "--overlay" in argv
 	add_child(overlay)
+
+	# Experimental DLSS5 depth feed (see dlssnr_depth.gd). Off unless the flag
+	# is present; the basic port path never loads it.
+	if "--dlssnr-depth" in argv:
+		var DepthFeed := load("res://dlssnr_depth.gd")
+		if DepthFeed != null:
+			add_child(DepthFeed.new(_cam))
 
 	var region := _region_arg()
 
@@ -734,10 +839,15 @@ func _ready() -> void:
 			_path_window = PathWindow.new(walk)
 			_sim.path_window = _path_window
 			_cam.move_click.connect(_on_move_click)
-			if footprints != null:
-				_sim.interior = Interior.new(world, walk, footprints)
+			if _sim.interior != null:
+				_sim.interior.place_focus(player_cell, _player_type, _retail_start_layer)
 			# World layer, so it is built here rather than beside the rigs: the
 			# hostile is an actor whether or not anything is drawn.
+			#
+			# RETAIL'S NEW GAME RUNS QUEST 74's OnEnter: its console line
+			# ("The Soul of the Demon.") is visible in the retained start
+			# frame, and its hostile stands offscreen at monster107. The
+			# encounter IS new-game state; only --fight resolves it headlessly.
 			_begin_encounter(install, items)
 			print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
 				player_cell.x, player_cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
@@ -756,9 +866,12 @@ func _ready() -> void:
 					# pak is passed. Every other rig in the world already got it;
 					# the player was the one rig that did not.
 					_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model,
-						tex_pak, PackedStringArray(BASE_HIDE))
+						tex_pak, PackedStringArray(BASE_HIDE), items.texture_of(_player_type) if items != null else -1)
 					if _player_view.node != null:
 						add_child(_player_view.node)
+						_player_view.configure_actor(_player_type, items, _shadow_creatures)
+						_player_shadow_heading = _player_view.initial_shadow_heading
+						_player_shadow_last_facing = _registry.get_actor(_player_id).facing
 						if _hide_player_mesh:
 							_player_view.set_shown(false)
 						print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
@@ -767,8 +880,9 @@ func _ready() -> void:
 						_dress_player(install, Sacred.Models.new(models_pak), items)
 						_animate_hero(Sacred.Models.new(models_pak))
 			_build_hud(tex_pak)
-			if _art_icon_tex != null:
-				_hud.set_art_icon(_art_icon_tex)
+			if _hud != null and not _art_elements.is_empty():
+				_hud.set_art_slot(_hud.ui_elements(install, tex_pak),
+					_art_elements, 1.0)
 			_build_sector_env(install)
 			# _run_quests is in this list because the quest cast is rigs like any
 			# other: without the light they build and render as black cut-outs,
@@ -781,11 +895,14 @@ func _ready() -> void:
 				_build_npcs(install, Sacred.Models.new(models_pak), player_cell)
 			if models_pak.is_open():
 				_build_quest_cast(install, Sacred.Models.new(models_pak), items, tex_pak)
+			# E1: everything the spawn-settled checkpoint reads now exists --
+			# player, quest log, cast. A scenario run may checkpoint from here.
+			_checkpoint_made = true
 			if _export_sera:
 				_export_pending = true
 
 	if region != Vector3i.ZERO:
-		_view.load_region(region.x, region.y, region.z)
+		await _view.load_region(region.x, region.y, region.z)
 	else:
 		_cam.set_zoom_index(1)   # middle of Sacred's three steps
 		_cam.look_at_cell(start_cell)
@@ -807,6 +924,12 @@ func _ready() -> void:
 		"\tmarkers on" if markers else ""])
 	if _probe_ticks > 0:
 		await _actor_probe(_probe_ticks, _probe_route)
+	elif _scenario_name != "":
+		# E1: scenario dispatch is BEFORE Drive.wanted() because a scenario
+		# run passes --shots= for its own captures, and Drive.wanted() would
+		# otherwise claim the run and bypass the checkpoint entirely --
+		# exactly what the first verification run showed.
+		await _run_scenario()
 	elif Drive.wanted(OS.get_cmdline_user_args() + OS.get_cmdline_args()):
 		# --drive=/--shots= hand the streamed world to drive.gd, which owns the
 		# timeline, the captures and the quit. Without this branch those flags
@@ -815,8 +938,87 @@ func _ready() -> void:
 		# timeout kills it with no PNG written -- which is exactly how this
 		# harness broke.
 		await Drive.run(self, OS.get_cmdline_user_args() + OS.get_cmdline_args())
+	elif _scenario_name != "":
+		await _run_scenario()
 	else:
 		await _maybe_screenshot()
+
+
+## --- E1: the scenario runner. Parses the manifest ONCE, refuses an
+## ill-formed scenario before any capture, settles production readiness,
+## drives the manifest's steps through the SAME Drive grammar, then writes
+## the checkpoint sidecar and compares it against the reference when one was
+## given. A scenario without --checkpoint-out= never reaches here: parse
+## refused it, so a pixel-only run cannot masquerade as a scenario run.
+func _load_scenario_manifest(path: String) -> Dictionary:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		push_error("scenario: cannot open manifest %s (%s)" % [
+			path, error_string(FileAccess.get_open_error())])
+		return {}
+	var parsed: Variant = JSON.parse_string(f.get_as_text())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		push_error("scenario: %s is not a JSON object" % path)
+		return {}
+	if int(parsed.get("schema", -1)) != 1:
+		push_error("scenario: manifest schema %s is not 1 -- refusing to guess the format" % str(parsed.get("schema")))
+		return {}
+	return parsed
+
+
+func _run_scenario() -> void:
+	# THE PRECONDITION: the new-game state must actually exist. A scenario
+	# whose world never spawned (no player, no quest log, no cast) has no
+	# semantic content to checkpoint, and capturing that run's pixels would
+	# be exactly the empty-frame comparison E1 exists to prevent.
+	if _player_id == ActorRegistry.INVALID_ID or _quest_log == null:
+		push_error("scenario: no new-game state to checkpoint (player_id=%d, quest_log=%s)"
+			% [_player_id, _quest_log != null])
+		get_tree().quit(1)
+		return
+	var c: ScenarioCheckpoint = ScenarioCheckpoint.new()
+	c.capture(self)
+	if not _checkpoint_made:
+		push_error("scenario: checkpoint captured but world_moved() never ran -- refusing")
+		get_tree().quit(1)
+		return
+	var err: String = c.save(_checkpoint_path)
+	if err != "":
+		push_error("scenario: checkpoint write failed: %s" % err)
+		get_tree().quit(1)
+		return
+	print("scenario\tcheckpoint=%s\tsim_tick=%d\tcell=%.6f,%.6f\thp=%d\tcast=%d\tquests=%d"
+		% [_checkpoint_path, c.sim_tick, c.player_cell.x, c.player_cell.y,
+		c.player_hp, c.cast_handles.size(), c.quest_states.size()])
+	if _checkpoint_ref != "":
+		var ref: ScenarioCheckpoint = ScenarioCheckpoint.from_dict(_read_json(_checkpoint_ref))
+		var why: String = c.compare_against(ref)
+		if why != "":
+			push_error("scenario: REFUSED -- %s" % why)
+			get_tree().quit(1)
+			return
+		print("scenario\tstate_match\tcheckpoint=%s" % _checkpoint_ref)
+	# Pixel capture rides AFTER the state gate, so a state mismatch never
+	# produces a PNG that could be mistaken for the reference.
+	if not _scenario_shots.is_empty():
+		var dir := _checkpoint_path.get_base_dir()
+		var script := ""
+		for s: Dictionary in _scenario_steps:
+			script += "%d %s %s; " % [int(s["ms"]), s["verb"], " ".join(
+				PackedStringArray(s["args"].map(func(x) -> String: return str(x))))]
+		await Drive.run(self, ["--drive=" + script, "--shots=" + ",".join(
+			_scenario_shots.map(func(m: int) -> String: return str(m))),
+			"--drive-out=" + dir])
+	else:
+		await _maybe_screenshot()
+
+
+func _read_json(path: String) -> Dictionary:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return {}
+	var parsed: Variant = JSON.parse_string(f.get_as_text())
+	return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
 
 
 ## Releases the retail cursor texture before RenderingServer teardown. Without
@@ -858,6 +1060,17 @@ func _process(delta: float) -> void:
 			# Retail's sector-change path keys off the PLAYER's sector, not the
 			# camera's -- panning the view does not change the music.
 			_update_sector_env(p.cell)
+	# Scripted-cast actors are simulation state. Their rigs follow the same
+	# actor records the hero does, so an NPC_Goto walks rather than teleporting.
+	for id: int in _scripted_views:
+		var view: PlayerView = _scripted_views[id]
+		var actor: ActorState = _registry.get_actor(id)
+		if view == null or actor == null:
+			continue
+		view.update(actor.cell)
+		if _sim.interior != null:
+			_update_native_actor(view, actor.cell, view.initial_shadow_heading,
+				_sim.interior.support_ref_at(Vector2i(actor.cell), 0))
 
 
 ## The composition boundary between simulation state and HUD pixels. ActorState
@@ -923,8 +1136,6 @@ func _advance_sim(dt: float, focus: Vector2) -> int:
 		_sim.pending_goal = _goal_cell
 		_sim.pending_goal_tick = GOAL_REQUEST_TICK
 	var ran := _sim.advance(dt, _registry, focus)
-	if _view != null and _sim.interior != null:
-		_view.apply_swap(_sim.interior.current_with_families())
 	if recording:
 		# The route cell the live run ACTUALLY applied for this whole advance --
 		# chosen once from pre_tick + 1 above and held for every tick the burst
@@ -989,6 +1200,8 @@ func _door_transition(goal: Vector2i) -> bool:
 		else _exterior_destination(footprint, door, region_key)
 	if destination == Vector2i(-1, -1):
 		return false
+	if not inside and not _sim.interior.enter_at(door):
+		return false
 	actor.cell = Vector2(destination) + Vector2(0.5, 0.5)
 	if inside:
 		# The teleport skips the authored STEP cell a walking exit would
@@ -1002,32 +1215,24 @@ func _door_transition(goal: Vector2i) -> bool:
 	return true
 
 
-## First footprint whose region rect contains `cell`, with its packed region
-## key, or {} if none. The key is needed for an exact Interior state lookup.
+## Authored child region belonging to this cell's parent building.
+## Its rectangle is used only for door destination selection, never art admission.
 func _footprint_containing(cell: Vector2i) -> Dictionary:
 	if _world == null or _sim.interior == null:
 		return {}
-	var sx := int(floor(float(cell.x) / float(Sacred.SECT)))
-	var sy := int(floor(float(cell.y) / float(Sacred.SECT)))
-	for dy in range(-1, 2):
-		for dx in range(-1, 2):
-			var gx := sx + dx
-			var gy := sy + dy
-			if gx < 0 or gy < 0 or gx >= 100 or gy >= 100:
-				continue
-			if not _world.has_sector(gx, gy):
-				continue
-			var resolved: Variant = _sim.interior._footprints_for(gx, gy)
-			if resolved == null:
-				continue
-			for index: int in resolved:
-				var fp: Dictionary = resolved[index]
-				if Rect2i(fp["anchor"], fp["size"]).has_point(cell):
-					return {
-						"footprint": fp,
-						"key": gx * 1000000 + gy * 1000 + index,
-					}
-	return {}
+	var parent := _sim.interior.parent_for_cell(cell)
+	if parent.is_empty():
+		return {}
+	var child_id := _sim.interior.substate(parent["id"], 1)
+	var region := _sim.interior.support_region(child_id)
+	if region.is_empty() or not Rect2i(region["cell"], region["size"]).has_point(cell):
+		return {}
+	var child := _shadow_statics.get_object(child_id)
+	var coordinates := _world.coordinates_for_id(child["sector"])
+	return {
+		"footprint": {"anchor": region["cell"], "size": region["size"], "region": region},
+		"key": coordinates.x * 1000000 + coordinates.y * 1000 + region["index"],
+	}
 
 
 ## Nearest DOOR/STEP cell in the footprint region to `cell`, or (-1,-1).
@@ -1238,26 +1443,26 @@ func _begin_encounter(install: String, items) -> void:
 		return
 	_encounter.begin()
 	print(_encounter.status_line())
-	# The hero's first combat art shows its icon in the skill slot (row 1050:
-	# the slot carries the art's own icon, sliced at the regeneration
-	# waterline). The icon name comes from the art table inside the
-	# executable; the image is a loose texture.pak entry under that name.
+	# E1: the encounter's quest log IS the scenario's quest state. Held once,
+	# here, so ScenarioCheckpoint.capture reads the same object the VM wrote
+	# rather than a copy.
+	_quest_log = _encounter.log
+	# The hero's first assigned art draws its slot from the art's own element
+	# triple (row 1043 / sub_85E676A) -- NOT from the loose icon texture. The
+	# element names route it to the skill or spell column; an art with no
+	# triple (art 18) draws no slot at all. The HUD is built AFTER the
+	# encounter begins (line order in _ready), so the triple is held and
+	# applied by _build_hud.
 	if not _encounter.hero_arts.is_empty():
 		var arts := CombatArts.new(install)
-		var icon_name: String = arts.icon(int(_encounter.hero_arts[0]["id"]))
-		var tp := Sacred.Pak.new(install.path_join("pak/texture.pak"))
-		var tid := Sacred.TextureFormat.find_model_texture(tp, icon_name)
-		print("articon\ticon=%s tid=%d" % [icon_name, tid])
-		if tid >= 0:
-			var img := Sacred.TextureFormat.decode_texture(tp, tid)
-			if img != null:
-				# The HUD is built AFTER the encounter begins (line order in
-				# _ready), so the icon is held and applied by _build_hud.
-				_art_icon_tex = ImageTexture.create_from_image(img)
-		else:
-			print("articon\ttid negative for %s" % icon_name)
+		_art_elements = arts.elements(int(_encounter.hero_arts[0]["id"]))
+		print("articon\tart=%d\telements=%s" % [
+			int(_encounter.hero_arts[0]["id"]), _art_elements])
 	# --fight=N runs the loop to its end so a headless run can show the whole
 	# thing. Seeded, so two runs of the same command produce the same fight.
+	# Starting a NEW game must show retail's new-game state. The quest-74
+	# demonstration is opt-in (its own --fight= flag already drives it); without
+	# that flag nothing spawns a hostile and the HUD carries no encounter art.
 	if _fight_swings > 0:
 		var rng := RandomNumberGenerator.new()
 		rng.seed = FIGHT_SEED
@@ -1302,20 +1507,159 @@ func _begin_encounter(install: String, items) -> void:
 		get_tree().quit(0)
 
 
+## --- E1 scenario accessors. Read-only views over authoritative state; no
+## caller may mutate through them. ScenarioCheckpoint.capture is the only
+## consumer.
+
+## The scripted cast as handle -> creature id, in creation order. Read from
+## the live QuestCast the hook ran, not from _scripted_views (which is
+## renderer ownership and loses entries whose rig failed to build).
+func _cast_snapshot() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if _quest_cast != null:
+		for e: Dictionary in _quest_cast.cast:
+			out.append({"handle": e["handle"], "creature": e["creature"]})
+	return out
+
+
+## The hero's current animation identity and live clip time, or not-animated.
+## NAN time means "no clip playing" and is its own deterministic channel.
+func _anim_clip_state() -> Dictionary:
+	var mv: ModelView = null
+	if _player_view != null:
+		mv = _player_view.node as ModelView
+	if mv == null or not mv.is_playing():
+		return {"name": "", "time": NAN}
+	return {"name": _player_view.action, "time": mv.anim_time()}
+
+
 func _apply_retail_start(install: String) -> void:
 	if CLASS_MODEL.has(START_CLASS):
 		_player_model = CLASS_MODEL[START_CLASS]
 	else:
 		push_warning("start: no body mesh mapped for %s -- drawing %s" % [START_CLASS, _player_model])
 	var sc := Sacred.Startcode.new(install.path_join("bin").path_join(START_CLASS))
+	_scripted_objects_by_sector.clear()
+	for object: Dictionary in sc.objects:
+		var cell: Vector2i = object["cell"]
+		if cell == Sacred.Startcode.NO_CELL:
+			continue
+		var key := (cell.y / SECT) * 100 + cell.x / SECT
+		if not _scripted_objects_by_sector.has(key):
+			_scripted_objects_by_sector[key] = []
+		_scripted_objects_by_sector[key].append(object)
 	if sc.start_cell == Sacred.Startcode.NO_CELL:
 		push_warning("start: %s declares no StartPosition -- keeping %s" % [START_CLASS, start_cell])
 		return
 	start_cell = Vector2(sc.start_cell)
 	_retail_start = sc.start_cell
+	_retail_start_layer = sc.start_layer
 	print("start\tclass=%s\tmodel=%s\tcell=%d,%d\tlayer=%d\tsector=%d,%d" % [
 		START_CLASS, _player_model, sc.start_cell.x, sc.start_cell.y, sc.start_layer,
 		sc.start_cell.x / SECT, sc.start_cell.y / SECT])
+
+
+## Opcode-8 authored objects are not the static.pak sprite list. Their model
+## nodes belong to the sector, so unloading and revisiting cannot duplicate
+## them or leave offscreen objects alive.
+func _draw_scripted_objects(key: int, sector: Node3D, view: SectorView, install: String) -> void:
+	if not view._objects or not _scripted_objects_by_sector.has(key) or view._interior == null:
+		return
+	var staging := Node3D.new()
+	staging.name = "ScriptedObjects"
+	staging.hide()
+	sector.add_child(staging)
+	_scripted_object_jobs.append({"sector": sector, "view": view, "install": install,
+		"records": _scripted_objects_by_sector[key], "cursor": 0,
+		"staging": staging})
+	view.pending_scripted_objects += 1
+	if not get_tree().process_frame.is_connected(_advance_scripted_objects):
+		get_tree().process_frame.connect(_advance_scripted_objects)
+
+
+## One shared allowance, not one independent coroutine allowance per sector.
+## A single model construction is atomic; sector-sized groups are not.
+func _advance_scripted_objects() -> void:
+	var deadline := Time.get_ticks_usec() + 3000
+	var detached_jobs := 0
+	while not _scripted_object_jobs.is_empty() and Time.get_ticks_usec() < deadline:
+		var job: Dictionary = _scripted_object_jobs[0]
+		var view = job["view"]
+		var sector = job["sector"]
+		if not is_instance_valid(view) or not is_instance_valid(sector) \
+				or sector.is_queued_for_deletion():
+			if is_instance_valid(view):
+				view.pending_scripted_objects -= 1
+			_scripted_object_jobs.pop_front()
+			continue
+		# Temporary tree removal is not destruction. Resume this sector after
+		# re-entry rather than permanently losing its unfinished objects.
+		if not sector.is_inside_tree():
+			_scripted_object_jobs.pop_front()
+			_scripted_object_jobs.append(job)
+			detached_jobs += 1
+			if detached_jobs >= _scripted_object_jobs.size():
+				break
+			continue
+		detached_jobs = 0
+		if _scripted_models == null:
+			var pak := Sacred.Pak.new(String(job["install"]).path_join("pak/models.pak"))
+			if not pak.is_open():
+				push_error("scripted objects: models.pak is unavailable")
+				view.pending_scripted_objects -= 1
+				job["staging"].queue_free()
+				_scripted_object_jobs.pop_front()
+				continue
+			_scripted_models = Sacred.Models.new(pak)
+		var records: Array = job["records"]
+		if job["cursor"] < records.size():
+			var record: Dictionary = records[job["cursor"]]
+			job["cursor"] += 1
+			var built := _build_scripted_object(record, job["staging"], view)
+			if not built.is_empty():
+				# Prepare its capture under the hidden staging root. Showing
+				# the completed group must not allocate every capture at once.
+				view.place_actor(built["model"], built["type"], built["cell"],
+					built["support"], built["layer"])
+		if job["cursor"] == records.size():
+			job["staging"].show()
+			view.pending_scripted_objects -= 1
+			_scripted_object_jobs.pop_front()
+	if _scripted_object_jobs.is_empty():
+		get_tree().process_frame.disconnect(_advance_scripted_objects)
+
+
+func _build_scripted_object(record: Dictionary, sector: Node3D, view: SectorView) -> Dictionary:
+	var type_id: int = record["model"]
+	var name := view._items.name_of(type_id)
+	if name.is_empty():
+		push_warning("scripted objects: unresolved model for type %d" % type_id)
+		return {}
+	var cell := Vector2(record["cell"]) + Vector2(0.5, 0.5)
+	var support_ref := view._interior.initial_support_ref(record["cell"], type_id, record["layer"])
+	var base_height := 0.0
+	if support_ref != 0:
+		var support := view._statics.blob(support_ref)
+		if support.size() <= 51:
+			push_error("scripted objects: unresolved support %d" % support_ref)
+			return {}
+		base_height = float(support[51]) * 28.0
+	var data := view._interior.cell_data(record["cell"], support_ref)
+	var height := PlayerView.NativeActorShadow.support_height(cell, data, 0, base_height)
+	var heading := PlayerView.NativeActorShadow.heading_from_degrees(
+		view._items.initial_heading_degrees(type_id))
+	var object := PlayerView.new(_scripted_models, name, view._tex_pak,
+		PackedStringArray(), view._items.texture_of(type_id))
+	if object.node == null:
+		return {}
+	if not object.place_object(cell, heading, height, view._items.category_of(type_id)):
+		push_error("scripted objects: unresolved native placement for type %d" % type_id)
+		object.node.free()
+		return {}
+	object.node.name = "ScriptedObject_%s" % record["trigger"]
+	sector.add_child(object.node)
+	return {"model": object.node, "type": type_id, "cell": cell,
+		"support": support_ref, "layer": record["layer"]}
 
 
 ## The chosen spawn cell as a fact line, its class, the component size and how
@@ -1501,7 +1845,7 @@ func _interior_probe(world: Sacred.World, statics: Sacred.Statics, items: Sacred
 		get_tree().quit(1)
 		return
 	var target_key := 53 * 1000000 + 28 * 1000 + target_index
-	var interior := Interior.new(world, walk, footprints)
+	var interior := _sim.interior
 	var sim := Sim.new(_tick_hz)
 	var reg := ActorRegistry.new()
 	var outside := Vector2(3420.5, 1826.5)  # north wall-negative side, row 625
@@ -1711,94 +2055,6 @@ func _follow_probe() -> void:
 	get_tree().quit(1 if mismatch else 0)
 
 
-## Capture-only inverse locality probe for Phase 6 Plan 05. This is deliberately
-## outside normal streaming/replay paths: it creates the real SectorView, settles
-## the blacksmith framing, snapshots only sector 32,54's existing run metadata,
-## applies a current_with_families()-shaped artificial TENT state, and compares
-## BLACKSMITH runs before/after. It never invents arena/cellar families.
-func _inverse_locality_probe(install: String, tex_pak: Sacred.Pak, tiles: Sacred.Tiles,
-		world: Sacred.World, statics: Sacred.Statics, mixed: Sacred.Mixed, items: Sacred.Items,
-		footprints: Sacred.Footprints) -> void:
-	if statics == null or mixed == null or items == null or footprints == null:
-		printerr("inverse-locality\tFAIL missing static/mixed/items/footprints readers")
-		get_tree().quit(1)
-		return
-	_cam = IsoCamera.new()
-	_cam.cell_limit = Vector2(world.size) * SECT
-	add_child(_cam)
-	_view = SectorView.new()
-	_view.name = "SectorView_inverse_locality_probe"
-	_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {}, footprints)
-	add_child(_view)
-	_cam.set_zoom_index(2)
-	_cam.look_at_cell(Vector2(2096.0, 3493.0))
-	for _i in 600:
-		await get_tree().process_frame
-		if not is_instance_valid(self):
-			return
-		if _view._run_nodes.has(32 * 100 + 54):
-			break
-	var target_key := 54 * 100 + 32
-	var before: Array = _view._run_nodes.get(target_key, [])
-	# Establish the normal exterior baseline through the same visibility-only
-	# path before injecting the unrelated TENT state.
-	_view.apply_swap({})
-	var blacksmith_before := _run_visibility_snapshot(before, "BLACKSMITH")
-	var tent_family := _probe_tent_family(footprints, world)
-	var artificial: Dictionary = {}
-	if tent_family != "":
-		artificial[1] = {"state": Interior.State.INTERIOR, "family": tent_family}
-	_view.apply_swap(artificial)
-	var after: Array = _view._run_nodes.get(target_key, [])
-	var blacksmith_after := _run_visibility_snapshot(after, "BLACKSMITH")
-	var tent_before := _run_visibility_snapshot(before, tent_family)
-	var tent_after := _run_visibility_snapshot(after, tent_family)
-	var blacksmith_same := blacksmith_before == blacksmith_after
-	var run_metadata_same := _run_metadata_snapshot(before) == _run_metadata_snapshot(after)
-	var target_ready := not before.is_empty() and tent_family != ""
-	var verdict := "PASS" if target_ready and blacksmith_same and run_metadata_same else "FAIL"
-	print("inverse-locality\\tframe=2096,3493\\tsector=32,54\\ttent_family=%s\\tblacksmith_before=%s\\tblacksmith_after=%s\\ttent_before=%s\\ttent_after=%s\\trun_metadata_same=%s\\tverdict=%s" % [
-		tent_family, blacksmith_before, blacksmith_after, tent_before, tent_after,
-		run_metadata_same, verdict])
-	get_tree().quit(0 if verdict == "PASS" else 1)
-
-
-func _probe_tent_family(footprints: Sacred.Footprints, world: Sacred.World) -> String:
-	for sector: Vector2i in [Vector2i(52, 51), Vector2i(53, 51), Vector2i(53, 52)]:
-		var resolved := footprints.resolve(world.sector(sector.x, sector.y), sector.x, sector.y)
-		for index: int in resolved:
-			var family := str(resolved[index].get("family", ""))
-			if family.begins_with("TENT"):
-				return family
-	return ""
-
-
-func _run_visibility_snapshot(runs: Array, family: String) -> String:
-	var visible := 0
-	var hidden := 0
-	var matching := 0
-	var classes: Dictionary[String, int] = {}
-	for run_meta: Dictionary in runs:
-		if str(run_meta.get("family", "")) != family:
-			continue
-		matching += 1
-		var run_class := str(run_meta.get("class", ""))
-		classes[run_class] = int(classes.get(run_class, 0)) + 1
-		if bool(run_meta["node"].visible):
-			visible += 1
-		else:
-			hidden += 1
-	return "family=%s matching=%d visible=%d hidden=%d classes=%s" % [family, matching, visible, hidden, classes]
-
-
-func _run_metadata_snapshot(runs: Array) -> Array[String]:
-	var out: Array[String] = []
-	for run_meta: Dictionary in runs:
-		out.append("%d:%d:%s:%s:%d:%s" % [
-			int(run_meta["source_start"]), int(run_meta["source_end"]),
-			str(run_meta["class"]), str(run_meta["family"]), int(run_meta["band"]),
-			str(run_meta["material_key"])])
-	return out
 
 
 ## Builds the Walkable navmesh, derives (or takes the override for) the
@@ -1835,8 +2091,11 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 	_player_id = _registry.spawn(rec_id, cell, 100, 100)
 	_sim.walk = walk
 	_sim.focus_actor_id = _player_id
-	var interior := Interior.new(world, walk, footprints)
-	_sim.interior = interior
+	var interior := _sim.interior
+	if interior != null:
+		interior.place_focus(cell, _player_type, _retail_start_layer)
+	# The record/replay route replays the recorded state, including any
+	# --fight run that spawned the encounter; it keeps the direct call.
 	_begin_encounter(install, items)
 
 	if live_view and _record_path != "":
@@ -1845,16 +2104,21 @@ func _run_record_or_replay(world: Sacred.World, install: String, tex_pak: Sacred
 		add_child(_cam)
 		_view = SectorView.new()
 		_view.name = "SectorView"
-		_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {}, footprints)
+		_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items,
+			{"interior": interior})
+		_view.sector_built.connect(_draw_scripted_objects.bind(_view, install))
 		add_child(_view)
 		_cam.set_zoom_index(1)
 		_cam.look_at_cell(cell)
 		var models_pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 		if models_pak.is_open():
 			_player_view = PlayerView.new(Sacred.Models.new(models_pak), _player_model,
-				null, PackedStringArray(BASE_HIDE))
+				tex_pak, PackedStringArray(BASE_HIDE), items.texture_of(_player_type) if items != null else -1)
 			if _player_view.node != null:
 				add_child(_player_view.node)
+				_player_view.configure_actor(_player_type, items, _shadow_creatures)
+				_player_shadow_heading = _player_view.initial_shadow_heading
+				_player_shadow_last_facing = _registry.get_actor(_player_id).facing
 				print("player\tmodel=%s\tindex=%d\tverts=%d\ttris=%d" % [
 					_player_model, _player_view.model_index,
 					_player_view.vertex_count, _player_view.triangle_count])
@@ -1947,21 +2211,20 @@ func _run_replay() -> void:
 	get_tree().quit(0 if err == OK else 1)
 
 
-## Pumps frames until the view reports settled, or `budget` frames pass.
-## Mirrors _maybe_screenshot's await + is_instance_valid idiom -- this node
-## can be freed mid-coroutine.
-func _pump_until_settled(budget: int) -> void:
-	for _i in budget:
-		# process_frame, not RenderingServer.frame_post_draw: under plain
-		# --headless there is no draw pass, so frame_post_draw never fires and
-		# this coroutine would park forever (observed directly -- see the
-		# deviation note in the 01-01 write-up). process_frame fires once per
-		# main-loop iteration regardless of whether anything is drawn.
+## Pumps the same progressive streamer used during play. A frame-count limit
+## is invalid once construction deliberately spans many inexpensive frames.
+## Timeout is an error, never permission to measure a partially built scene.
+func _pump_until_settled() -> bool:
+	var deadline := Time.get_ticks_msec() + VIEW_SETTLE_TIMEOUT_MS
+	while Time.get_ticks_msec() < deadline:
 		await get_tree().process_frame
 		if not is_instance_valid(self):
-			return
+			return false
 		if _view.is_settled():
-			return
+			return true
+	push_error("View did not settle before the readiness deadline")
+	get_tree().quit(1)
+	return false
 
 
 ## Plan 05-08: --crowd=N. Opt-in only, never runs without the flag.
@@ -2057,12 +2320,13 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 	add_child(_cam)
 	_view = SectorView.new()
 	_view.name = "SectorView"
-	_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items, {})
+	_view.setup(_cam, tex_pak, tiles, world, statics, mixed, items,
+		{"interior": _sim.interior})
+	_view.sector_built.connect(_draw_scripted_objects.bind(_view, install))
 	add_child(_view)
 	_cam.set_zoom_index(1)
 	_cam.look_at_cell(start_cell)
-	await _pump_until_settled(PROBE_FRAME_BUDGET)
-	if not is_instance_valid(self):
+	if not await _pump_until_settled():
 		return
 
 	# Grid centred on start_cell, CROWD_SPACING cells apart, so distinct rigs
@@ -2083,12 +2347,17 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 		var gy := i / side
 		var cell := start_cell + Vector2(float(gx) - half, float(gy) - half) * CROWD_SPACING
 		var t0 := Time.get_ticks_usec()
-		var pv := PlayerView.new(models, _player_model)
+		var pv := PlayerView.new(models, _player_model, tex_pak,
+			PackedStringArray(), items.texture_of(_player_type) if items != null else -1)
 		if pv.node == null:
 			build_times_ms.append((Time.get_ticks_usec() - t0) / 1000.0)
 			continue
 		add_child(pv.node)
 		pv.update(cell)
+		pv.configure_actor(_player_type, items, _shadow_creatures)
+		if _view != null and _view._interior != null:
+			var support_ref := _view._interior.initial_support_ref(Vector2i(cell), _player_type, 0)
+			_update_native_actor(pv, cell, pv.initial_shadow_heading, support_ref)
 		# 05-14: playback through the SAME ModelView.play_clip() main.gd's
 		# --anim= route calls (05-12's landed reader-level path) -- no
 		# benchmark-only animation path, and no new rig builder: the rig is
@@ -2118,8 +2387,7 @@ func _run_crowd(install: String, world: Sacred.World, tex_pak: Sacred.Pak,
 		get_tree().quit(1)
 		return
 
-	await _pump_until_settled(PROBE_FRAME_BUDGET)
-	if not is_instance_valid(self):
+	if not await _pump_until_settled():
 		return
 
 	# Per-frame cost, measured while the camera pans -- process_frame, not
@@ -2230,8 +2498,7 @@ func _actor_probe(n: int, route: String) -> void:
 	# 1. Settle on the probe's home sector before spawning or ticking.
 	_cam.set_zoom_index(1)
 	_cam.look_at_cell(PROBE_FOCUS)
-	await _pump_until_settled(PROBE_FRAME_BUDGET)
-	if not is_instance_valid(self):
+	if not await _pump_until_settled():
 		return
 
 	# 2. A fixed, deterministic actor set. Actor 1 is stationary and wounded
@@ -2331,8 +2598,7 @@ func _actor_probe(n: int, route: String) -> void:
 	var waypoints: Array[Vector2] = route_a if route == "a" else route_b
 	for wp: Vector2 in waypoints:
 		_cam.look_at_cell(wp)
-		await _pump_until_settled(PROBE_FRAME_BUDGET)
-		if not is_instance_valid(self):
+		if not await _pump_until_settled():
 			return
 
 	# 5. Print, in this exact order: every registry dump line, the sim
@@ -2362,7 +2628,7 @@ func _actor_probe(n: int, route: String) -> void:
 ## name is fatal and loud -- rendering nothing while exiting 0 is the failure
 ## mode that makes a broken capture look like a working one.
 func _show_model(install: String, name: String, anim_name: String = "", anim_falsify: String = "",
-		anim_key_report: String = "", anim_rigcheck: String = "") -> void:
+		anim_key_report: String = "", anim_rigcheck: String = "", native_motion: int = -1) -> void:
 	var pak := Sacred.Pak.new(install.path_join("pak/models.pak"))
 	if not pak.is_open():
 		printerr("grn\tcannot open pak/models.pak under %s" % install)
@@ -2405,16 +2671,16 @@ func _show_model(install: String, name: String, anim_name: String = "", anim_fal
 		if not _anim_rigcheck(models, idx, anim_rigcheck):
 			get_tree().quit(1)
 			return
-	if anim_name != "":
-		# --anim=NAME resolves through Models.clip_index_of, the identical
-		# kind-scoped lookup --clip= uses -- a mesh-kind or wrong-kind name
-		# cannot silently resolve here either. Fatal and loud on both an
-		# unresolvable name and a resolved-but-unbindable one (a motion-kind
-		# entry with no per-bone AnimationTransformTrackKeys records, e.g.
-		# GLADIATOR.GRN's own motion-model entry): exiting 0 having bound
-		# nothing is the failure mode _show_clip's own doc comment already
-		# names.
-		var anim_idx := models.clip_index_of(anim_name)
+	if anim_name != "" or native_motion >= 0:
+		var anim_idx := models.native_motion_entry(idx, native_motion) if native_motion >= 0 \
+			else models.clip_index_of(anim_name)
+		if native_motion >= 0:
+			if anim_idx < 0:
+				printerr("motion\tmodel %s has no motion enum %d in this archive" % [name, native_motion])
+				get_tree().quit(1)
+				return
+			print("motion\tmodel=%s\tenum=%d\tclip=%d\tname=%s" % [
+				name, native_motion, anim_idx, models.entry_name(anim_idx)])
 		if anim_idx < 0:
 			printerr("anim\tno motion-kind entry named %s in pak/models.pak (%d entries)" % [anim_name, models.count()])
 			get_tree().quit(1)
@@ -2848,15 +3114,11 @@ func _await_settled() -> bool:
 			return false
 		await RenderingServer.frame_post_draw
 		return is_instance_valid(self)
-	for _i in 600:
-		await RenderingServer.frame_post_draw
-		# The node can be freed while a coroutine is parked on an await.
-		if not is_instance_valid(self):
-			return false
-		if _view.is_settled():
-			await RenderingServer.frame_post_draw
-			break
-	return true
+	if not await _pump_until_settled():
+		return false
+	# The staged command root is complete; wait for its presented image too.
+	await RenderingServer.frame_post_draw
+	return is_instance_valid(self)
 
 
 ## --shot=FILE renders one frame, writes it, and exits. --drawcalls prints the
@@ -3011,15 +3273,19 @@ func _build_creatures(install: String, models: Sacred.Models, player_cell: Vecto
 		if not wanted.has(mi):
 			wanted.append(mi)
 	if only != "" and picks.is_empty():
-		# The sector does not roll it. Draw it regardless -- the point of the
-		# flag is to put a NAMED mesh in front of the camera, and reporting
-		# "resolved=0" here would just hide the creature under discussion.
-		for i in models.count():
-			if models.kind_of(i) == Sacred.Models.KIND_MOTION \
-					or not models.entry_name(i).to_upper().begins_with(only):
+		# Diagnostic spawn still needs a real definition: model-only type -1
+		# bypassed support admission and rendered outside the shared compositor.
+		# Select the first matching creature definition, and print that choice.
+		for type_id in _shadow_creatures.ids():
+			var nm := items.name_of(type_id)
+			if not nm.to_upper().begins_with(only):
 				continue
-			picks.append({"id": -1, "name": models.entry_name(i), "mesh": i, "kind": 0})
-			wanted.append(i)
+			var mi := models.index_of(nm)
+			if mi < 0:
+				continue
+			picks.append({"id": type_id, "name": nm, "mesh": mi, "kind": 0})
+			wanted.append(mi)
+			print("creatures\tforced_type=%d\tmodel=%s" % [type_id, nm])
 			break
 	if picks.is_empty():
 		print("creatures\tsector=%d,%d\trolls=%d\tresolved=0" % [gx, gy, rolls.size()])
@@ -3033,7 +3299,8 @@ func _build_creatures(install: String, models: Sacred.Models, player_cell: Vecto
 	var animated := 0
 	var kinds := {}
 	for pick in picks:
-		var pv := PlayerView.new(models, pick["name"], tex_pak)
+		var pv := PlayerView.new(models, pick["name"], tex_pak,
+			PackedStringArray(), items.texture_of(int(pick["id"])))
 		if pv.node == null:
 			continue
 		add_child(pv.node)
@@ -3042,17 +3309,14 @@ func _build_creatures(install: String, models: Sacred.Models, player_cell: Vecto
 			rng.randf_range(-CREATURE_SPREAD, CREATURE_SPREAD),
 			rng.randf_range(-CREATURE_SPREAD, CREATURE_SPREAD))
 		pv.update(cell)
-		# FACING (row 793). Deterministic under CREATURE_SEED like the scatter,
-		# so a capture pair stays comparable. --creature-yaw=DEG forces one yaw
-		# on every creature instead, which is what makes the elf question
-		# answerable: sweep it and see whether ANY facing reproduces retail's
-		# full-width silhouette.
-		# Default is 0, i.e. exactly the orientation every creature had before
-		# facing existed. A random yaw was tried here and removed: nothing in the
-		# data says which way a spawned creature faces, so scattering them would
-		# be invention dressed as behaviour. --creature-yaw stays a diagnostic
-		# until a real facing source is decoded.
-		pv.set_yaw(deg_to_rad(yaw_forced) if forced_yaw else 0.0)
+		# Initial heading comes from the definition. The diagnostic override
+		# uses the same native angle conversion, never a second root-bone yaw.
+		if int(pick["id"]) > 0:
+			pv.configure_actor(int(pick["id"]), items, _shadow_creatures)
+			var heading := PlayerView.NativeActorShadow.heading_from_degrees(yaw_forced) \
+				if forced_yaw else pv.initial_shadow_heading
+			_update_native_actor(pv, cell, heading,
+				_sim.interior.initial_support_ref(Vector2i(cell), pv.actor_type, 0))
 		_creature_views.append(pv)
 		_creature_cells.append(cell)
 		built += 1
@@ -3181,7 +3445,8 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 		# The hand items travel as their SKINS too, not just their names: an
 		# item's +0x08 is a texture.pak entry and retail prefers it over the
 		# mesh's own texture name, which for a shield is the only right picture.
-		picks.append({"name": nm, "mesh": mi, "cell": e["cell"],
+		picks.append({"type": int(rec["body"]), "layer": int(rec["layer"]),
+			"name": nm, "mesh": mi, "cell": e["cell"],
 			"hands": [items.name_of(rec["main"]), items.name_of(rec["off"])],
 			"skins": [items.texture_of(rec["main"]), items.texture_of(rec["off"])]})
 		if not wanted.has(mi):
@@ -3199,12 +3464,15 @@ func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -
 	var no_socket_hands := 0
 	var kinds := {}
 	for pick in picks:
-		var pv := PlayerView.new(models, pick["name"], tex_pak)
+		var pv := PlayerView.new(models, pick["name"], tex_pak,
+			PackedStringArray(), items.texture_of(int(pick["type"])))
 		if pv.node == null:
 			continue
 		add_child(pv.node)
 		pv.update(pick["cell"])
-		pv.set_yaw(0.0)
+		pv.configure_actor(int(pick["type"]), items, _shadow_creatures)
+		_update_native_actor(pv, pick["cell"], pv.initial_shadow_heading,
+			_sim.interior.initial_support_ref(Vector2i(pick["cell"]), pv.actor_type, int(pick["layer"])))
 		_creature_views.append(pv)
 		_creature_cells.append(pick["cell"])
 		built += 1
@@ -3300,6 +3568,7 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 	var code := FileAccess.get_file_as_bytes(dir.path_join("funkcode.bin"))
 	var vm := ScriptVM.new()
 	var cast := QuestCast.new()
+	_quest_cast = cast   # E1: retained so Checkpoint.capture can read the live cast
 	if not vm.run(code, hook["offset"], hook["length"], cast):
 		# A REFUSAL IS REPORTED, NOT SWALLOWED. ScriptVM refuses a whole hook
 		# rather than skipping the opcode it cannot run, so this is "she is
@@ -3318,12 +3587,23 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 	var wanted := PackedInt32Array()
 	var unresolved := 0
 	var placed := cast.placed()
+	# A SCRIPTED NPC IS WORLD STATE, not a posed doll. Each placed cast entry
+	# becomes a simulation actor, so NPC_Goto drives real movement and later
+	# quests can walk the same res: handle (quest 9 does exactly that). The
+	# renderer then follows the actor, exactly like the hero.
+	var scripted: Dictionary[int, ActorState] = {}
+	var registry := _registry
 	for e: Dictionary in placed:
 		var nm: String = items.name_of(int(e["creature"]))
 		var mi := models.index_of(nm) if nm != "" else -1
 		if mi < 0:
 			unresolved += 1
 			continue
+		if registry != null and _sim != null:
+			var id := registry.spawn(int(e["creature"]),
+				Vector2(e["cell"]) + GOTO_CELL_CENTRE, 40, 40)
+			if id != ActorRegistry.INVALID_ID:
+				scripted[int(e["creature"])] = registry.get_actor(id)
 		# A GOTO DESTINATION IS A CELL CENTRE, not a cell corner. `cell_to_world`
 		# maps an integer cell to its corner vertex, which is right for the hero --
 		# she is SPAWNED at a cell and her feet land on retail's to the pixel
@@ -3343,7 +3623,7 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		# walking at the 4 s mark, which is the same reason this is a destination
 		# and not a spawn point. The port does not simulate the walk, so it draws
 		# where she ends up.
-		picks.append({"name": nm, "mesh": mi,
+		picks.append({"type": int(e["creature"]), "name": nm, "mesh": mi,
 			"cell": Vector2(e["cell"]) + GOTO_CELL_CENTRE})
 		if not wanted.has(mi):
 			wanted.append(mi)
@@ -3351,30 +3631,33 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 
 	var built := 0
 	var animated := 0
+	# Renderer follows the simulation actor when one exists. She walks her
+	# NPC_Goto route through the same Movement sweep as the hero instead of
+	# being drawn at her destination.
+	var scripted_views: Dictionary[int, PlayerView] = {}
 	for pick: Dictionary in picks:
 		var nm: String = pick["name"]
 		var mi: int = pick["mesh"]
-		var pv := PlayerView.new(models, nm, tex_pak)
+		var pv := PlayerView.new(models, nm, tex_pak,
+			PackedStringArray(), items.texture_of(int(pick["type"])))
 		if pv.node == null:
 			unresolved += 1
 			continue
 		add_child(pv.node)
-		var cell: Vector2 = pick["cell"]
+		var actor: ActorState = scripted.get(int(pick["type"]))
+		var cell: Vector2 = actor.cell if actor != null else pick["cell"]
 		pv.update(cell)
-		# Her FACING is her Goto travel direction. The hook creates her and
-		# only then NPC_Gotos her to cell (3237,2514); retail's fourth capture
-		# caught her still walking there (y 340-419), and the settled captures
-		# show her back to the camera -- both match travel from the only origin
-		# the hook ties her to, the hero's own spawn cell (row 1106: drawn
-		# there, her feet land on retail's foot row). face() carries the
-		# render-calibrated -Z convention, so this is measured direction in,
-		# measured convention through -- not a chosen constant.
-		pv.face(cell, IsoCamera.cell_to_world(cell)
-			- IsoCamera.cell_to_world(Vector2(start_cell)))
+		# The scripted Goto supplies the initial world-space travel direction;
+		# native actor placement converts it once for both body and shadow.
+		pv.configure_actor(int(pick["type"]), items, _shadow_creatures)
+		_update_native_actor(pv, cell, cell - Vector2(start_cell),
+			_sim.interior.initial_support_ref(Vector2i(cell), pv.actor_type, 0))
 		# Shared with the rolled and scripted casts so the tree frees these rigs
 		# by exactly the same route -- _build_npcs' own stated reason.
 		_creature_views.append(pv)
 		_creature_cells.append(cell)
+		if actor != null:
+			scripted_views[actor.id] = pv
 		built += 1
 		# rest_clip(), NOT clip_for(). clip_for is the best GEOMETRIC score and
 		# for a standing character that is routinely wrong: it gives NOVIZIN02 a
@@ -3397,6 +3680,7 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		placed.size(), built, animated, unresolved,
 		placed.reduce(func(n: int, e: Dictionary) -> int: return n + (1 if e["compass"] else 0), 0),
 		cast.lines.size(), Time.get_ticks_msec() - start])
+	_scripted_views = scripted_views
 	# THE CLIP IS NAMED, not just counted. A capture that says `animated=1` and
 	# nothing more cannot tell an idle from a walk, and a walk is exactly what
 	# clip_for() was handing this NPC while she stood still.
@@ -3984,12 +4268,60 @@ func _update_sector_env(cell: Vector2) -> void:
 ## turned", written from the delta it actually moved, seeded towards the viewer.
 ## No hold is needed here: the hold lives in the sim, where every actor gets it.
 ##
-## Nothing here reaches into the sim beyond reading that one field: the
-## derivation of the angle lives in PlayerView.face, which asks IsoCamera and
-## SectorView where the direction actually lands rather than assuming a
-## projection.
+## Body and shadow share native actor orientation; no calibrated root-bone
+## yaw is applied on top of the actual world-space facing.
 func _face_player(p: ActorState) -> void:
-	_player_view.face(p.cell, p.facing)
+	# The standing actor starts from item+87's native angle. Once simulation
+	# changes facing, its held movement direction is authoritative. Magnitude
+	# is simulation-owned; native float subtraction can differ at large cells.
+	if p.facing != _player_shadow_last_facing:
+		_player_shadow_heading = p.facing
+		_player_shadow_last_facing = p.facing
+	if _sim.interior != null:
+		_update_native_actor(_player_view, p.cell, _player_shadow_heading, _sim.interior.support_ref())
+
+
+## A class's HERO entry, joined through the authored item model name. Requiring
+## uniqueness avoids assigning arbitrary mesh-sharing creature identities.
+func _resolve_player_type() -> int:
+	if _shadow_items == null or _shadow_creatures == null:
+		return 0
+	var found := 0
+	for type_id in _shadow_creatures.ids():
+		if _shadow_creatures.class_of(type_id) != 1 \
+				or _shadow_items.name_of(type_id).to_upper() != _player_model.to_upper():
+			continue
+		if found != 0:
+			push_error("player shadow: selected HERO model has ambiguous actor types")
+			return 0
+		found = type_id
+	if found == 0:
+		push_error("player shadow: selected HERO model has no creature type")
+	return found
+
+
+## Current production actors are unattached single-player actors. Building
+## support comes from the native authored parent lookup, not the cutaway rect.
+## Attachments/remote-player suppression must supply their actual predicates
+## when those actor states exist; this call does not pretend they exist now.
+func _update_native_actor(pv: PlayerView, cell: Vector2, heading: Vector2,
+		support_ref: int) -> void:
+	if pv.node != null and _view != null:
+		_view.place_actor(pv.node, pv.actor_type, cell, support_ref)
+	if _sim.interior == null:
+		return
+	var base_height := 0.0
+	if support_ref != 0:
+		var support := _shadow_statics.blob(support_ref) if _shadow_statics != null else PackedByteArray()
+		if support.size() <= 51:
+			push_error("actor shadow: unresolved support record %d" % support_ref)
+			pv.disable_blob_shadow()
+			return
+		base_height = float(support[51]) * 28.0
+	var data: PackedByteArray = _sim.interior.cell_data(Vector2i(floori(cell.x), floori(cell.y)), support_ref)
+	var height := PlayerView.NativeActorShadow.support_height(cell, data, 0, base_height)
+	pv.update_native_actor(cell, heading, height, support_ref, false,
+		ACTOR_SHADOW_DETAIL, false, false)
 
 
 ## THE HERO'S ACTION, chosen once per frame from what the sim actually did.
@@ -4064,6 +4396,7 @@ func _export_hero_obj(out_path: String) -> void:
 		get_tree().quit(1)
 		return
 	m.store_line("# Seraphim materials\n")
+	(mv as ModelView).prepare_render()
 	_export_mesh_children(mv, f, m, out_path)
 	f.close()
 	m.close()
@@ -4087,6 +4420,7 @@ func _export_hero_obj(out_path: String) -> void:
 			printerr("export: cannot open cast output %d" % i)
 			continue
 		cm.store_line("# Cast material %d\n" % i)
+		(cast_view.node as ModelView).prepare_render()
 		_export_mesh_children(cast_view.node, cf, cm, out_path + "_cast%d" % i)
 		cf.close()
 		cm.close()
@@ -4095,10 +4429,9 @@ func _export_hero_obj(out_path: String) -> void:
 	_ex_prefix = ""
 	get_tree().quit(0)
 
-## The placement facts the OBJ cannot carry: the RigPlacement modifier
-## (scale, yaw, world offset) runs after the mixer and is therefore NOT baked
-## into the exported vertices. The Bevy side applies M = spin*scale+offset
-## itself, from this file.
+## Placement metadata. Native actor node transforms are affine, not a rotation
+## plus uniform scale. OBJ vertices already contain this transform; the full
+## row-major basis preserves it for diagnostic consumers without TRS loss.
 func _write_rig_meta(out_path: String, pv: PlayerView) -> void:
 	var mf := FileAccess.open(out_path + ".meta", FileAccess.WRITE)
 	if mf == null or pv._placement == null:
@@ -4110,14 +4443,22 @@ func _write_rig_meta(out_path: String, pv: PlayerView) -> void:
 		pv._placement.local_offset.y, pv._placement.local_offset.z])
 	var node: Node3D = pv.node
 	var xf: Transform3D = node.global_transform
-	var q: Quaternion = xf.basis.get_rotation_quaternion().normalized()
+	var q: Quaternion = xf.basis.orthonormalized().get_rotation_quaternion().normalized()
 	mf.store_line("node_origin=%f,%f,%f" % [xf.origin.x, xf.origin.y, xf.origin.z])
 	mf.store_line("node_quat=%f,%f,%f,%f" % [q.w, q.x, q.y, q.z])
+	mf.store_line("node_basis_rows=%f,%f,%f,%f,%f,%f,%f,%f,%f" % [
+		xf.basis.x.x, xf.basis.y.x, xf.basis.z.x,
+		xf.basis.x.y, xf.basis.y.y, xf.basis.z.y,
+		xf.basis.x.z, xf.basis.y.z, xf.basis.z.z])
 	mf.close()
 
 
 func _export_mesh_children(node: Node, f: FileAccess, m: FileAccess, out_path: String) -> void:
 	for child in node.get_children():
+		# These are compositor packets, not model geometry: their vertices are
+		# procedural shader inputs and deliberately have no normals/tri indices.
+		if child is ModelView.ActorBlobShadow:
+			continue
 		if child is MeshInstance3D:
 			var mi := child as MeshInstance3D
 			if mi.mesh == null:
@@ -4141,6 +4482,12 @@ func _export_mesh_children(node: Node, f: FileAccess, m: FileAccess, out_path: S
 					var bones: PackedInt32Array = arrays[Mesh.ARRAY_BONES]
 					var weights: PackedFloat32Array = arrays[Mesh.ARRAY_WEIGHTS]
 					if bones.size() >= verts.size() * 4:
+						var palette: Array[Transform3D] = []
+						for bind in mi.skin.get_bind_count():
+							var bone := mi.skin.get_bind_bone(bind)
+							var pose: Transform3D = skel.get_meta(&"affine_global_poses")[bone] \
+								if skel.has_meta(&"affine_global_poses") else skel.get_bone_global_pose(bone)
+							palette.append(pose * mi.skin.get_bind_pose(bind))
 						var posed_v := PackedVector3Array()
 						posed_v.resize(verts.size())
 						var posed_n := PackedVector3Array()
@@ -4152,7 +4499,7 @@ func _export_mesh_children(node: Node, f: FileAccess, m: FileAccess, out_path: S
 								var w: float = weights[vi * 4 + k]
 								if w > 0.0:
 									var ki: int = bones[vi * 4 + k]
-									var bp: Transform3D = skel.get_bone_global_pose(mi.skin.get_bind_bone(ki)) * mi.skin.get_bind_pose(ki)
+									var bp: Transform3D = palette[ki]
 									p += (bp * verts[vi]) * w
 									nn += (bp.basis * norms[vi]) * w
 							posed_v[vi] = p
@@ -4166,21 +4513,25 @@ func _export_mesh_children(node: Node, f: FileAccess, m: FileAccess, out_path: S
 					mat = mi.mesh.surface_get_material(s)
 				if mat == null:
 					mat = mi.material_override
+				var texture: Texture2D
 				if mat is StandardMaterial3D:
-					var sm := mat as StandardMaterial3D
-					if sm.albedo_texture != null:
-						var img: Image = sm.albedo_texture.get_image()
-						if img != null:
-							img.save_png(out_path.get_base_dir() + "/tex_%s%d.png" % [_ex_prefix, _ex_surf])
-							gname = "tex_%s%d" % [_ex_prefix, _ex_surf]
+					texture = mat.albedo_texture
+				elif mat is ShaderMaterial and mat.shader == PlayerView.NativeObjectShader:
+					texture = mat.get_shader_parameter(&"skin")
+				if texture != null:
+					var img := texture.get_image()
+					if img != null:
+						img.save_png(out_path.get_base_dir() + "/tex_%s%d.png" % [_ex_prefix, _ex_surf])
+						gname = "tex_%s%d" % [_ex_prefix, _ex_surf]
 				m.store_line("newmtl %s\nKa 0.5 0.5 0.5\nKd 0.8 0.8 0.8\nillum 2\n" % gname)
 				f.store_line("g %s" % gname)
 				f.store_line("usemtl %s" % gname)
 				for v in verts:
 					var wp: Vector3 = xf * v
 					f.store_line("v %f %f %f" % [wp.x, wp.y, wp.z])
+				var normal_transform := xf.basis.inverse().transposed()
 				for n in norms:
-					var wn: Vector3 = xf.basis * n
+					var wn: Vector3 = (normal_transform * n).normalized()
 					f.store_line("vn %f %f %f" % [wn.x, wn.y, wn.z])
 				for uv in uvs:
 					f.store_line("vt %f %f" % [uv.x, uv.y])

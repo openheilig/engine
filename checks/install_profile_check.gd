@@ -23,8 +23,13 @@ func _init() -> void:
 	else:
 		fails += 1
 		printerr("FAIL ghost root accepted")
-	# 3. a mixed-case tree in a temp dir: PAK/, WORLD/ uppercase copies
+	# 3. a mixed-case tree in a temp dir: PAK/, WORLD/ uppercase copies.
+	# A PREVIOUS RUN of this check leaves its step-4 lowercase dirs behind,
+	# which would turn this run's step 3 into a collision case -- so the
+	# scratch tree is removed, not reused.
 	var tmp := "/tmp/openheilig-r0-mixed"
+	OS.move_to_trash(tmp)   # best effort; a non-empty stale tree must go
+	DirAccess.remove_absolute(tmp)
 	DirAccess.make_dir_recursive_absolute(tmp + "/PAK")
 	DirAccess.make_dir_recursive_absolute(tmp + "/WORLD")
 	FileAccess.open(tmp + "/PAK/TILES.PAK", FileAccess.WRITE).close()
