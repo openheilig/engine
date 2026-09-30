@@ -46,6 +46,13 @@ func _init() -> void:
 		"calendar head fields drifted: %s" % str(cal))
 	expect(bool(cal.get("end_sentinel", false)), "calendar must end with 0xDEADC0DE")
 
+	# The Engine section names its world ("WORLD\") and ends with the
+	# 0xFACEDEAD sentinel.
+	var eng: Dictionary = sg.engine()
+	expect(bool(eng.get("end_sentinel", false)), "engine section sentinel")
+	expect(String(eng.get("world_path", "")).begins_with("WORLD"),
+		"engine world path %s" % eng.get("world_path"))
+
 	# A nonexistent section reads empty.
 	expect(sg.section(0x77).is_empty(), "unknown section reads empty")
 

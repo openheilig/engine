@@ -89,6 +89,24 @@ func calendar() -> Dictionary:
 	}
 
 
+## X1: the 0x80 Engine section (64 bytes on the shipped save), decoded
+## structurally: u16 0x0444, u16 0, u16 0x042F, u16 1, u16 1, u16 0,
+## the 0xFACEDEAD sentinel, then the CURRENT WORLD PATH ("WORLD\" on the
+## shipped save) in a fixed field -- which world the save belongs to.
+func engine() -> Dictionary:
+	var b := section(SEC_ENGINE)
+	if b.size() < 64:
+		return {}
+	var end_sentinel := b.decode_u32(14)
+	var world_path := b.slice(20, 52).get_string_from_ascii()
+	var dot := world_path.find(".")
+	if dot >= 0:
+		world_path = world_path.substr(0, dot)
+	return {"w0": b.decode_u16(0), "w6": b.decode_u16(6),
+		"world_path": world_path.strip_edges(),
+		"end_sentinel": end_sentinel == 0xFACEDEAD}
+
+
 ## X1: the 0xC3 hero blob decoder, transcribed from game01.pak's real
 ## bytes: +0 u32 (slot/count, 2 on the shipped save), +4 u32 class type
 ## (1 = Seraphim, the GetTypeName numbering), +8 a fixed-width UTF-16LE
