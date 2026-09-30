@@ -902,7 +902,15 @@ func _ready() -> void:
 			_session = GameSession.new_game(install, player_cell)
 			_registry = _session.registry
 			_quest_log = _session.quest_log
+			# The session owns its own Sim, which knows nothing about the
+			# interior built above -- dropping it here silently moved the
+			# start scene outside the chapel (start_scene_gate FAIL, world
+			# band 98.51% vs the 11.00% baseline). Carry it over.
+			var carried_interior := _sim.interior
 			_sim = _session.sim
+			_sim.interior = carried_interior
+			if _sim.interior == null:
+				push_error("session cutover: interior lost -- the start scene will render outside")
 			_player_id = _session.player_id
 			print("player\thp=%d\tderived=session new_game (%s)" % [
 				_session.player_hp, _session.start_template])
