@@ -90,6 +90,7 @@ func substate(parent_id: int, layer: int) -> int:
 func support_ref() -> int:
 	return _support
 
+
 func support_region(substate_id: int) -> Dictionary:
 	var child := _statics.get_object(substate_id)
 	if child.is_empty():

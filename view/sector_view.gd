@@ -833,6 +833,66 @@ func _build_sector(gx: int, gy: int, job: Dictionary) -> MeshInstance3D:
 ##
 ## --markers falls back to flat coloured squares, which is still the cheapest
 ## way to see placement when a sprite fails to load.
+
+## One static chain walked into the draw lists. Extracted from
+## _build_objects so a base cell can contribute BOTH its own chain and the
+## state-selected storey child's grid chain (F1, findings row 1328).
+func _build_chain(head: int, cell_x: int, cell_y: int, parent: Dictionary,
+		job: Dictionary, objs: Array[Dictionary], shadows: Array[Dictionary]) -> void:
+	for o: Dictionary in _statics.chain(head):
+		if not await _build_checkpoint(job):
+			return
+		if _items == null or not _items.has_definition(o["type"]):
+			continue
+		# Main-art exclusions, LGP 0x080E0E96 / Win 0x0062AE90.
+		if (o["flags"] & 0x290) != 0:
+			continue
+		if _only_flag >= 0 and o["flags"] != _only_flag:
+			continue
+		if not _only_sids.is_empty() and not _only_sids.has(o["type"]):
+			continue
+		if _hide_levels != 0 and _items != null \
+				and (_items.levels(o["type"]) & _hide_levels) != 0:
+			continue
+		# --exterior: drop each building family's TOP level, which is its
+		# interior. Generalises --hidelevel, which needs the index known per
+		# building -- 110 of 192 families top out at level 1 and 54 at level 2,
+		# so no single index works everywhere.
+		if _exterior and _items != null and _items.is_top_level(o["type"]):
+			continue
+		# Retail visits diagonals (x+y ascending, x ascending), appending
+		# each cell's static chain unchanged to its selected draw list.
+		# Sprite bounds are not a depth key: a candle on a cabinet shares
+		# the cabinet's owning cell but has a different screen-space foot.
+		# LGP sub_80E0E96 routes definitions with bit 4 to lists 0/2,
+		# bit 0x800000 to list 4, and ordinary sprites to list 3.
+		var flags: int = _items.draw_flags(o["type"]) if _items != null else 0
+		var gated: bool = (flags & 0x800004) != 0 or (o["flags"] & 8) != 0
+		o["trigger"] = parent["trigger"] if gated and not parent.is_empty() else -1
+		var draw_pass := 3
+		if (flags & 4) != 0:
+			draw_pass = 0 if o["mask"] == 1 or (o["flags"] & 0x20) != 0 else 2
+		elif (flags & 0x800000) != 0:
+			draw_pass = 4
+		o["draw_pass"] = draw_pass
+		o["cell_order"] = (cell_x + cell_y) * 6400 + cell_x
+		o["chain_order"] = objs.size()
+		o["base_pos"] = IsoCamera.cell_to_world(Vector2(cell_x, cell_y))
+		o["shadow"] = {}
+		if not _markers and (o["flags"] & 0x800) == 0:
+			var definition := _items.static_shadow_of(o["type"])
+			if not definition.is_empty():
+				if o["mask"] == 1:
+					var shadow := _static_shadow_geometry(o["pos"], definition)
+					shadow["order"] = Vector3i(1, o["cell_order"], o["chain_order"])
+					shadows.append(shadow)
+				elif o["mask"] > 1 and (flags & 0x800004) == 0 \
+						and (o["flags"] & 0x28) == 8:
+					o["shadow"] = _static_shadow_geometry(o["pos"], definition)
+
+		objs.append(o)
+
+
 func _build_objects(cells: PackedByteArray, gx: int, gy: int, job: Dictionary) -> Node3D:
 	if _statics == null or _mixed == null or _interior == null:
 		return null
@@ -861,64 +921,15 @@ func _build_objects(cells: PackedByteArray, gx: int, gy: int, job: Dictionary) -
 		if not await _build_checkpoint(job):
 			return null
 		var head := cells.decode_u32(i * Sacred.CELL + 4)
-		if head == 0:
-			continue
 		var cell_x := gx * SECT + i % SECT
 		var cell_y := gy * SECT + i / SECT
 		var parent: Dictionary = {}
 		if (cells[i * Sacred.CELL + 30] & 1) != 0:
 			parent = _interior.parent_for_cell(Vector2i(cell_x, cell_y))
-		for o: Dictionary in _statics.chain(head):
-			if not await _build_checkpoint(job):
-				return null
-			if _items == null or not _items.has_definition(o["type"]):
-				continue
-			# Main-art exclusions, LGP 0x080E0E96 / Win 0x0062AE90.
-			if (o["flags"] & 0x290) != 0:
-				continue
-			if _only_flag >= 0 and o["flags"] != _only_flag:
-				continue
-			if not _only_sids.is_empty() and not _only_sids.has(o["type"]):
-				continue
-			if _hide_levels != 0 and _items != null \
-					and (_items.levels(o["type"]) & _hide_levels) != 0:
-				continue
-			# --exterior: drop each building family's TOP level, which is its
-			# interior. Generalises --hidelevel, which needs the index known per
-			# building -- 110 of 192 families top out at level 1 and 54 at level 2,
-			# so no single index works everywhere.
-			if _exterior and _items != null and _items.is_top_level(o["type"]):
-				continue
-			# Retail visits diagonals (x+y ascending, x ascending), appending
-			# each cell's static chain unchanged to its selected draw list.
-			# Sprite bounds are not a depth key: a candle on a cabinet shares
-			# the cabinet's owning cell but has a different screen-space foot.
-			# LGP sub_80E0E96 routes definitions with bit 4 to lists 0/2,
-			# bit 0x800000 to list 4, and ordinary sprites to list 3.
-			var flags: int = _items.draw_flags(o["type"]) if _items != null else 0
-			var gated: bool = (flags & 0x800004) != 0 or (o["flags"] & 8) != 0
-			o["trigger"] = parent["trigger"] if gated and not parent.is_empty() else -1
-			var draw_pass := 3
-			if (flags & 4) != 0:
-				draw_pass = 0 if o["mask"] == 1 or (o["flags"] & 0x20) != 0 else 2
-			elif (flags & 0x800000) != 0:
-				draw_pass = 4
-			o["draw_pass"] = draw_pass
-			o["cell_order"] = (cell_x + cell_y) * 6400 + cell_x
-			o["chain_order"] = objs.size()
-			o["base_pos"] = IsoCamera.cell_to_world(Vector2(cell_x, cell_y))
-			o["shadow"] = {}
-			if not _markers and (o["flags"] & 0x800) == 0:
-				var definition := _items.static_shadow_of(o["type"])
-				if not definition.is_empty():
-					if o["mask"] == 1:
-						var shadow := _static_shadow_geometry(o["pos"], definition)
-						shadow["order"] = Vector3i(1, o["cell_order"], o["chain_order"])
-						shadows.append(shadow)
-					elif o["mask"] > 1 and (flags & 0x800004) == 0 \
-							and (o["flags"] & 0x28) == 8:
-						o["shadow"] = _static_shadow_geometry(o["pos"], definition)
-			objs.append(o)
+		if head == 0:
+			continue
+		await _build_chain(head, cell_x, cell_y, parent, job, objs, shadows)
+
 	objs.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		if a["draw_pass"] != b["draw_pass"]:
 			return a["draw_pass"] < b["draw_pass"]
