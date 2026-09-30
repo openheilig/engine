@@ -80,6 +80,24 @@ var _items := PackedInt32Array()
 var _ca := PackedByteArray()
 
 
+## CharacterType (one-based, GetTypeName's table at 0x8735AC0; 7 is absent
+## on purpose -- sub_8265BF6 remaps it to 6) -> the bin/<dir> class
+## directory name. G1: --class= resolution and template matching.
+const TYPE_DIR := {
+	1: "type_npc_seraphim", 2: "type_npc_gladiator", 3: "type_npc_magician",
+	4: "type_npc_darkelve", 5: "type_npc_elve", 6: "type_npc_vampirelady",
+	8: "type_npc_zwerg", 9: "type_npc_daemonin",
+}
+
+
+## The class directory for this hero's CharacterType, or "" when the type
+## has no port class (7) or the hero did not read.
+func class_dir() -> String:
+	if not found or character_type <= 0:
+		return ""
+	return TYPE_DIR.get(character_type, "")
+
+
 func _init(path: String) -> void:
 	var pax = Sacred.Pax.new(path)
 	if not pax.is_open():

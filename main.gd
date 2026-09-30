@@ -380,6 +380,9 @@ var _hero_place_reported := false
 var _loot_seen_types := {}
 ## P2: --hero=<path> imports a retail hero save instead of the template.
 var _hero_path := ""
+## G1: --class=<dir> selects the playable class (default Seraphim).
+var _start_class := START_CLASS
+var _start_template := START_TEMPLATE
 ## U0: the inventory panel (I toggles it).
 var _inventory_panel: Sacred.InventoryPanel
 ## S1: the Seraphim vectoren + funkcode for the sector scheduler, and the
@@ -728,6 +731,10 @@ func _ready() -> void:
 			_save_path = a.trim_prefix("--save=")
 		elif a.begins_with("--load="):
 			_load_path = a.trim_prefix("--load=")
+		elif a.begins_with("--class="):
+			# G1: select the playable class; the template resolves from the
+			# class's own templates by CharacterType (see _apply_retail_start).
+			_start_class = a.trim_prefix("--class=")
 		elif a.begins_with("--hero="):
 			# P2: import a retail hero save (.pax) instead of the start
 			# template -- level, XP, gold and skill points come with the file.
@@ -922,7 +929,8 @@ func _ready() -> void:
 			# paths produce identical state by construction. _registry/
 			# _quest_log/_player_id remain as aliases for the many call sites
 			# that predate the session; they are the same objects.
-			_session = GameSession.new_game(install, player_cell, _hero_path)
+			_session = GameSession.new_game(install, player_cell, _hero_path,
+				_start_template)
 			_registry = _session.registry
 			_quest_log = _session.quest_log
 			# The session owns its own Sim, which knows nothing about the
@@ -1642,7 +1650,7 @@ func _dress_player(install: String, models: Sacred.Models, items: Sacred.Items) 
 			skipped += 1
 	# Headwear from the class template: the one inventory item that
 	# surfaces on the body at the start scene.
-	var hero := Sacred.Hero.new(install.path_join("templates/" + START_TEMPLATE))
+	var hero := Sacred.Hero.new(install.path_join("templates/" + _start_template))
 	if hero.found:
 		for rec in hero.items():
 			if items.is_worn(rec) and items.slot_of(rec) == Sacred.Items.Slot.HELMET \
@@ -1889,11 +1897,20 @@ func _anim_clip_state() -> Dictionary:
 
 
 func _apply_retail_start(install: String) -> void:
-	if CLASS_MODEL.has(START_CLASS):
-		_player_model = CLASS_MODEL[START_CLASS]
+	# G1: resolve the class's own template by CharacterType -- the shipped
+	# heroNN.ptx are one per class (Sacred.Hero reads the type), so matching
+	# beats hard-coding an index that only the Seraphim gets right.
+	var tdir := install.path_join("templates")
+	for f in _list_ptx(tdir):
+		var h := Sacred.Hero.new(tdir.path_join(f))
+		if h.found and h.class_dir() == _start_class:
+			_start_template = f
+			break
+	if CLASS_MODEL.has(_start_class):
+		_player_model = CLASS_MODEL[_start_class]
 	else:
-		push_warning("start: no body mesh mapped for %s -- drawing %s" % [START_CLASS, _player_model])
-	var sc := Sacred.Startcode.new(install.path_join("bin").path_join(START_CLASS))
+		push_warning("start: no body mesh mapped for %s -- drawing %s" % [_start_class, _player_model])
+	var sc := Sacred.Startcode.new(install.path_join("bin").path_join(_start_class))
 	_scripted_objects_by_sector.clear()
 	for object: Dictionary in sc.objects:
 		var cell: Vector2i = object["cell"]
@@ -1910,7 +1927,7 @@ func _apply_retail_start(install: String) -> void:
 	_retail_start = sc.start_cell
 	_retail_start_layer = sc.start_layer
 	print("start\tclass=%s\tmodel=%s\tcell=%d,%d\tlayer=%d\tsector=%d,%d" % [
-		START_CLASS, _player_model, sc.start_cell.x, sc.start_cell.y, sc.start_layer,
+		_start_class, _player_model, sc.start_cell.x, sc.start_cell.y, sc.start_layer,
 		sc.start_cell.x / SECT, sc.start_cell.y / SECT])
 
 
@@ -3915,7 +3932,7 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		print("quest\tid=%d\tskipped=--noquests" % START_QUEST)
 		return
 	var start := Time.get_ticks_msec()
-	var dir := install.path_join("bin/%s" % START_CLASS)
+	var dir := install.path_join("bin/%s" % _start_class)
 	var vec := Sacred.Vectoren.new(dir)
 	if not vec.found or not vec.has_quest(START_QUEST):
 		printerr("quest\tid=%d\tnot in %s" % [START_QUEST, dir])
@@ -4661,7 +4678,7 @@ func _run_sector_scripts(s: Vector2i) -> void:
 	if _session == null:
 		return
 	if _sector_vec == null:
-		var dir := _install_ref.path_join("bin/%s" % START_CLASS)
+		var dir := _install_ref.path_join("bin/%s" % _start_class)
 		_sector_vec = Sacred.Vectoren.new(dir)
 		if _sector_vec.found:
 			_sector_funkcode = FileAccess.get_file_as_bytes(
@@ -4790,6 +4807,19 @@ func _play_sector_music() -> void:
 	if _sector_env.has("music"):
 		_fight_cooldown = 1.0
 		_play_music(int(_sector_env["music"]))
+
+
+## The shipped .ptx template files (hero00..hero07), sorted.
+func _list_ptx(dir: String) -> PackedStringArray:
+	var out: PackedStringArray = []
+	var d := DirAccess.open(dir)
+	if d == null:
+		return out
+	for f in d.get_files():
+		if f.begins_with("hero") and (f.ends_with(".ptx") or f.ends_with(".pax")):
+			out.append(f)
+	out.sort()
+	return out
 
 
 ## Turns the hero to face where it is going.

@@ -63,7 +63,7 @@ var tick_hz: int = Sim.TICK_HZ
 ## re-checking with a second Walkable would make the state depend on which
 ## caller remembered to bind one.
 static func new_game(install_path: String, spawn_cell: Vector2,
-		hero_path: String = "") -> GameSession:
+		hero_path: String = "", template: String = "") -> GameSession:
 	var s := GameSession.new()
 	s.install = install_path
 	s.registry = ActorRegistry.new()
@@ -79,6 +79,7 @@ static func new_game(install_path: String, spawn_cell: Vector2,
 	# (STK, REPHY) pair -- live-witnessed on two classes (119, 147;
 	# checks/hero_hp_check.gd re-derives the join from the templates).
 	var hero_hp := 100
+	s.start_template = template if template != "" else s.start_template
 	var hero_path_final := hero_path
 	if hero_path_final == "":
 		hero_path_final = install_path.path_join("templates/" + s.start_template)
