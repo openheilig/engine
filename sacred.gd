@@ -22,6 +22,7 @@ const TextureFormat := preload("res://formats/texture.gd")
 const LootRoll := preload("res://world/loot_roll.gd")
 const SectorScheduler := preload("res://world/sector_scheduler.gd")
 const InventoryPanel := preload("res://world/inventory_panel.gd")
+const SettingsCfg := preload("res://formats/settings_cfg.gd")
 const SoundNames := preload("res://formats/sound_names.gd")
 
 ## Layout constants -- re-exported from formats/common.gd.

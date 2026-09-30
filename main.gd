@@ -543,6 +543,19 @@ func _ready() -> void:
 			_spawn_loot_def = int(a.trim_prefix("--spawn-loot="))
 	_wear_garments = "--dress-garments" in argv
 	_show_hud = not ("--nohud" in argv)
+	# U1: the user's retail config (~/.lgp/sacred/settings.cfg) supplies
+	# FULLSCREEN and SOUND where the command line did not speak -- retail
+	# itself persists these keys there and the config wins.
+	var retail_cfg := Sacred.SettingsCfg.new(
+		OS.get_environment("HOME").path_join(".lgp/sacred/settings.cfg"))
+	if retail_cfg.found:
+		if "WINDOWED" not in argv and "FULLSCREEN" not in argv \
+				and retail_cfg.wants_fullscreen():
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		if "--nosound" not in argv and not retail_cfg.wants_sound():
+			AudioServer.set_bus_mute(AudioServer.get_bus_index("Master"), true)
+		print("settings\tretail config applied: fullscreen=%s sound=%s"
+			% [retail_cfg.wants_fullscreen(), retail_cfg.wants_sound()])
 	for a in argv:
 		if a.begins_with("--walk-route="):
 			var route_name := a.trim_prefix("--walk-route=")
