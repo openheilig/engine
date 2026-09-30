@@ -18,7 +18,7 @@ today:
 - **Terrain and object rendering.** Custom shaders for both, matching the
   retail isometric projection.
 - **Granny `.GRN` models and animation.** Meshes, skeletons and 3413 of 3421
-  animation clips decode; skeletal animation retargets across characters.
+  animation clips decode; playback applies authored local bone poses.
 - **A fixed-tick simulation.** Actor registry, movement, path windows,
   cell-space walkability over Sacred's region grids, interior/exterior swap.
 - **A record/replay harness.** Runs are recorded and replayed deterministically
@@ -94,6 +94,18 @@ runs need no flag. `main.gd` is the composition root: it resolves the install,
 builds the readers, and dispatches on the CLI flags (`--grn=NAME` renders a
 single model, and so on).
 
+To inspect an authored native motion rather than choose a clip by name:
+
+```
+godot --path . -- --grn=SERAPHIM.GRN --motion=2
+```
+
+`--motion=0..255` resolves the model header's motion reference through the
+archive's kind-65 table and plays that clip. Missing references fail rather
+than substitute another animation. Use it with `--grn`, without `--anim`.
+This is explicit motion selection in the model viewer; gameplay's
+actor-state/equipment-to-motion selection remains separate.
+
 ## Layout
 
 ```
@@ -108,7 +120,7 @@ view/          rendering: sector streaming, Granny models, player, cursor
 parity/        verify.gd and grnwalk.gd -- what the Python side is diffed against
 checks/        single-purpose gates, all sharing check.gd
 probes/        one-shot investigations, kept for reproduction
-shaders/       terrain, terrain mask and object shaders
+shaders/       encoded floor composition, spatial objects, actors and liquids
 ```
 
 | Path | What |

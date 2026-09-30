@@ -1,39 +1,15 @@
 class_name PlayerView
 extends RefCounted
-## Draws the real posed player-character mesh in the streamed world, sorted
-## against the painted object quads by the same rule Phase 2/3 established
-## (SectorView.ground_depth / SectorView.SORTCUBE_PX) -- no capsule
-## placeholder (the allowance for one has expired).
+## Builds and poses one model from retail data. RefCounted: main.gd owns its
+## state and drives update(), while SectorView captures `node` into a private
+## 3D target and inserts that image into the native cell/pass FIFO.
 ##
-## RefCounted, following cursor.gd's shape (plan 04-03 Task 1): it lives in
-## view/, may hold engine handles, and does not need to be a Node itself. It
-## owns exactly one built rig -- a ModelView, which IS a Node3D main.gd
-## parents into the tree via the `node` field below. Must not name a
-## world-layer type (ActorRegistry/ActorState/RecordStore/Sim.) and defines
-## no _process/_physics_process of its own -- driven from main.gd's single
-## _process via update(), below.
-##
-## Placement is baked into the built rig's SKELETON POSE, never into any
-## Node3D's own position/scale. This is not a style choice: SectorView's own
-## class doc invariant ("Sits at Transform3D.IDENTITY... every sector mesh
-## keeps the exact global transform") and _build_sortcube's doc comment both
-## establish that everything sorted by ground_depth()/sorting_offset must
-## leave its NODE'S global position at identity, because
-## sorting_use_aabb_center=false reads that global position as the sort
-## key's baseline (confirmed against Godot 4.7's VisualInstance3D docs:
-## "sorting is based on the global position" -- an additive baseline
-## sorting_offset sits on top of, not a replacement for it). A real Node3D
-## translation would (a) double-count the depth signal already carried by
-## sorting_offset for an orthogonal camera with no rotation, where only the
-## Z component of that global position enters the sort at all, and (b),
-## measured directly from SectorView's own terrain build (pz = (x+y) *
-## DEPTH_STEP, sector_view.gd:270), leave the character's real rendered Z
-## nowhere near the terrain Z (0..~640 world units) it must be depth-tested
-## against for correct floor occlusion. Baking the placement into the
-## skeleton's root-bone POSE instead moves the rendered vertices (fixing
-## both problems) without moving any Node3D's global_transform (leaving the
-## sort-key baseline untouched, exactly like every band mesh and the
-## sortcube).
+## Bodies and rigid objects share native node placement/projection. World
+## placement is not applied again to skeleton roots; authored pose and full
+## affine scale/shear remain ModelView's responsibility.
+## Body self-depth is local to the model target, never compared with terrain's
+## synthetic depth band. FloorView composites the model and its blob shadow
+## between the appropriate static commands in encoded color space.
 
 ## FALLBACK ONLY. main.gd passes the body mesh for its START_CLASS
 ## (main.gd's CLASS_MODEL), so the drawn hero follows the class whose
@@ -60,74 +36,28 @@ var triangle_count := 0
 
 var _mesh: MeshInstance3D = null
 var _skeleton: Skeleton3D = null
-var _shadow_on := false                 ## the drop shadow enables once, then only refreshes
-var _scale := 1.0
+## Native support height is supplied with the selected blob branch, not inferred
+## from the screen-space ground-depth sorting key.
+var shadow_ground_height := NAN
+var _shadow_world_origin := Vector3.ZERO
+const NativeActorShadow := preload("res://view/native_actor_shadow.gd")
+const NativeObjectShader: Shader = preload("res://shaders/native_object.gdshader")
+var actor_type := 0
+var shadow_branch := NativeActorShadow.Branch.UNKNOWN
+var _native_model_scale := Vector3(NAN, NAN, NAN)
+var _shadow_items: Sacred.Items
+var _shadow_creatures: Sacred.Creatures
+var _shadow_radius := 0.0
+var initial_shadow_heading := Vector2(NAN, NAN)
+var _native_projection := NativeActorShadow.model_to_port()
+var _material_category := -1
+var _native_placed := false
 ## Root-bone rest origins, captured once so update() only ever adds this
 ## call's placement on top of the model's own unscaled rest pose -- never on
 ## top of whatever the previous update() left behind.
 var _root_bones: PackedInt32Array = PackedInt32Array()
 var _root_rest_origins: Array[Vector3] = []
 var _root_rest_rotations: Array[Quaternion] = []
-## Reference rig height in model units -- see the scale block in setup().
-const REF_HEIGHT := 73.0
-
-## RETAIL'S OWN DRAWN HEIGHT for a REF_HEIGHT-unit humanoid, in pixels at the
-## middle zoom step. This is the measurement the scale block in setup() has been
-## asking for in comment form ("no retail capture has measured an actual
-## character height yet"), and it replaces the borrowed SectorView.SORTCUBE_PX,
-## which is a DEPTH-SORT PROXY BOX and was never a claim about character size.
-## SORTCUBE_PX is deliberately left alone: sector_view builds its sort cube from
-## it and that sorting is verified, so repurposing it would move two things at
-## once.
-##
-## HOW IT WAS MEASURED, and how far it can be trusted. The port's projection is
-## exactly one world unit to one pixel here -- ortho size 768 over a 768-px
-## viewport -- which is confirmed rather than assumed: at the old scale of
-## 96.0/73.0 = 1.3151 a 74.3-unit SERAPHIM.GRN predicts 97.7 px drawn, and the
-## rendered figure measured 97. So the scale is the only free variable, and
-## retail pins it. Against the retail campaign-start capture of the same frame,
-## same cell 3236,2511, same 1024x768:
-##
-##     landmark            port (scale 1.3151)   retail     implied scale
-##     shoulder -> sole            77 px          110 px        1.879
-##     belt     -> sole            62 px           83 px        1.761
-##
-## Two landmarks rather than overall height because retail's hair rises into the
-## stone wall behind her, so the top of that silhouette cannot be segmented from
-## the floor, and her drop shadow -- which the port does not draw at all --
-## contaminates the bottom. Both landmarks are interior to the body and clear of
-## each. 1.82 is their mean; 133.0 = 1.82 * 73.
-##
-## ponytail: ONE CLASS, ONE FRAME, and the two landmarks disagree by 6%, so read
-## this as +/-4% rather than exact. It is a relative calibration turned absolute,
-## not a recovered constant. Row 797's warning still stands: this factor is
-## GLOBAL and preserves each model's own units, so it must not be re-tuned to
-## close the separate wolf/elf ratio gap -- re-measure that ratio as a check.
-const RETAIL_HUMANOID_PX := 133.0
-
-## Retail's character light ramp evaluated at FULL light (index 255) with the
-## brightness setting at maximum, i.e. 191/255 on red and green and 213/255 on
-## blue. Derived in the material loop in setup(), where the table builder and its
-## four float constants are transcribed; spelled as a constant here so the call
-## site is not three magic fractions.
-const RETAIL_LIGHT_FULL := Color(191.0 / 255.0, 191.0 / 255.0, 213.0 / 255.0)
-## The character light SCALAR feeding that ramp. The port historically
-## applied i=255 (full); retail's own start-scene hero measures materially
-## darker -- sub_41B510 (the 2.28 twin of the 2.30 sub_41B5B0 note, in
-## analysis/decomp/win228eng chunks/00002) evaluates base ambient 32 plus
-## per-light `radius - distance + 32` contributions over the renderer's
-## light array, and the chapel's candles put the hero well below full.
-## MEASURED, not derived: HERO_LIGHT sweeps against the masked hero box
-## (the same instrument that calibrated the shadow constants). Upgrade
-## path: port the light-list evaluation itself -- the corpus has the
-## whole chain (this+40464 records, sub_41C480 init).
-const HERO_LIGHT := 145
-## The ramp evaluated at HERO_LIGHT: R = G = floor(i*0.25 + base + 64),
-## B = floor(i*(1/3) + base + 64), base = 64 at the brightness maximum.
-static func _ramp_color(i: int) -> Color:
-	var r := floori(float(i) * 0.25 + 128.0)
-	var b := floori(float(i) / 3.0 + 128.0)
-	return Color(float(r) / 255.0, float(r) / 255.0, float(b) / 255.0)
 ## Preloaded by PATH rather than referenced by class_name -- see the note at
 ## the top of rig_placement.gd.
 const RigPlacementScript := preload("res://view/rig_placement.gd")
@@ -150,7 +80,7 @@ var _placement: SkeletonModifier3D = null
 ## unaffected.
 func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 		texture_pak: Sacred.Pak = null,
-		hide_materials: PackedStringArray = PackedStringArray()) -> void:
+		hide_materials: PackedStringArray = PackedStringArray(), item_texture: int = -1) -> void:
 	model_index = models.index_of(model_name)
 	if model_index < 0:
 		push_warning("PlayerView: %s not found in models.pak -- drawing nothing" % model_name)
@@ -158,6 +88,7 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 
 	var mv := ModelView.new()
 	mv.set_texture_pak(texture_pak)
+	mv.item_texture = item_texture
 	# Retail's garment-hiding rule (row 1125): base-body materials the start
 	# outfit covers are never emitted, so a worn boot does not draw over the
 	# body's own `shoes` material. Empty by default -- every caller that does
@@ -178,42 +109,13 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 
 	vertex_count = mv.vertex_count
 	triangle_count = mv.triangle_count
+	_native_model_scale = models.native_scale(model_index)
 	rest_yaw_rad = rest_yaw(models, model_index)
 
 
-	# Scale so the rig's bounding box height equals SectorView's existing
-	# character-proxy constant (SORTCUBE_PX) -- borrowed, not restated, per
-	# plan 04-03 Task 1. ponytail: no retail capture has measured an
-	# actual character height yet; the ceiling is "reads at marker-cube
-	# scale, not the model's own untouched size", and the upgrade path is a
-	# retail capture through the same autopilot.c route that recovered
-	# IsoCamera's ZOOM_SCALES.
-	# ONE GLOBAL SCALE (row 797). This DIVIDED by the rig's own AABB height
-	# until now, which forced every creature to the same drawn height and was
-	# the single root cause of two defects chased separately all session: the
-	# wolf drawn as tall as a humanoid and longer than a bear (it takes the
-	# largest factor precisely because it is the shortest), and the elf, tallest
-	# and slimmest, shrunk hardest into a sliver. Measured against retail
-	# (row 796): the wolf stands at 0.66 of the wood elf's height there, and the
-	# port forced 1.00.
-	#
-	# A single factor preserves each model's own units, which is what retail
-	# evidently does: the wolf/elf ratio then falls straight out of the AABBs at
-	# 40.2/72.1 = 0.56, near the measured 0.66 and nothing like 1.00.
-	#
-	# REF_HEIGHT is the humanoid cluster this corpus measures (SOLDIER 73.4,
-	# BEAR 73.6, WALDELFE_DARK 72.1, NOBLE_FEM 64.9), so humanoids keep roughly
-	# the size the port already drew them at and only RELATIVE sizes change.
-	# ponytail: that is a relative calibration, not an absolute one -- no retail
-	# measurement pins the on-screen size of any single model yet, and the
-	# residual 0.56 against 0.66 is unexplained (reading error, the wolves' idle
-	# crouch, or a real per-species scale). Do NOT tune REF_HEIGHT to close that
-	# gap; re-measure the ratio as a CHECK instead.
-	_scale = RETAIL_HUMANOID_PX / REF_HEIGHT
 
-	# Transparent pass, like the object sprites this is sorted against
-	# (_build_sortcube's constraint 2), mirroring the sortcube's own material.
-	# DEPTH_DRAW_OPAQUE_ONLY does NOT mean "still writes depth" -- see _style().
+	# The isolated scene target supplies real self-depth. Alpha-scissor matches
+	# the native >64/255 model coverage without a transparent sorting bypass.
 	#
 	# PER SURFACE, not material_override. ModelView built ONE material for the
 	# whole mesh until the material chain landed and now builds one per draw
@@ -241,163 +143,44 @@ func _init(models: Sacred.Models, model_name: String = MODEL_NAME,
 		_placement.root_bones = _root_bones
 		_placement.root_rest_origins = _root_rest_origins
 		_placement.root_rest_rotations = _root_rest_rotations
-		_placement.rig_scale = _scale
 		_skeleton.add_child(_placement)
 
 	node = mv
 
 
 
-## Applies the character material model to every surface of `mesh`.
-##
-## SEPARATE FROM setup() BECAUSE GARMENTS ARRIVE LATER. attach_skinned builds
-## each worn piece as its OWN ModelView with its own MeshInstance3D, and
-## _dress_player runs after this class is constructed, so a loop that ran once
-## over the body mesh reached the body and nothing else. Measured: with the ramp
-## on the body alone, hero-pixel p75 and p90 moved onto retail (1.500 -> 1.188
-## and 1.241 -> 0.980) while p10 through p50 did not move AT ALL, because those
-## darker pixels are the garments and they were still lit by the old model.
-##
-## Transparent pass, like the object sprites this is sorted against
-## (_build_sortcube's constraint 2), mirroring the sortcube's own material.
-##
-## DEPTH_DRAW_OPAQUE_ONLY DOES NOT MEAN "still writes the depth buffer", which
-## this comment claimed until 2026-08-25. It means only OPAQUE materials write
-## depth, so this one writes none. Terrain still occludes a rig correctly
-## because TERRAIN writes depth; what is absent is the rig's own contribution,
-## and the only thing that could reveal it is a rig overlapping ITSELF.
-##
-## LEFT ALONE ON PURPOSE, and by measurement rather than argument. Switching to
-## TRANSPARENCY_ALPHA_DEPTH_PRE_PASS -- which is what retail's fixed-function
-## path amounts to, since `install/sacred` links glAlphaFunc and glDepthMask,
-## i.e. alpha TEST plus depth writes -- changes the rendered frame by ZERO
-## pixels in the NPC window and 3 in the hero box. The rigs do not self-overlap
-## in practice, so the extra pass buys no fidelity. All ten character skins
-## sampled are opaque on every texel (a=255), which is why; the Horse's genuine
-## cutouts (see model_view.gd, a1=0.877) are the case that would need it.
-##
-## PER SURFACE, not material_override. ModelView built ONE material for the
-## whole mesh until the material chain landed and now builds one per draw batch,
-## so material_override is null and reading it crashed every rig this class
-## builds -- every NPC, every creature, the player. Two gated commits passed with
-## that live, because nothing in checks/ built a PlayerView; the gate that does
-## is checks/compose_check.gd.
+## Native Gouraud light for typed actors/objects. Geometry-only probes retain
+## ModelView's ordinary preview material; no fitted brightness scalar is used.
 func _style(mesh: MeshInstance3D) -> void:
 	if mesh == null:
 		return
-	for s in mesh.get_surface_override_material_count():
-		var mat: StandardMaterial3D = mesh.get_surface_override_material(s)
-		if mat == null:
+	var native_normal := (NativeActorShadow.CAMERA * _native_projection.inverse()).inverse().transposed()
+	var light := (NativeActorShadow.CAMERA * -Vector3(1, -1, -3).normalized()).normalized()
+	for surface in mesh.get_surface_override_material_count():
+		var source: Material = mesh.get_surface_override_material(surface)
+		var texture: Texture2D
+		var material: ShaderMaterial
+		if source is StandardMaterial3D:
+			source.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			source.alpha_scissor_threshold = 64.0 / 255.0
+			source.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_OPAQUE_ONLY
+			source.no_depth_test = false
+			texture = source.albedo_texture
+		elif source is ShaderMaterial and source.shader == NativeObjectShader:
+			material = source
+			texture = source.get_shader_parameter(&"skin")
+		if _material_category < 0 or texture == null:
 			continue
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_OPAQUE_ONLY
-		# UNSHADED, BECAUSE RETAIL DOES NOT LIGHT CHARACTERS WITH LIGHTS.
-		#
-		# Sacred's character lighting is a SCALAR LOOKUP, recovered from the Windows
-		# retail build's sub_41B5B0: it starts from a base ambient of 32/255,
-		# accumulates a contribution per nearby light source attenuated by distance,
-		# clamps the total to 255, and uses that ONE number to index three 256-entry
-		# per-channel colour ramps, whose output then modulates the mesh. There is no
-		# surface normal anywhere in it -- no diffuse term, no specular, no light
-		# direction. The port was instead lighting the hero with two DirectionalLight3Ds
-		# (main.gd:_ensure_rig_light), which is a different model and produced a
-		# harsh, directionally-shaded figure where retail draws a flat modulated one.
-		#
-		# The terrain path already works retail's way and already matches: sector_view
-		# draws unshaded and multiplies by the cell's own +0x14 light byte, and over
-		# ten floor patches chosen clear of the hero and furniture SIX come out
-		# byte-identical to retail, with 71.35% of the whole frame inside 12/255.
-		# Applying the same model to the character is consistency, not a new guess.
-		#
-		# MEASURED EFFECT, including where it is still wrong. Skin, hair, the white
-		# boots and the gold all move onto retail's values by eye, and the highlight
-		# deficit closes: hero-pixel V p90 goes 119.0 -> 181.3 against retail's 139.7.
-		# It now OVERSHOOTS by 41.7. That is expected and is NOT tuned out here with a
-		# scalar, for two reasons. First, the two masks are different sizes (3995 port
-		# pixels against 5504 retail) because the port's figure is separately known to
-		# be too small, so a percentile-to-percentile ratio does not compare the same
-		# pixels -- the fallacy that produced rows 979 and 999. Second, the honest fix
-		# is the missing half of the mechanism: retail's ramp, and the per-cell light
-		# value feeding it. At this start cell the light byte is 255, so full albedo is
-		# the right INPUT and the ramp is what would bring the top end down.
-		#
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		# ...AND THE RAMP, WHICH IS THE OTHER HALF OF THAT MECHANISM.
-		#
-		# sub_41B5B0 indexes three 256-entry per-channel tables with its
-		# accumulated light scalar. Their BUILDER is sub_417FA0 at 0x4188C0-0x4189ED:
-		# one loop, i from 0 to 255, filling all six tables (two sets of three) from
-		# four float constants, which read 0.25 (flt_88F7C4), 64.0 (flt_88F914),
-		# 1/3 (flt_88F910) and 0.75 (flt_88F90C):
-		#
-		# NO DEPTH TEST, BECAUSE A CHARACTER IS A UNIT, NOT TERRAIN (row 1014).
-		#
-		# The rig is true 3D: placed at the cell, the Seraphim's body spans
-		# world z 268.8..310.1 -- 826 DEPTH_STEPs -- while her own floor quad
-		# sits at 287.4, through her waist. With the depth test on, every
-		# pixel of her behind that plane loses, and what survives is the thin
-		# dark cross-section the port drew for days (row 1006's "narrow trunk"
-		# was a MEASUREMENT OF THIS ARTEFACT, not of her geometry). The 2005
-		# engine never depth-tests a character against the ground: units draw
-		# whole, in painter's order.
-		#
-		# So the character opts out of the z-buffer and takes its ordering
-		# entirely from the transparent queue's sort -- node global position
-		# plus the sorting_offset update() maintains -- which is the exact
-		# regime the object sprites already live in. Terrain is opaque and
-		# drawn first, so she stands ON the floor; walls and props are
-		# transparent-queue and sort against her baseline, so they still
-		# occlude her when she walks behind them.
-		#
-		# ponytail: pieces of ONE body no longer depth-test against each
-		# other either -- intra-body overlap is submission order. At 133 px
-		# that reads fine; if a pose ever shows a hand behind the chest it
-		# should be in front of, the upgrade is a vertex-shader z-compress
-		# about the baseline, not turning the test back on.
-		mat.no_depth_test = true
-		# ...AND THE RAMP, WHICH IS THE OTHER HALF OF THAT MECHANISM.
-		#
-		# sub_41B5B0 indexes three 256-entry per-channel tables with its
-		# accumulated light scalar. Their BUILDER is sub_417FA0 at 0x4188C0-0x4189ED:
-		# one loop, i from 0 to 255, filling all six tables (two sets of three) from
-		# four float constants, which read 0.25 (flt_88F7C4), 64.0 (flt_88F914),
-		# 1/3 (flt_88F910) and 0.75 (flt_88F90C):
-		#
-		#     base  = clamp(brightness_setting, 0, 1) * 64      ; sub_81C9E0, clamped
-		#                                                        against 0.0 and 1.0
-		#     R = G = floor(i * 0.25    + base + 64)            ; tables +0xFE18, +0x10218
-		#     B     = floor(i * (1/3)   + base + 64)            ; table  +0x10618
-		#
-		# and the packed result modulates the mesh. Blue climbs faster than red and
-		# green, which is why the ramp cools the image as it brightens rather than
-		# just scaling it -- a plain multiply cannot reproduce that and neither can
-		# a gamma. (The second set of three tables, +0x12E18 onward, is a separate
-		# neutral ramp, floor(i*0.75 + 64) on all three channels, selected by the
-		# flag at +40460; that path is not the one the world draws through.)
-		#
-		# APPLIED HERE AT FULL LIGHT ONLY. i = 255 with the brightness setting at
-		# maximum gives R = G = floor(63.75 + 128) = 191 and B = floor(85 + 128) = 213,
-		# hence the constants below. That is the right value for this frame and no
-		# other: the Seraphim's start cell carries terrain light byte 255 and has no
-		# dynamic light near her. A rig standing in shadow needs i from the cell and
-		# the ramp evaluated per rig, which is the next step and is NOT done here.
-		#
-		# Direction confirmed independently before it was applied: with the figures
-		# finally at matching size, the port read BRIGHTER than retail at every
-		# percentile of the hero mask (p10 through p90, ratios 1.18 to 1.53), and
-		# 1/0.749 = 1.34 sits inside that band.
-		# POST-RAMP MEASUREMENT (2026-08-30, same segmentation instrument as the
-		# overshoot numbers above): hero-mask V percentiles -- port p10/p50/p90 =
-		# 51/136/204 against retail 31/115/214. The top-end overshoot is closed
-		# (p90 -4.7%); the low end runs brighter than retail's, which is the
-		# shadow-side difference the per-rig light evaluation below is for.
-		# The scalar defaults to the MEASURED HERO_LIGHT; HERO_LIGHT env
-		# overrides for calibration sweeps (the shadow knobs' pattern).
-		var light_i := HERO_LIGHT
-		var env_i := OS.get_environment("HERO_LIGHT")
-		if env_i != "":
-			light_i = int(env_i)
-		mat.albedo_color = _ramp_color(light_i)
+		if material == null:
+			material = ShaderMaterial.new()
+			material.shader = NativeObjectShader
+			mesh.set_surface_override_material(surface, material)
+		material.set_shader_parameter(&"skin", texture)
+		material.set_shader_parameter(&"native_view_normal_from_world", native_normal)
+		material.set_shader_parameter(&"light_direction", light)
+		material.set_shader_parameter(&"half_vector", (light + Vector3(0, 0, 1)).normalized())
+		# Source-defined initial white daylight, not a replacement solar clock.
+		material.set_shader_parameter(&"ambient_value", 0.3 if _material_category == 3 else 0.8)
 
 
 ## Every MeshInstance3D under `n`, styled. A worn piece is a whole ModelView
@@ -409,25 +192,16 @@ func _style_tree(n: Node) -> void:
 	for c in n.get_children():
 		_style_tree(c)
 
-## Moves the built rig to `cell`, converted through IsoCamera.cell_to_world
-## (already static and exact -- never reimplemented) and placed at the ground
-## point SectorView.ground_depth() gives that position, the same formula the
-## object sprites and the sortcube use. No-op when the model failed to build.
+## Feed the post-animation placement modifier. Scene order is supplied
+## separately through SectorView.place_actor with the actual support identity.
 func update(cell: Vector2) -> void:
-	if node == null:
+	if node == null or _native_placed:
 		return
 	var p := IsoCamera.cell_to_world(cell)
 	var ground_z := SectorView.ground_depth(p)
-	_mesh.sorting_offset = ground_z
-	# The drop shadow rides every placement: enabled on the first update (one
-	# duplicate of each skinned piece under the skeleton), then only its two
-	# moving constants refresh. Retail draws it for every character without a
-	# flag, so there is no opt-in here either.
-	if not _shadow_on:
-		_shadow_on = true
-		(node as ModelView).enable_drop_shadow(p.x, p.y, ground_z)
-	else:
-		(node as ModelView).update_shadow_ground(p.x, p.y, ground_z)
+	# Shadow eligibility/radius/native transforms arrive through explicit
+	# configuration. Unsupported shadow branches draw nothing, never a guessed
+	# silhouette. The final bone positions refresh after skeleton modifiers.
 
 	if _skeleton == null or _root_bones.is_empty() or _placement == null:
 		return
@@ -438,7 +212,133 @@ func update(cell: Vector2) -> void:
 	# through the node's position, per the class doc above.
 	var world_offset := Vector3(p.x, p.y, ground_z)
 	_placement.local_offset = node.transform.basis.inverse() * world_offset
+	# cPatchPosition truncates native lattice coordinates before projection.
+	# Keep the body's calibrated placement separate; the shadow must use the
+	# same integer point as NativeActorShadow's heading and support queries.
+	# LGP 0x080D620C stores each complete scalar sum as float32.
+	var point := Vector2(int(cell.x * NativeActorShadow.CELL_UNITS),
+		int(cell.y * NativeActorShadow.CELL_UNITS))
+	var shadow_xy := Vector2(
+		NativeActorShadow.LATTICE_X.x * point.x + NativeActorShadow.LATTICE_Y.x * point.y,
+		-(NativeActorShadow.LATTICE_X.y * point.x + NativeActorShadow.LATTICE_Y.y * point.y))
+	_shadow_world_origin = Vector3(shadow_xy.x, shadow_xy.y, ground_z)
+	(node as ModelView).update_shadow_ground(_shadow_world_origin, shadow_ground_height)
 
+
+## Authored stationary objects use native model units and camera projection,
+## not the humanoid calibration. Cell is already the native cell centre.
+## Native per-vertex lighting uses the item's category, not a creature preset.
+## Object shadow rendering remains separate.
+func place_object(cell: Vector2, heading: Vector2, height: float, category: int) -> bool:
+	if node == null or not is_finite(height) or category < 0:
+		return false
+	var actor_basis := NativeActorShadow.actor_basis(cell, heading, _native_model_scale)
+	if not actor_basis.is_finite():
+		return false
+	for surface in _mesh.get_surface_override_material_count():
+		var source: Material = _mesh.get_surface_override_material(surface)
+		var texture: Texture2D
+		if source is StandardMaterial3D:
+			texture = source.albedo_texture
+		elif source is ShaderMaterial and source.shader == NativeObjectShader:
+			texture = source.get_shader_parameter(&"skin")
+		if texture == null:
+			push_error("PlayerView.place_object: native lighting requires a decoded skin")
+			return false
+	_place_native_transform(cell, actor_basis, height)
+	_material_category = category
+	_style_tree(node)
+	return true
+
+
+func _place_native_transform(cell: Vector2, actor_basis: Basis, height: float) -> void:
+	var point := Vector2(int(cell.x * NativeActorShadow.CELL_UNITS),
+		int(cell.y * NativeActorShadow.CELL_UNITS))
+	var xy := Vector2(
+		NativeActorShadow.LATTICE_X.x * point.x + NativeActorShadow.LATTICE_Y.x * point.y,
+		-(NativeActorShadow.LATTICE_X.y * point.x + NativeActorShadow.LATTICE_Y.y * point.y))
+	_shadow_world_origin = Vector3(xy.x, xy.y, SectorView.ground_depth(xy))
+	node.transform = Transform3D(_native_projection * actor_basis,
+		_shadow_world_origin + _native_projection.z * height)
+	_native_placed = true
+	if _placement != null:
+		_placement.rig_scale = 1.0
+		_placement.local_offset = Vector3.ZERO
+		_placement.yaw = 0.0
+
+
+## The caller has selected retail's SHADOWDOT branch and resolved its native
+## actor inputs. Radius is cItems::8139092 (record +0x14, valid zero -> 50),
+## not a model AABB. Native ground height is actor/support +240.
+func configure_blob_shadow(radius: float, native_actor_basis: Basis,
+		retail_to_port: Basis, ground_height: float) -> bool:
+	disable_blob_shadow()
+	if node == null or _placement == null or not is_finite(ground_height):
+		return false
+	if not (node as ModelView).configure_blob_shadow(radius, _placement,
+			native_actor_basis, retail_to_port):
+		return false
+	shadow_ground_height = ground_height
+	(node as ModelView).update_shadow_ground(_shadow_world_origin, shadow_ground_height)
+	return true
+
+
+## Branch changes must remove the old blob, not retain it as a fallback for
+## unsupported projected/stencil branches.
+func disable_blob_shadow() -> void:
+	shadow_ground_height = NAN
+	if node != null:
+		(node as ModelView).disable_blob_shadow()
+
+
+## Native heading/support can change without rebuilding the texture or quads.
+func update_blob_shadow_transform(native_actor_basis: Basis, ground_height: float) -> void:
+	if node == null or _placement == null or not is_finite(ground_height):
+		return
+	shadow_ground_height = ground_height
+	(node as ModelView).update_blob_shadow_transform(native_actor_basis)
+	(node as ModelView).update_shadow_ground(_shadow_world_origin, shadow_ground_height)
+
+
+## Identity comes from the actor's actual item type, never a reverse lookup of
+## an arbitrary model-only preview. Keep the existing low-level packet API for
+## native captures; this is the production type/branch integration.
+func configure_actor(type_id: int, items: Sacred.Items, creatures: Sacred.Creatures) -> void:
+	disable_blob_shadow()
+	actor_type = type_id
+	_shadow_items = items
+	_shadow_creatures = creatures
+	initial_shadow_heading = NativeActorShadow.heading_from_degrees(
+		items.initial_heading_degrees(type_id)) if items != null else Vector2(NAN, NAN)
+	_shadow_radius = items.shadow_radius_of(type_id) if items != null else 0.0
+	shadow_branch = NativeActorShadow.Branch.UNKNOWN
+	if node != null and items != null and items.has_definition(type_id):
+		_material_category = items.category_of(type_id)
+		_style_tree(node)
+	if not _native_model_scale.is_finite() or not initial_shadow_heading.is_finite():
+		push_error("PlayerView: missing native model scale or item heading for actor type %d" % type_id)
+
+
+func update_native_actor(cell: Vector2, heading: Vector2, ground_height: float,
+		support_ref: int, support_is_horse: bool, detail: int,
+		hidden_remote_player: bool, debug_override: bool) -> void:
+	var selected := NativeActorShadow.branch(actor_type, _shadow_items, _shadow_creatures,
+		detail, support_ref, support_is_horse, hidden_remote_player, debug_override)
+	var basis := NativeActorShadow.actor_basis(cell, heading, _native_model_scale)
+	if not basis.is_finite() or not is_finite(ground_height):
+		selected = NativeActorShadow.Branch.UNKNOWN
+	else:
+		_place_native_transform(cell, basis, ground_height)
+	if selected != NativeActorShadow.Branch.BLOB:
+		disable_blob_shadow()
+	elif shadow_branch != NativeActorShadow.Branch.BLOB:
+		if not configure_blob_shadow(_shadow_radius, basis,
+				NativeActorShadow.retail_to_port(), ground_height):
+			selected = NativeActorShadow.Branch.UNKNOWN
+			push_warning("PlayerView: native blob configuration failed for actor type %d" % actor_type)
+	else:
+		update_blob_shadow_transform(basis, ground_height)
+	shadow_branch = selected
 
 ## Hangs an equipped mesh on one of the rig's two hand sockets. `slot` is
 ## startcode's tag-0x02 occurrence: 1 = main hand, 2 = off hand -- the mapping
@@ -812,3 +712,4 @@ func yaw() -> float:
 func pose_now() -> void:
 	if _placement != null and _skeleton != null:
 		_placement.apply(_skeleton)
+		(node as ModelView).refresh_drop_shadow()

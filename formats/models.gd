@@ -71,6 +71,8 @@ const WALK_BUDGET := 4096
 const H1_LEN_OFF := 0x10
 
 var _pak: Pak
+var _native_motion_entries := PackedInt32Array()
+var _native_motion_entries_ready := false
 
 func _init(pak: Pak) -> void:
 	_pak = pak
@@ -137,6 +139,43 @@ func entry_name(entry: int) -> String:
 	if nul == -1:
 		return r.get_string_from_ascii()
 	return r.slice(0, nul).get_string_from_ascii()
+
+## Native cModelManager kind-64 header, not the GRN skeleton scale/shear.
+## LGP 0x0810DBBC / Win 0x00411F50 transform model AND animation with
+## diag(sx,-sy,sz). Runtime overrides are not represented by this disk reader.
+## Invalid metadata is explicit; callers must not invent an identity scale.
+func native_scale(entry: int) -> Vector3:
+	if kind_of(entry) != KIND_MESH or true_length(entry) < 1148:
+		return Vector3(NAN, NAN, NAN)
+	var data := _pak.read_at(_pak.entry_offset(entry) + 1136, 12)
+	if data.size() != 12:
+		return Vector3(NAN, NAN, NAN)
+	return Vector3(data.decode_float(0), data.decode_float(4), data.decode_float(8))
+
+## Resolve an explicit native motion enum through the authored kind-64 header.
+## LGP sub_810D0FC/sub_810D1F2 read +112 + 4*motion; the stored value is an
+## ordinal in the kind-65 table, NOT an entry in the mixed pak index.
+## Ordinal zero means absent. This reader resolves this Pak only; selecting
+## an effective model/overlay and deriving the motion from actor state belong
+## to the caller. Missing references never fall back to bone/name matching.
+func native_motion_entry(model_entry: int, motion: int) -> int:
+	if motion < 0 or motion >= 256 or kind_of(model_entry) != KIND_MESH \
+			or true_length(model_entry) < 1136:
+		return -1
+	var data := _pak.read_at(_pak.entry_offset(model_entry) + 112 + motion * 4, 4)
+	if data.size() != 4:
+		return -1
+	var reference := data.decode_u32(0)
+	if reference == 0:
+		return -1
+	if not _native_motion_entries_ready:
+		for entry in _pak.count():
+			if _pak.kinds[entry] == KIND_MOTION:
+				_native_motion_entries.append(entry)
+		_native_motion_entries_ready = true
+	if reference >= _native_motion_entries.size():
+		return -1
+	return _native_motion_entries[reference]
 
 ## The single exclusion predicate for the whole phase: false when this
 ## entry has no kind-scoped magic offset, is too short to reach it, or
@@ -1904,8 +1943,8 @@ const ANIM_UNKNOWN_STRIDE := 40
 ##
 ## WHAT REMAINS. A quaternion is unusable only when it cannot be normalized --
 ## NaN, or a length so near zero that the direction is noise. That is a real
-## refusal and stays. Everything else is normalized on read, which is what
-## ModelView already did per key before handing them to Godot.
+## refusal and stays. Quadratic control points retain their magnitudes:
+## normalize the evaluated pose, not the controls (native finding 1251).
 const ANIM_QUAT_MIN := 0.5
 
 ## Generalises _directory() to an arbitrary section offset. _directory()
@@ -2020,10 +2059,9 @@ func clip_index_of(name: String) -> int:
 ## Dictionary plus push_error() on any malformed input, including a
 ## KIND_MOTION entry that is a model rather than a clip (no per-bone
 ## records) -- decoding a non-clip is a caller error, not a partial
-## success. Every decoded rotation is checked unit-length to within
-## ANIM_QUAT_EPS (see that constant's own doc comment for why it is not
-## BONE_QUAT_EPS) and a clip whose rotations are not unit quaternions is
-## refused whole, matching bones()'s existing posture.
+## success. ANIM_QUAT_MIN rejects degenerate quaternion inputs. Ordinary
+## mode-2 rotations retain stored control magnitudes; sampled poses and
+## other ordinary rotation modes return normalized quaternions.
 ##
 ## `desync` displaces each record's computed base offset by that many
 ## bytes before its count fields are read -- the Godot-side twin of
@@ -2074,9 +2112,9 @@ func clip(entry: int, desync: int = 0) -> Dictionary:
 		push_error("Models.clip: entry %d carries no per-bone AnimationTransformTrackKeys records" % entry)
 		return {}
 
-	# PER-RECORD DISPATCH (Wire B, row 1168). For each AnimationTransformTrackKeys
-	# record, SAMPLED iff the count dwords at +24/+28/+32 are all zero AND the span
-	# is 12+68*N exactly; otherwise ORDINARY. Both branches decode independently.
+	# PER-RECORD DISPATCH. Header +8 declares interleaved (0) or split (1).
+	# In interleaved records +24/+28/+32 are pose data, NOT count fields.
+	# The selected decoder validates its own complete record size.
 	# A hybrid entry (FX_E_IDLE_BH.GRN, FX_G_IDLE_BH.GRN, ...) carries BOTH
 	# ordinary and sampled records for the same bone ids, and this loop handles
 	# each on its own merits -- one of them failing no longer refuses the other.
@@ -2138,21 +2176,13 @@ func clip(entry: int, desync: int = 0) -> Dictionary:
 const ANIM_SAMPLED_HEADER := 12
 const ANIM_SAMPLED_KEY := 68
 
-## Per-record discriminator (Wire B, row 1168). True iff the count dwords at
-## +24/+28/+32 are all zero AND the span is 12 + 68*N. Span congruence alone
-## is NOT decisive: the row-1168 sweep counted 10,710 ordinary records that
-## also satisfy it; only the count-zero half is unambiguous.
+## Header +8 is the storage-format flag: 0 interleaved, 1 split.
+## The old count-zero heuristic rejected 2885 of 3013 interleaved records:
+## it read translation/quaternion components as ordinary-track counts.
 func _is_sampled_record(buf: PackedByteArray, off: int, span: int) -> bool:
-	if off < 0 or off + ANIM_OFF_NUM_UNKNOWNS + 4 > buf.size():
+	if off < 0 or span < ANIM_SAMPLED_HEADER or off + ANIM_SAMPLED_HEADER > buf.size():
 		return false
-	var nt := buf.decode_u32(off + ANIM_OFF_NUM_TRANSLATES)
-	var nq := buf.decode_u32(off + ANIM_OFF_NUM_QUATERNIONS)
-	var nu := buf.decode_u32(off + ANIM_OFF_NUM_UNKNOWNS)
-	if nt != 0 or nq != 0 or nu != 0:
-		return false
-	if span < ANIM_SAMPLED_HEADER:
-		return false
-	return (span - ANIM_SAMPLED_HEADER) % ANIM_SAMPLED_KEY == 0
+	return buf.decode_u32(off + 8) == 0
 
 ## One ordinary (variable-length) record, in the same shape _clip_sampled_record()
 ## returns so callers do not branch on which variant they got. Split out from the
@@ -2221,19 +2251,14 @@ func _clip_ordinary_record(entry: int, buf: PackedByteArray, dir: Array[Dictiona
 			push_error("Models.clip: entry %d record %d rotation %d cannot be normalized (|q|=%f)" % [
 				entry, ridx, i, qlen])
 			return {}
-		# Stored normalized: the drift is real data, but Godot's own
-		# rotation-track interpolation demands an exact unit quaternion
-		# and logs per sampled frame otherwise.
-		rotations[i] = q / qlen
+		# Mode-2 values are control points: their magnitudes affect the blend.
+		# ModelView normalizes the evaluated result before giving it to Godot.
+		rotations[i] = q if quat_mode == 2 else q / qlen
 	p += nq * 16
 
-	# 36 bytes per key, UNINTERPRETED. The stride is measured (see
-	# ANIM_UNKNOWN_STRIDE); what the bytes MEAN is not. 9 floats is the
-	# shape of Granny's scale-shear 3x3, and that was the working guess,
-	# but read as a matrix the values are degenerate -- WOLF_ATTACK_BH_A
-	# yields determinants near zero and negative, which no scale-shear
-	# has. So they are handed back as raw floats and named for what is
-	# known about them. Nothing consumes them yet.
+	# Full row-major scale/shear matrices. Small and negative determinants are
+	# valid (authored scale/reflection), not evidence of a misaligned payload.
+	# ModelView preserves all nine elements when composing its affine palette.
 	var others: Array[PackedFloat32Array] = []
 	others.resize(nu)
 	for i in nu:
@@ -2260,8 +2285,9 @@ func _clip_sampled_record(entry: int, buf: PackedByteArray, dir: Array[Dictionar
 		sec: int, j: int, ridx: int) -> Dictionary:
 	var off := sec + int(dir[j]["rel"])
 	var span := _span_sec(dir, j, buf.size(), sec)
-	if off < 0 or off + span > buf.size():
-		push_error("Models.clip: entry %d sampled record %d runs past the entry" % [entry, ridx])
+	if off < 0 or span < ANIM_SAMPLED_HEADER or off + span > buf.size() \
+			or (span - ANIM_SAMPLED_HEADER) % ANIM_SAMPLED_KEY != 0:
+		push_error("Models.clip: entry %d sampled record %d has invalid span %d" % [entry, ridx, span])
 		return {}
 	var n := (span - ANIM_SAMPLED_HEADER) / ANIM_SAMPLED_KEY
 	if n <= 0 or n > MAX_KEYFRAMES:

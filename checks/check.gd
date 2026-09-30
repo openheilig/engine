@@ -9,10 +9,10 @@ extends SceneTree
 ## run and a misdiagnosis (autoresearch row 745, where the symptom sent me
 ## measuring Sacred.Items -- 35 ms, not the cause) before being spotted.
 ##
-## HOW IT WORKS. Every check in this directory completes inside _init and exits
-## through finish(). Reaching the first PROCESSED FRAME therefore means _init
-## did not reach any exit -- it aborted -- and the failsafe turns that into
-## exit 1 immediately.
+## HOW IT WORKS. Synchronous checks complete inside _init through finish().
+## A check exercising cooperative work must call allow_frames(timeout_ms)
+## before yielding; its deadline replaces the first-frame failsafe, without
+## treating an unfinished coroutine as success.
 ##
 ## TWO RULES A CHECK MUST FOLLOW, both measured rather than assumed:
 ##
@@ -39,6 +39,7 @@ extends SceneTree
 ## failure and makes finish() exit 1 no matter what code it is handed.
 var _finished := false
 var _failures := 0
+var _deadline_msec := 0
 
 
 ## assert() for use anywhere except directly inside _init. Returns the condition
@@ -53,6 +54,11 @@ func expect(cond: bool, message: String) -> bool:
 
 func _init() -> void:
 	process_frame.connect(_failsafe)
+
+
+## Explicit bounded lifetime for checks that exercise frame-sliced production.
+func allow_frames(timeout_ms: int) -> void:
+	_deadline_msec = Time.get_ticks_msec() + timeout_ms
 
 
 ## The only exit. Takes the same exit code quit() would, so converting a check
@@ -71,6 +77,12 @@ func finish(exit_code: int = 0) -> void:
 ## race the shutdown.
 func _failsafe() -> void:
 	if _finished:
+		return
+	if _deadline_msec > 0:
+		if Time.get_ticks_msec() < _deadline_msec:
+			return
+		printerr("check aborted: asynchronous check did not finish before its deadline")
+		quit(1)
 		return
 	printerr("check aborted: _init returned without reaching finish(), which is exactly what a failed assert() looks like -- exiting 1 instead of hanging until the caller's timeout")
 	quit(1)

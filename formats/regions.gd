@@ -71,12 +71,16 @@ const TYPE := 6
 enum { EMPTY = 0, WALL = 1, FLOOR = 2, DOOR = 9, STEP = 0xa, OPEN = 0x10 }
 
 var list: Array[Dictionary] = []   ## {cell: Vector2i, size: Vector2i, grid: PackedByteArray}
+## Native static+45 indexes the uncompressed 36-byte table, including its
+## zero-size origin marker. Compact `list` indices are only presentation keys.
+var by_ordinal: Dictionary[int, Dictionary] = {}
 
 func _init(stream: PackedByteArray, gx: int, gy: int) -> void:
 	if stream.size() <= TABLE_OFF + REC:
 		return
 	var lo := Vector2i(gx, gy) * Common.SECT
 	var p := TABLE_OFF
+	var ordinal := 0
 	while p + REC <= stream.size():
 		if stream.decode_u32(p + 0x0c) != TYPE:
 			break
@@ -84,15 +88,20 @@ func _init(stream: PackedByteArray, gx: int, gy: int) -> void:
 		var size := Vector2i(stream.decode_u16(p + 0x08), stream.decode_u16(p + 0x0a))
 		var off := stream.decode_u32(p + 0x10)
 		var bytes := stream.decode_u32(p + 0x14)
-		# The first record is the sector origin marker (w = h = 0); skip it, and
-		# reject anything whose size field disagrees with w*h*32 rather than
-		# reading a mis-parsed offset as geometry.
+		# Preserve the native ordinal even when this is the zero-size origin
+		# marker, which cWorld::getPatch(substate) resolves to the base grid.
+		if size == Vector2i.ZERO:
+			by_ordinal[ordinal] = {"cell": cell, "size": size,
+				"grid": PackedByteArray(), "ordinal": ordinal, "index": -1}
 		if size.x > 0 and size.y > 0 and bytes == size.x * size.y * Common.CELL \
 				and off + bytes <= stream.size() \
 				and Rect2i(lo, Vector2i(Common.SECT, Common.SECT)).has_point(cell):
-			list.append({"cell": cell, "size": size,
-				"grid": stream.slice(off, off + bytes)})
+			var region := {"cell": cell, "size": size,
+				"grid": stream.slice(off, off + bytes), "ordinal": ordinal, "index": list.size()}
+			list.append(region)
+			by_ordinal[ordinal] = region
 		p += REC
+		ordinal += 1
 
 ## Class of one grid cell, as the low nibble of byte 31. Out of range -> EMPTY.
 static func cell_class(r: Dictionary, cx: int, cy: int) -> int:

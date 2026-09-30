@@ -38,23 +38,6 @@ const CAM_MARGIN := 1.15
 const CAM_DIR := Vector3(0.55, 0.35, 1.0)
 ## Key light direction, deliberately off the camera axis so surfaces facing
 ## the viewer still shade and the form reads.
-## Whether a clip's POSITION tracks are bound. FALSE, measured (row 760): a
-## clip's position track is authored against the CLIP's parent chain, and the
-## two files do not share the chain above Bip01 -- a model carries a
-## coordinate-alignment bone there that the clip has no node for (row 609).
-## Applying such a track to the model's Bip01 displaces everything below it,
-## which is what carried a rig bodily out of its own camera framing in the
-## viewer and read as splayed limbs in the streamed world. Rotation tracks are
-## unaffected: a rotation is expressed in the bone's OWN space and does not
-## care what sits above it.
-##
-## THE COST, stated rather than discovered later: any authored TRANSLATION in a
-## clip is now dropped, so a lunge, a hop or a step that moved the body will
-## play in place. Retail's own root motion, if it has any, is not reproduced.
-## The upgrade path is per-model alignment-bone compensation (option (b) of row
-## 760), which needs that bone identified per model rather than only for the
-## one entry row 609 measured.
-const BIND_POSITION_TRACKS := false
 
 const LIGHT_DIR := Vector3(-0.4, -0.8, -0.45)
 ## Key light strength, shared with main.gd's streamed-world rig light so a
@@ -86,16 +69,36 @@ var bone_sanitised := 0
 ## arbitrary garbage. A check that cannot fail proves nothing, and leaving it in
 ## was worse than having nothing: it advertised a guarantee it never carried.
 ##
-## The skeleton and skin layer is therefore CURRENTLY UNVALIDATED. Validating it
-## needs an oracle independent of our own decode -- an external renderer's bone
-## positions, or a posed frame compared against retail -- not another
-## rearrangement of the same stored numbers.
+## Validation now uses independent native evidence (findings 1247/1265/1266):
+## same-pose Seraphim/novice geometry and normals, plus native wolf affine
+## matrices. These fixtures are not a claim of complete corpus-wide parity;
+## the circular rest-times-inverse-rest assertion remains deliberately absent.
 
 var _settled := false
 var _skeleton: Skeleton3D = null
 var _skin: Skin = null
 var _weights: Array[Dictionary] = []
 var _local_to_bind: Array[PackedInt32Array] = []
+
+## Granny locals are T * R * SS, with a full 3x3 SS. Skeleton3D stores only
+## TRS; even global-pose overrides interpolate through that decomposition.
+## Preserve the authored matrices and replace the render palette after Godot
+## updates it. Ordinary TRS rigs keep the engine path.
+var affine_global_poses: Array[Transform3D] = []
+var _affine_rests: Array[Transform3D] = []
+var _affine_rest_rotations: Array[Quaternion] = []
+var _affine_rest_scales: Array[Basis] = []
+var _affine_rest_pose_inverse: Array[Transform3D] = []
+var _affine_positions := PackedVector3Array()
+var _affine_rotations: Array[Quaternion] = []
+var _affine_roots: Array[Transform3D] = []
+var _affine_tracks: Dictionary = {}
+var _affine_meshes: Array[MeshInstance3D] = []
+var _affine_sockets: Array[BoneAttachment3D] = []
+var _affine_rest_required := false
+var _affine_required := false
+var _affine_time := 0.0
+var _standalone_render := false
 
 ## Animation facts, printed by main.gd's --anim= route. anim_bound counts
 ## clip bones whose sanitized name resolved to a real Skeleton3D bone via
@@ -398,6 +401,7 @@ func attach_socket(models: Sacred.Models, entry: int, socket: String,
 			entry, socket, str(g.basis.get_scale())])
 		t = g.affine_inverse()
 	piece.transform = t
+	_affine_sockets.append(att)
 	sockets_attached += 1
 	return piece
 
@@ -523,6 +527,7 @@ func attach_skinned(models: Sacred.Models, entry: int, texture: int = -1) -> Mes
 	_skeleton.add_child(mi)
 	mi.skeleton = NodePath("..")
 	mi.skin = skin
+	_affine_meshes.append(mi)
 	# The mesh and its materials are Resources and outlive the node they were
 	# built under, so the scratch rig goes away here rather than lingering as a
 	# second, invisible skeleton under this one.
@@ -570,66 +575,66 @@ func set_materials_hidden_by_token(tokens: PackedStringArray, hidden: bool) -> v
 			mesh_mi.set_surface_override_material(s, _hidden_orig[s])
 			_hidden_orig.erase(s)
 
-## --- Drop shadow ------------------------------------------------------------
+## --- Actor blob shadow ------------------------------------------------------
 ##
-## Retail's cGranny::renderShadow (0x80FDBDC, decompiled) re-draws the
-## character's own posed mesh projected onto the ground. This pass duplicates
-## every skinned piece, overrides a squash shader (world_vertex_coords):
-## VERTEX.y compresses toward the foot line (factor k, calibrated), depth
-## becomes the ground depth — the blob climbs the legs exactly as retail's
-## does. SHADOW_HIDE=1 hides the pass for diff measurement; SHADOW_K and
-## SHADOW_ALPHA were the calibration knobs (0.25 / 0.5 landed).
-const SHADOW_SHADER := preload("res://shaders/hero_shadow.gdshader")
-const SHADOW_FOOT_LIFT := 39.0   ## measured: rendered feet sit 39 above the cell y
+## The observed branch is LGP 0x080FE8DA / Win 2.28 0x00407960, not either
+## projected-mesh branch. Configuration is explicit: a model filename cannot
+## supply actor eligibility, radius, support height or native placement.
+const ActorBlobShadow := preload("res://view/actor_blob_shadow.gd")
+var _blob_shadow: ActorBlobShadow = null
 
-var _shadow_mat: ShaderMaterial = null
-var _shadow_instances: Array[MeshInstance3D] = []
+## `native_actor_basis` maps the unplaced, unscaled, unrotated posed model into
+## native actor-relative coordinates (native orientation * model-header scale).
+## `retail_to_port` maps native Z-up deltas into the world's screen-plane basis.
+## No implicit identity/camera/size fallback is installed for unknown branches.
+func configure_blob_shadow(radius: float, placement: SkeletonModifier3D,
+		native_actor_basis: Basis, retail_to_port: Basis) -> bool:
+	disable_blob_shadow()
+	if _skeleton == null or _texture_pak == null:
+		return false
+	if radius <= 0.0 or not is_finite(radius) or placement == null:
+		return false
+	var tid := Sacred.TextureFormat.find_model_texture(_texture_pak, "SHADOWDOT.TGA")
+	if tid < 0:
+		return false
+	# Use the decoder's actual dimensions and ARGB4444 -> RGBA8 conversion.
+	# run02's named resource is byte-identical to this decode, not GL name 81.
+	var image := Sacred.TextureFormat.decode_texture(_texture_pak, tid, false)
+	if image == null:
+		return false
+	var shadow := ActorBlobShadow.new()
+	shadow.name = "ActorBlobShadow"
+	add_child(shadow)
+	shadow.configure(_skeleton, ImageTexture.create_from_image(image), radius,
+		placement, native_actor_basis, retail_to_port)
+	_blob_shadow = shadow
+	return true
 
-func enable_drop_shadow(foot_x: float, foot_y: float, ground_z: float) -> void:
-	if _skeleton == null:
-		return
-	if _shadow_mat == null:
-		_shadow_mat = ShaderMaterial.new()
-		_shadow_mat.shader = SHADOW_SHADER
-		# k recalibrated 2026-08-30 (0.2 -> 0.1): with the base shoes batch
-		# emitted, 0.2 let its squashed shadow vertices overshoot the foot
-		# line as dark spikes; 0.05 flattens the blob smaller than retail's,
-		# 0.1 is the compromise (findings row with this change).
-		_shadow_mat.set_shader_parameter("k",
-			float(OS.get_environment("SHADOW_K")) if OS.get_environment("SHADOW_K") != "" else 0.1)
-		_shadow_mat.set_shader_parameter("alpha",
-			float(OS.get_environment("SHADOW_ALPHA")) if OS.get_environment("SHADOW_ALPHA") != "" else 0.45)
-		# Lateral stretch about the character's axis: retail's blob measures
-		# ~105 px wide, wider than the body a pure squash can cover.
-		_shadow_mat.set_shader_parameter("stretch",
-			float(OS.get_environment("SHADOW_STRETCH")) if OS.get_environment("SHADOW_STRETCH") != "" else 2.2)
-	for old in _shadow_instances:
-		if is_instance_valid(old):
-			old.queue_free()
-	_shadow_instances.clear()
-	for piece in _skeleton.get_children():
-		var mi := piece as MeshInstance3D
-		if mi == null or mi.mesh == null:
-			continue
-		var dup := MeshInstance3D.new()
-		dup.mesh = mi.mesh
-		dup.skin = mi.skin
-		dup.skeleton = mi.skeleton
-		dup.material_override = _shadow_mat
-		dup.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		if OS.get_environment("SHADOW_HIDE") != "":
-			dup.visible = false   # the gate's hide-arm: diff frames with/without
-		_skeleton.add_child(dup)
-		_shadow_instances.append(dup)
-	update_shadow_ground(foot_x, foot_y + SHADOW_FOOT_LIFT, ground_z)
 
-## The foot line moves with the character (placement + idle bounce).
-func update_shadow_ground(foot_x: float, foot_y: float, ground_z: float) -> void:
-	if _shadow_mat == null:
-		return
-	_shadow_mat.set_shader_parameter("foot_x", foot_x)
-	_shadow_mat.set_shader_parameter("foot_y", foot_y)
-	_shadow_mat.set_shader_parameter("ground_z", ground_z)
+func disable_blob_shadow() -> void:
+	if _blob_shadow != null:
+		_blob_shadow.free()
+		_blob_shadow = null
+
+
+func update_shadow_ground(world_origin: Vector3, ground_height: float) -> void:
+	if _blob_shadow != null:
+		_blob_shadow.update_ground(world_origin, ground_height)
+
+
+func update_blob_shadow_transform(native_actor_basis: Basis) -> void:
+	if _blob_shadow != null:
+		_blob_shadow.native_actor_basis = native_actor_basis
+
+
+## Manual pose consumers use the same refresh as skeleton_updated.
+func refresh_drop_shadow() -> void:
+	if _blob_shadow != null:
+		_blob_shadow.refresh_pose()
+
+
+func blob_shadow() -> ActorBlobShadow:
+	return _blob_shadow
 
 ## The material for one draw batch. `slot` is a 0-based index into
 ## Models.texture_names(), or -1 for "no texture known". Clay whenever the
@@ -944,6 +949,7 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 		_skeleton.add_child(mi)
 		mi.skeleton = NodePath("..")
 		mi.skin = _skin
+		_affine_meshes.append(mi)
 	else:
 		add_child(mi)
 
@@ -952,6 +958,10 @@ func setup(models: Sacred.Models, entry: int, frame_camera: bool = true) -> bool
 	if frame_camera:
 		_frame(transform * mesh.get_aabb())
 	_settled = true
+	_standalone_render = frame_camera
+	if _standalone_render and is_inside_tree() \
+			and not RenderingServer.frame_pre_draw.is_connected(prepare_render):
+		RenderingServer.frame_pre_draw.connect(prepare_render)
 	return true
 
 
@@ -1058,6 +1068,14 @@ func _build_rig(models: Sacred.Models, entry: int) -> bool:
 
 	_skeleton = Skeleton3D.new()
 	_skeleton.name = "Skeleton"
+	_affine_rests.resize(n)
+	_affine_rest_rotations.resize(n)
+	_affine_rest_scales.resize(n)
+	_affine_rest_pose_inverse.resize(n)
+	_affine_positions.resize(n)
+	_affine_rotations.resize(n)
+	_affine_roots.resize(n)
+	affine_global_poses.resize(n)
 	var used := {}
 	bone_roots = 0
 	bone_sanitised = 0
@@ -1085,6 +1103,12 @@ func _build_rig(models: Sacred.Models, entry: int) -> bool:
 		else:
 			_skeleton.set_bone_parent(s, granny_to_skel[p])
 		_skeleton.set_bone_rest(s, bl[g]["rest"])
+		_affine_rests[s] = bl[g]["rest"]
+		_affine_rest_rotations[s] = bl[g]["rotation"]
+		var ss := _scale_shear_basis(bl[g]["scale_shear"])
+		_affine_rest_scales[s] = ss
+		if not ss.is_equal_approx(Basis.from_scale(Vector3(ss.x.x, ss.y.y, ss.z.z))):
+			_affine_rest_required = true
 	# A fresh bone's POSE is not its rest -- it defaults to the identity, which
 	# collapses every bone onto the origin and produces a crumpled model that
 	# still renders. There is no animation in this plan, so the pose is the
@@ -1092,6 +1116,12 @@ func _build_rig(models: Sacred.Models, entry: int) -> bool:
 	# decomposition rather than a hand-rolled one.
 	_skeleton.reset_bone_poses()
 	bone_count = n
+	for s in n:
+		if _skeleton.get_bone_parent(s) < 0:
+			_affine_rest_pose_inverse[s] = _skeleton.get_bone_pose(s).affine_inverse()
+	_affine_required = _affine_rest_required
+	_skeleton.skeleton_updated.connect(_capture_affine_pose)
+	_capture_affine_pose()
 
 	# One bind per bone something is actually weighted to, added in mesh-local
 	# order, which is how space 3 gets its ordering.
@@ -1237,10 +1267,9 @@ func _fill_weights(models: Sacred.Models, entry: int, m: Dictionary, arr: Array)
 ## -- at each knot the curve equals the time-weighted blend of that knot's
 ## two neighbours (uniform case: their average), and the value inside a span
 ## is a three-key weighted blend.open-grn's runtime sampler documents the
-## exact basis and the vendor pads (leading time pads so every real key has
-## two left neighbours; trailing duplicates) pin the first/last key times to
-## k0/kLast exactly -- which is what keeps anim_check's t=0-is-bind-pose
-## property true under this reading. Corpus: position and quaternion mode is
+## exact basis and the vendor's leading/trailing pads pin endpoint sampling
+## to the endpoint keys. Endpoints are authored poses, not necessarily the
+## model's bind pose (finding 1247). Corpus: position and quaternion mode is
 ## 2 on ALL 255,461 ordinary tracks; even key counts exist (9,956 position
 ## records), which REFUTES the rival Bézier-triples reading needing odd
 ## counts; all recorded key times are strictly ascending, which is all this
@@ -1248,9 +1277,9 @@ func _fill_weights(models: Sacred.Models, entry: int, m: Dictionary, arr: Array)
 ##
 ## Godot Animation tracks interpolate linearly through keys and offer no
 ## custom basis, so the curve is honoured by SUBDIVISION: QUAD_SUBDIV linear
-## keys per key span. ponytail: subdivision error falls as 1/S^2 and S=8 is
-## already orders of magnitude below a pixel at any camera distance; the
-## upgrade is an exact evaluation track if Godot ever grows one.
+## keys per key span. ponytail: this approximates the curve; no universal
+## subpixel bound is established. After preserving control magnitudes,
+## running rotation error is 0.023 degrees versus 0.000039 at exact time.
 const QUAD_SUBDIV := 8
 
 static func _quad_weights(ta: float, tb: float, tc: float, td: float,
@@ -1350,6 +1379,7 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 	var bound := 0
 	var tracks := 0
 	var unbound := PackedStringArray()
+	var affine_tracks := {}
 	var bone_count := _skeleton.get_bone_count()
 	for ri in records.size():
 		var bi: int = track_bone[ri]
@@ -1368,10 +1398,18 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 		if int(clip_bone_list[bi]["parent_effective"]) == -1:
 			continue
 		var r: Dictionary = records[ri]
+		var scale_keys: Array[Basis] = []
+		for values: PackedFloat32Array in r["others"]:
+			scale_keys.append(_scale_shear_basis(values))
+		affine_tracks[skel_idx] = {
+			"times": r["times_other"], "keys": scale_keys, "mode": int(r["scale_mode"]),
+			"position": not (r["times_pos"] as PackedFloat32Array).is_empty(),
+			"rotation": not (r["times_rot"] as PackedFloat32Array).is_empty(),
+		}
 		var path := NodePath("%s:%s" % [_skeleton.name, nm])
 		var times_pos: PackedFloat32Array = r["times_pos"]
 		var positions: PackedVector3Array = r["positions"]
-		if times_pos.size() > 0 and BIND_POSITION_TRACKS:
+		if times_pos.size() > 0:
 			var pt := anim.add_track(Animation.TYPE_POSITION_3D)
 			anim.track_set_path(pt, path)
 			var pos_keys: Array = []
@@ -1396,25 +1434,10 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 		if times_rot.size() > 0:
 			var rt := anim.add_track(Animation.TYPE_ROTATION_3D)
 			anim.track_set_path(rt, path)
-			# RETARGET, do not transplant (row 766). A clip's key is expressed
-			# against the CLIP's own rest, and the clip and the model do not
-			# share one: row 739 measured their local rests agreeing on only 47
-			# of 60 bones, worst case 6.74. Writing the key straight onto the
-			# model's bone therefore replaces that bone's rest orientation with a
-			# foreign one, and because a parent's error is inherited by its whole
-			# limb the displacement accumulates outward -- measured at 84.71
-			# units on a rig 110 units wide, AT t=0, where the pose is supposed
-			# to BE the bind pose.
-			#
-			# So take the clip's motion RELATIVE to the clip's own rest and
-			# replay it on the model's rest:
-			#
-			#   pose = model_rest * (clip_rest^-1 * key)
-			var clip_rest: Quaternion = ((clip_bone_list[bi]["rest"] as Transform3D)
-				.basis.get_rotation_quaternion()).normalized()
-			var model_rest: Quaternion = (_skeleton.get_bone_rest(skel_idx)
-				.basis.get_rotation_quaternion()).normalized()
-			var retarget := model_rest * clip_rest.inverse()
+			# Authored keys are absolute LOCAL poses, not deltas from clip rest.
+			# Native Seraphim and novice-nun captures match direct keys; the old
+			# model_rest * clip_rest.inverse() correction introduced up to 90°
+			# of error. Position tracks carry authored motion too (finding 1247).
 			var rot_keys: Array = []
 			var quat_mode: int = int(r.get("quat_mode", 1))
 			if quat_mode == 2:
@@ -1424,7 +1447,7 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 			if quat_mode == 2:
 				for pair in rot_keys:
 					anim.rotation_track_insert_key(rt, pair[0],
-						(retarget * (pair[1] as Quaternion).normalized()).normalized())
+						(pair[1] as Quaternion).normalized())
 			else:
 				if quat_mode == 0:
 					anim.track_set_interpolation_type(rt, Animation.INTERPOLATION_NEAREST)
@@ -1437,10 +1460,11 @@ func build_animation(models: Sacred.Models, clip_entry: int, falsify: String = "
 				# rather than changing what was decoded.
 				for i in times_rot.size():
 					anim.rotation_track_insert_key(rt, times_rot[i],
-						(retarget * (rotations[i] as Quaternion).normalized()).normalized())
+						(rotations[i] as Quaternion).normalized())
 			tracks += 1
 
-	return {"animation": anim, "bound": bound, "tracks": tracks, "unbound_names": unbound}
+	return {"animation": anim, "bound": bound, "tracks": tracks,
+		"unbound_names": unbound, "affine_tracks": affine_tracks}
 
 
 ## Plays `clip_entry` on this rig through a real AnimationPlayer /
@@ -1478,7 +1502,132 @@ func play_clip(models: Sacred.Models, clip_entry: int, falsify: String = "") -> 
 	lib.add_animation(clip_name, anim)
 	_built_anim = anim
 	_anim_player.play(clip_name)
+	_affine_tracks = built["affine_tracks"]
+	_affine_required = _affine_rest_required
+	for bone: int in _affine_tracks:
+		for ss: Basis in _affine_tracks[bone]["keys"]:
+			if not ss.is_equal_approx(_affine_rest_scales[bone]):
+				_affine_required = true
+				break
+	if not _affine_required and _skeleton.has_meta(&"affine_global_poses"):
+		_skeleton.remove_meta(&"affine_global_poses")
+	_capture_affine_pose()
 	return true
+
+
+## Row-major SS payload; do not extract a scale vector or orthogonalize it.
+static func _scale_shear_basis(values: PackedFloat32Array) -> Basis:
+	return Basis(Vector3(values[0], values[3], values[6]),
+		Vector3(values[1], values[4], values[7]), Vector3(values[2], values[5], values[8]))
+
+
+func _capture_affine_pose() -> void:
+	if not _affine_required:
+		return
+	# skeleton_updated precedes restoration of modifier-written placement.
+	_affine_time = _anim_player.current_animation_position if _anim_player != null \
+		and not _anim_player.current_animation.is_empty() else 0.0
+	for bone in _skeleton.get_bone_count():
+		_affine_positions[bone] = _skeleton.get_bone_pose_position(bone)
+		_affine_rotations[bone] = _skeleton.get_bone_pose_rotation(bone)
+		if _skeleton.get_bone_parent(bone) < 0:
+			# Apply the same external placement delta to the untouched affine
+			# rest, rather than replacing its shear with a decomposed root.
+			_affine_roots[bone] = _skeleton.get_bone_pose(bone) \
+				* _affine_rest_pose_inverse[bone] * _affine_rests[bone]
+
+
+static func _blend_scale_shear(a: Basis, b: Basis, amount: float) -> Basis:
+	return Basis(a.x.lerp(b.x, amount), a.y.lerp(b.y, amount), a.z.lerp(b.z, amount))
+
+
+func _sample_scale_shear(track: Dictionary, time: float, rest: Basis) -> Basis:
+	var times: PackedFloat32Array = track["times"]
+	var keys: Array[Basis] = track["keys"]
+	if times.is_empty():
+		return rest
+	if time <= times[0] or times.size() == 1:
+		return keys[0]
+	var last := times.size() - 1
+	if time >= times[last]:
+		return keys[last]
+	var upper := times.bsearch(time, false)
+	var lower := upper - 1
+	var mode: int = track["mode"]
+	if mode == 0:
+		return keys[lower]
+	if mode == 2:
+		var before := maxi(lower - 1, 0)
+		var after := mini(upper + 1, last)
+		var weights := _quad_weights(times[before], times[lower],
+			times[upper], times[after], time)
+		var a := keys[before]
+		var b := keys[lower]
+		var c := keys[upper]
+		return Basis(a.x * weights.x + b.x * weights.y + c.x * weights.z,
+			a.y * weights.x + b.y * weights.y + c.y * weights.z,
+			a.z * weights.x + b.z * weights.y + c.z * weights.z)
+	return _blend_scale_shear(keys[lower], keys[upper],
+		(time - times[lower]) / (times[upper] - times[lower]))
+
+
+## Called at frame_pre_draw before crop, sockets, shadows or skin consumption.
+## LGP 0x08074996 multiplies R by all nine SS elements; 0x08074F9C then
+## composes the parent. Godot's GPU palette accepts the resulting full matrix.
+func prepare_render() -> void:
+	if _affine_required and _skeleton != null:
+		for bone in _skeleton.get_bone_count():
+			var local := _affine_rests[bone]
+			var parent := _skeleton.get_bone_parent(bone)
+			if parent < 0:
+				local = _affine_roots[bone]
+			elif _affine_tracks.has(bone):
+				var track: Dictionary = _affine_tracks[bone]
+				var rotation := _affine_rotations[bone] if track["rotation"] \
+					else _affine_rest_rotations[bone]
+				local.basis = Basis(rotation) \
+					* _sample_scale_shear(track, _affine_time, _affine_rest_scales[bone])
+				if track["position"]:
+					local.origin = _affine_positions[bone]
+			affine_global_poses[bone] = local if parent < 0 \
+				else affine_global_poses[parent] * local
+		_skeleton.set_meta(&"affine_global_poses", affine_global_poses)
+		for mesh in _affine_meshes:
+			if not is_instance_valid(mesh) or not mesh.is_inside_tree():
+				continue
+			var reference := mesh.get_skin_reference()
+			if reference == null:
+				continue
+			var skin := reference.get_skin()
+			var palette := reference.get_skeleton()
+			for bind in skin.get_bind_count():
+				var bone := skin.get_bind_bone(bind)
+				var bone_name := skin.get_bind_name(bind)
+				if not bone_name.is_empty():
+					bone = _skeleton.find_bone(bone_name)
+				RenderingServer.skeleton_bone_set_transform(palette, bind,
+					affine_global_poses[bone] * skin.get_bind_pose(bind))
+		if _blob_shadow != null:
+			_blob_shadow.refresh_pose()
+		for attachment in _affine_sockets:
+			if is_instance_valid(attachment):
+				attachment.transform = affine_global_poses[attachment.bone_idx]
+	for attachment in _affine_sockets:
+		if not is_instance_valid(attachment):
+			continue
+		for child in attachment.get_children():
+			if child is ModelView:
+				child.prepare_render()
+
+
+func _enter_tree() -> void:
+	if _standalone_render and not RenderingServer.frame_pre_draw.is_connected(prepare_render):
+		RenderingServer.frame_pre_draw.connect(prepare_render)
+
+
+func _exit_tree() -> void:
+	if RenderingServer.frame_pre_draw.is_connected(prepare_render):
+		RenderingServer.frame_pre_draw.disconnect(prepare_render)
 
 
 ## The Skeleton3D's CURRENT pose transform for `bone_name`, sanitized the
@@ -1543,6 +1692,21 @@ func freeze_anim(t: float) -> void:
 var anim_frozen: bool:
 	get:
 		return _anim_frozen and _anim_player != null and is_equal_approx(_anim_player.speed_scale, 0.0)
+
+
+## True while a clip is loaded and playing. Read by E1's Checkpoint via
+## main._anim_clip_state().
+func is_playing() -> bool:
+	return _anim_player != null and not _anim_player.current_animation.is_empty() \
+		and _anim_player.is_playing()
+
+
+## The playing clip's current position, or NAN when nothing is playing. THE
+## ONLY sanctioned clock read: capture-side, never drives gameplay.
+func anim_time() -> float:
+	if _anim_player == null or _anim_player.current_animation.is_empty():
+		return NAN
+	return _anim_player.current_animation_position
 
 
 ## True once the surface exists. There is no streaming here, so this is

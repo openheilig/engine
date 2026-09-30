@@ -43,6 +43,8 @@ extends CanvasLayer
 ## Nothing here reads a simulation type (R10.2): the caller pushes values in.
 
 ## The virtual canvas the whole interface is authored against.
+const UiElements := preload("res://formats/ui_elements.gd")
+
 const CANVAS := Vector2i(1024, 768)
 ## `UI_WND_TASKBAR` -- {x, y, w, h}, verbatim.
 const TASKBAR := Rect2i(0, 676, 1024, 92)
@@ -224,6 +226,9 @@ var missing := PackedStringArray()
 
 var _root: Control
 var _text: Label
+## Kept so element-table draws can share the sheets _init already decoded.
+var _tex_pak
+var _tex_cache: Dictionary = {}
 ## The two halves of the life gauge: the red block sliced to the bottom
 ## `health` of the band, the grey one filling the drained top.
 var _ring_full: TextureRect = null
@@ -232,6 +237,7 @@ var _ring_empty: TextureRect = null
 
 func _init(tex_pak) -> void:
 	layer = 1
+	_tex_pak = tex_pak
 	_root = Control.new()
 	_root.name = "Taskbar"
 	_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -240,6 +246,7 @@ func _init(tex_pak) -> void:
 		push_warning("Hud: texture.pak is not open -- no interface drawn")
 		return
 	var cache: Dictionary = {}
+	_tex_cache = cache
 	for p in PIECES:
 		_blit(tex_pak, cache, p["sheet"], p["rect"], p["at"])
 	for w in PORTRAIT:
@@ -393,13 +400,112 @@ func _wings(tex_pak, cache: Dictionary) -> void:
 ##
 ## Defaults to full and stays there until called, which is both what retail
 ## draws at spawn and a no-op against every frame captured so far.
-## The hero's combat-art icon in the first skill slot. Row 1050: the slot
-## carries the art's own icon, sliced at the regeneration waterline — the
-## clip refills bottom-up as the art's clock runs toward ready. The icon
-## texture is the art's own (CombatArts.icon), decoded by the caller.
+## The hero's assigned-art slot, rendered with the art's own element triple
+## (row 1043 / sub_85E676A): EMPTY fills the top of the waterline, LOAD the
+## bottom, and a ready+selected slot draws FULL whole. WHICH side the slot
+## sits on comes from retail's own element names: a UI_SPELL_* triple goes to
+## the spell column at SPELL_X0, anything else to the skill column at
+## SKILL_X0. An art with no triple draws no slot at all -- art 18 is one.
 var _art_clip: Control = null
 var _art_icon_rect: TextureRect = null
+var _ui: UiElements = null
+var _art_elements: Array = []
+var _art_selected := false
+var _slot_rects: Array[TextureRect] = []
 
+## One element table per Hud, built on demand -- main.gd never names the
+## class, so no second preload site exists.
+func ui_elements(install: String, tex_pak) -> UiElements:
+	if _ui == null:
+		_ui = UiElements.new(install, tex_pak)
+	return _ui
+
+func set_art_slot(ui: UiElements, elements: Array, fraction: float) -> void:
+	print("articon\thud set_art_slot elements=", elements, " root=", _root != null)
+	if _root == null or ui == null or not ui.found() or elements.is_empty():
+		return
+	if _art_clip != null:
+		_art_clip.queue_free()
+		_art_clip = null
+	# The side is retail's own naming, not a choice: any UI_SPELL_ element
+	# marks the spell column.
+	var spell := false
+	for e in elements:
+		if ui.name(int(e)).begins_with("UI_SPELL"):
+			spell = true
+			break
+	var x0 := SPELL_X0 if spell else SKILL_X0
+	_art_elements = elements
+	_ui = ui
+	# One assigned art IS the selected slot (there is nothing else to select);
+	# sub_85E676A draws element[2] whole only for the selected one.
+	_art_selected = true
+	_draw_art_slot(Vector2i(x0, SLOT_Y), clampf(fraction, 0.0, 1.0))
+
+func _draw_art_slot(at: Vector2i, f: float) -> void:
+	var ready := f >= 1.0 and _art_selected
+	var wanted: Array = []
+	if ready and _art_elements.size() >= 3:
+		# Ready AND selected draws element[2] whole (sub_85E676A's f>=1 branch).
+		wanted = [[int(_art_elements[2]), Rect2i(0, 0, 63, 63), Vector2i.ZERO]]
+	elif _art_elements.size() >= 2:
+		var split := int(round(63.0 * (1.0 - f)))
+		if split > 0:
+			wanted.append([int(_art_elements[0]),
+				Rect2i(0, 0, 63, split), Vector2i.ZERO])
+		if split < 63:
+			wanted.append([int(_art_elements[1]),
+				Rect2i(0, split, 63, 63 - split), Vector2i(0, split)])
+	# Reuse nodes across frames: _sync_hud_health calls in every frame, and
+	# stacking fresh TextureRects per frame would leak them.
+	if _slot_rects.size() != wanted.size():
+		for tr in _slot_rects:
+			tr.queue_free()
+		_slot_rects.clear()
+		for piece in wanted:
+			var tr := _blit_element(_ui, piece[0], at + piece[2])
+			if tr != null:
+				_slot_rects.append(tr)
+	for i in mini(_slot_rects.size(), wanted.size()):
+		var tr: TextureRect = _slot_rects[i]
+		_slice(tr, Rect2i(ui_element_rect(wanted[i][0]).position + (wanted[i][1] as Rect2i).position, (wanted[i][1] as Rect2i).size), at + (wanted[i][2] as Vector2i))
+
+func ui_element_rect(id: int) -> Rect2i:
+	return _ui.rect(id)
+
+func _blit_element(ui: UiElements, id: int, at: Vector2i) -> TextureRect:
+	if not ui.has(id):
+		missing.append("element %d" % id)
+		return null
+	var sname := ui.sheet_name(id)
+	var key := sname.get_basename()
+	if not _tex_cache.has(key):
+		var tex := ui.sheet(id, _tex_pak, _tex_cache)
+		if tex == null:
+			missing.append(sname)
+			return null
+		_tex_cache[key] = tex
+	return _blit(_tex_pak, _tex_cache, key, ui.rect(id), at, false)
+
+func _blit_element_slice(ui: UiElements, id: int, at: Vector2i,
+		src: Rect2i, dst: Vector2i) -> TextureRect:
+	if not ui.has(id):
+		missing.append("element %d" % id)
+		return null
+	var sname := ui.sheet_name(id)
+	var key := sname.get_basename()
+	if not _tex_cache.has(key):
+		var tex := ui.sheet(id, _tex_pak, _tex_cache)
+		if tex == null:
+			missing.append(sname)
+			return null
+		_tex_cache[key] = tex
+	var piece := ui.rect(id)
+	return _blit(_tex_pak, _tex_cache, key,
+		Rect2i(piece.position + src.position, src.size), at + dst, false)
+
+## Legacy single-texture entry point, kept for the one caller that has no
+## element table -- it draws the skill side as before.
 func set_art_icon(tex: Texture2D) -> void:
 	print("articon\thud set_art_icon tex=", tex, " root=", _root != null)
 	if tex == null or _root == null:
@@ -422,16 +528,18 @@ func set_art_icon(tex: Texture2D) -> void:
 	_art_icon_rect.position = Vector2.ZERO
 	print("articon\tclip at ", _art_clip.position, " size ", _art_clip.size)
 
-## The regenerated fraction, 0..1: the icon's clip refills bottom-up. At 1.0
-## the whole icon shows (retail's spawn frame state — the art is ready).
+## The regenerated fraction, 0..1: the slot refills bottom-up. At 1.0 the
+## whole LOAD state shows (retail's spawn frame state — the art is ready).
 func set_art_fraction(f: float) -> void:
-	if _art_clip == null:
+	if _ui == null or _art_elements.is_empty():
 		return
-	var h := clampf(f, 0.0, 1.0) * 63.0
-	_art_clip.position.y = SLOT_Y + (63.0 - h)
-	_art_clip.size.y = h
-	if _art_icon_rect != null:
-		_art_icon_rect.position.y = -(63.0 - h)
+	var spell := false
+	for e in _art_elements:
+		if _ui.name(int(e)).begins_with("UI_SPELL"):
+			spell = true
+			break
+	_draw_art_slot(Vector2i(SPELL_X0 if spell else SKILL_X0, SLOT_Y),
+		clampf(f, 0.0, 1.0))
 
 
 func set_health(frac: float) -> void:

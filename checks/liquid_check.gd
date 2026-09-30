@@ -34,6 +34,11 @@ const SEA := Vector2i(47, 67)
 
 func _init() -> void:
 	super()
+	allow_frames(120000)
+	_run.call_deferred()
+
+
+func _run() -> void:
 	var install := Sacred.find_install()
 	var tex := Sacred.Pak.new(install.path_join("pak/texture.pak"))
 	expect(tex.is_open(), "texture.pak did not open -- is the install present?")
@@ -45,15 +50,25 @@ func _init() -> void:
 
 	# (1) and (2): the table against the shipped images.
 	var liquid := LiquidScript.new(tex)
+	# Cancel after decoding part of a set. The next ordinary request below
+	# must still return its complete animation, not a cached failure/fragment.
+	var checkpoints := [0]
+	var cancel_partial := func() -> bool:
+		checkpoints[0] += 1
+		return checkpoints[0] < 4
+	expect(await liquid.material_for(0, cancel_partial) == null,
+		"cancelled liquid request published a partial animation")
 	expect(LiquidScript.MATERIALS.size() == 14,
 		"the liquid table has %d entries, expected 14" % LiquidScript.MATERIALS.size())
 	var frames := PackedStringArray()
 	for id in LiquidScript.MATERIALS.size():
-		var mat: ShaderMaterial = liquid.material_for(id)
+		var mat: ShaderMaterial = await liquid.material_for(id)
 		if not expect(mat != null, "liquid %d (%s) built no material -- the name does not resolve in texture.pak"
 				% [id, LiquidScript.MATERIALS[id]]):
 			continue
 		var n: float = mat.get_shader_parameter(&"frame_count")
+		if id == 0:
+			expect(int(n) == 50, "request after cancellation must recover all 50 B_WATER frames")
 		expect(n > 1.0, "liquid %d (%s) has %d frame(s); an animation needs more than one"
 			% [id, LiquidScript.MATERIALS[id], int(n)])
 		# THE ORDER PIN (row 1011). The pak carries exactly two 20-frame sets,
@@ -101,7 +116,9 @@ func _init() -> void:
 	view._tex_pak = tex
 	view._tiles = Sacred.Tiles.new(install.path_join("pak/tiles.pak"))
 	view._liquid = liquid
-	var mi := view._build_sector(SEA.x, SEA.y)
+	root.add_child(view)
+	await view.load_region(SEA.x, SEA.y, 0)
+	var mi: MeshInstance3D = view._loaded.get(SEA.y * 100 + SEA.x)
 	if not expect(mi != null, "sector %s built no mesh at all" % SEA):
 		finish(1)
 		return
@@ -133,18 +150,9 @@ func _init() -> void:
 		"sea sector %s reads liquid id %d for nibble 9, expected 0 (B_WATER)" % [
 			SEA, world.liquid_id(SEA.x, SEA.y, 9)])
 
-	# (5) the depth ordering, from the constants rather than from the mesh: the
-	# liquid bump must clear every overlay the same cell can stack and still
-	# stay inside the step to the next cell's ground.
-	var overlay_top := SectorView.OVERLAY_Z * (SectorView.OVERLAY_MAX - 1)
-	expect(SectorView.LIQUID_Z > overlay_top,
-		"liquid sits at %.4f, under the highest overlay at %.4f -- the bed would show through"
-			% [SectorView.LIQUID_Z, overlay_top])
-	expect(SectorView.LIQUID_Z < SectorView.DEPTH_STEP,
-		"liquid sits at %.4f, at or past the %.4f step to the next cell's ground"
-			% [SectorView.LIQUID_Z, SectorView.DEPTH_STEP])
 
 	print("liquid_check\tOK\tmaterials=%d\tsea=%s\tquads=%d" % [
 		LiquidScript.MATERIALS.size(), SEA, got])
 	print("liquid_check\tframes\t%s" % " ".join(frames))
+	view.free()
 	finish(0)

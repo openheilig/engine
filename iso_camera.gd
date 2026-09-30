@@ -3,10 +3,9 @@ extends Camera3D
 ## Orthographic camera over Sacred's isometric cell grid.
 ##
 ## The projection is  sx = (x-y)*HW,  sy = -(x+y)*HH, so world units here are
-## retail screen pixels at 1x zoom. HW/HH come from the terrain atlas lattice
-## (Sacred.slot_uv): diamonds are 100 wide and 50 tall, packed on a 104/52/25
-## grid. Everything the streamer needs to know about what is on screen comes
-## from visible_cells().
+## retail screen pixels at 1x zoom. HW/HH describe the 96x48 world lattice,
+## not the padded terrain atlas. Everything the streamer needs to know about
+## what is on screen comes from visible_cells().
 
 ## The true iso cell is 96x48. Not derived from the terrain atlas -- that gives
 ## 104x50, which is the slot PITCH including padding, and 100x49 of drawn art,
@@ -14,9 +13,8 @@ extends Camera3D
 ## 96x48 comes from the object data, which is ground truth: fitting every static
 ## object's stored position against its cell gives ox = 48.0058*(cx-cy) and
 ## oy = 24.0235*(cx+cy) over 32428 samples, with the residual quantised to
-## sub-cell offsets. Terrain geometry uses these; the art is sampled from the
-## 100x49 bbox and so is squeezed ~4%, which is invisible and keeps the corner
-## sharing that the height field depends on.
+## sub-cell offsets. Terrain samples retail's four asymmetric atlas UV tips
+## and renders each cell with a 0.2-pixel overdraw margin at its tips.
 const HW := 48.0    ## iso half-width
 const HH := 24.0    ## iso half-height
 

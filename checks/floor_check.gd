@@ -23,8 +23,8 @@ extends "res://checks/check.gd"
 ## by 18 for its diamond slot, each looked up in the same tile table -- writing
 ## two UV pairs into one vertex struct. So a floor.pak cell is a TWO-TEXTURE
 ## BLEND: the low field is the tile, the top field (0 = none) is a transition
-## sheet drawn with it. The blend OPERATION is still unread, so the port draws
-## the low tile only.
+## sheet drawn with it. FloorView composites art RGB and mask alpha in retail's
+## encoded-space, alternating whole-scene masked/unmasked passes.
 const LOW17 := 0x1ffff
 const TILE_COUNT := 90132        ## audited; tiles.pak does not open via Sacred.Pak
 const FLOOR_COUNT := 6713136

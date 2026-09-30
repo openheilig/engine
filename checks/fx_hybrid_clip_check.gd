@@ -1,9 +1,9 @@
 extends "res://checks/check.gd"
 ## fx_hybrid_clip_check.gd -- the ONE runnable check for Wire B (per-record
 ## dispatch on the FX hybrid animation records identified in row 1168). Pinned
-## by NAME because the discriminator (nt=nq=nu=0 AND span == 12+68*N) is
-## otherwise indistinguishable from "ordinary record that happens to span
-## 12+68*N by coincidence" without inspecting the count dwords.
+## by NAME to exercise both storage formats and their duplicate-bone merge.
+## The explicit record +8 format flag selects the layout; +24/+28/+32
+## are pose components in interleaved records, not count fields.
 ##
 ##   godot --headless --path godot-port --script fx_hybrid_clip_check.gd
 ##
@@ -17,9 +17,8 @@ extends "res://checks/check.gd"
 ##   2. The non-hybrid entries that previously decoded under the whole-entry
 ##      decision (HORS_DYING_A sampled-only, WOLF_ATTACK_BH_A ordinary with
 ##      varying nu) still decode and still produce the same record counts.
-##   3. The clipped sampled discriminator stays narrow: an ordinary record
-##      whose span happens to land on 12+68*N does NOT become sampled just
-##      because the size fits -- the count dwords must all be zero too.
+##   3. An ordinary record whose span happens to land on 12+68*N does NOT
+##      become sampled just because the size fits: its format flag is split.
 
 const HYBRID_E := "FX_E_IDLE_BH.GRN"
 const HYBRID_G := "FX_G_IDLE_BH.GRN"

@@ -48,6 +48,9 @@ func _init(path: String) -> void:
 func is_open() -> bool:
 	return _f != null
 
+func source_path() -> String:
+	return _f.get_path() if _f != null else ""
+
 func count() -> int:
 	return offsets.size()
 

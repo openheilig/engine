@@ -1,22 +1,8 @@
-shader_type spatial;
-// Static object sprites. Unshaded screen-space billboards -- this is a 2D game
-// drawn in a 3D engine, and the only 3D thing about an object is the Z it sorts
-// on, which the mesh carries per-vertex.
-//
-// depth_draw_opaque: blended fragments must not write depth, or a sprite's
-// transparent halo punches a hole in everything drawn after it. So the depth
-// buffer orders objects against the (opaque) terrain but NOT against each
-// other -- object-vs-object order is submission order, and main.gd supplies it
-// by emitting one surface per sector, back-to-front, with each object's tiles
-// in mixed.pak order.
+shader_type canvas_item;
+// Static sprites share retail's encoded framebuffer and global painter order.
+// FloorView submits contiguous runs without reordering them by texture.
+render_mode unshaded, blend_mix;
 
-render_mode unshaded, cull_disabled, blend_mix, depth_draw_opaque;
-
-// A Texture2DArray, one layer per distinct texture.pak page in this sector,
-// with UV2.x carrying the layer -- the same trick terrain.gdshader uses. This
-// is what lets a whole sector's objects live in ONE surface: batching by
-// texture into sibling meshes instead handed ordering to Godot's per-instance
-// transparent sort (AABB centroid), which cannot express a painter order.
 // filter_NEAREST, deliberately. Object sprites are chopped into 64x64 tiles
 // packed 16 to a 256x256 page, and tiles that are adjacent IN THE SPRITE are
 // not adjacent in the atlas -- sprite 24471's tile0 and tile1 stack vertically
@@ -24,78 +10,36 @@ render_mode unshaded, cull_disabled, blend_mix, depth_draw_opaque;
 // blends across each tile's edge into an unrelated part of the sprite, drawing
 // a 1px wrong-content fringe around every tile: the visible rectangular boxes.
 //
-// Nearest removes it at the root and is what the retail software blitter does
-// anyway -- this is a 2D game whose art is authored at final pixel size, so
-// there is nothing to interpolate. Terrain solves the same problem differently
-// (a 1-texel UV inset) because its diamonds are sampled off-grid.
+// A live native GL observation confirms NEAREST minification/magnification
+// for both chapel cobble miniatures (finding 1236), independently of the
+// earlier MIX fringe comparison. That observation does not establish every
+// object texture's sampler state; terrain has its own sampling path.
 uniform sampler2DArray tex : filter_nearest;
 
-// Same channel rotation as terrain.gdshader: the texture is uploaded via
-// Image.FORMAT_RGBA4444 -> convert(RGBA8), and Godot reads the u16 as R,G,B,A
-// where Sacred stores A,R,G,B. So .r is Sacred's ALPHA and .gba are its colour.
-//
-// This shader exists because StandardMaterial3D cannot express that. Pointing
-// albedo_texture at these images makes alpha-scissor test Sacred's *blue*,
-// which discards almost every pixel and leaves thin coloured slivers.
-//
-// No source_color, for the same reason as terrain: it would sRGB-decode RGB but
-// not A, and with the rotation that hits the wrong three channels.
-varying flat float layer;
-// Per-vertex swap bucket id (UV2.y): encodes the region key and the
-// exterior/interior class. The swap hides buckets by setting hidden_bucket_count
-// and filling hidden_buckets with the ids to discard. This is the shader-side
-// discard mechanism (06-04-SUMMARY's Option 3): ONE mesh per band keeps the
-// painter-correct contiguous submission order, and the swap is a uniform update
-// -- no mesh split, no per-run sorting_offset ambiguity, no geometry rebuild.
-varying flat float bucket;
-// HIDDEN_BUCKET_SLOTS in view/sector_view.gd MUST equal this array length. The
-// CPU side clamps hidden_bucket_count to it; a mismatch, or an unclamped count,
-// lets the loop below index past the end of the array.
-#define HIDDEN_BUCKET_SLOTS 64
-uniform int hidden_bucket_count = 0;
-uniform int hidden_buckets[HIDDEN_BUCKET_SLOTS];
+// The packed upload retains Sacred A,R,G,B in Godot R,G,B,A.
+// Do not sRGB-decode before blending: the display shader decodes once, last.
+uniform int layer;
 
 void vertex() {
-	layer = UV2.x;
-	bucket = UV2.y;
-}
-
-vec3 srgb_to_linear(vec3 c) {
-	return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+	// Miniature metadata: COLOR stores
+	// columns, rows, timing divisor, frame count as normalized retail bytes.
+	// Zero columns marks regular MIX/static-UV geometry, not an animation.
+	ivec4 animation = ivec4(round(COLOR * 255.0));
+	if (animation.x > 0) {
+		// Native uses integer milliseconds from its performance-counter epoch:
+		// tick = (4*ms / (columns*divisor)) % 1000
+		// frame = frame_count*tick / 1000, then row-major atlas addressing.
+		// TIME follows the existing liquid convention; its epoch, pause policy
+		// and rollover are not synchronized with retail's counter.
+		uint ms = uint(floor(TIME * 1000.0));
+		uint tick = (4u * ms / uint(animation.x * animation.z)) % 1000u;
+		int frame = int(uint(animation.w) * tick / 1000u);
+		UV += vec2(float(frame % animation.x) / float(animation.x),
+			float(frame / animation.x) / float(animation.y));
+	}
 }
 
 void fragment() {
-	// The swap: discard any fragment whose bucket is hidden. SHARED buckets
-	// (id < 0) are never hidden -- props and ground always draw.
-	if (bucket >= 0.0) {
-		int b = int(bucket + 0.5);
-		for (int i = 0; i < hidden_bucket_count; ++i) {
-			if (hidden_buckets[i] == b) {
-				discard;
-			}
-		}
-	}
-	vec4 c = texture(tex, vec3(UV, layer));
-	// Sacred's alpha is a real 4-bit gradient, not a mask: shadows, glass and
-	// smoke are drawn at partial alpha. An alpha-scissor cut renders those
-	// fully opaque, which showed up as flat dark blobs over the buildings --
-	// the same sprites composited with real blending in Python looked clean.
-	// So blend, and discard only what is fully transparent.
-	if (c.r < 0.02) discard;
-	ALBEDO = srgb_to_linear(c.gba);
-	// Row 1184 (object-vs-terrain depth): the retail oracle at
-	// tmp/roofverify/retail-118000.png shows pews and fence drawn as SOLID
-	// objects with binary alpha at the silhouette and a soft SHADOWDOT.TGA
-	// separate below. depth_draw_opaque writes depth only when the blended
-	// ALPHA is 1.0; a partial-alpha pew pixel leaves the depth buffer
-	// untouched and the terrain behind shows through. Force ALPHA=1.0 for
-	// any pixel above the discard threshold so depth IS written. The
-	// 0.02 discard already cuts the soft halo, so the visible result is
-	// the retail binary silhouette: solid pew, solid fence, hard alpha
-	// cut at the outline, no ghost. The "halo" the original
-	// depth_draw_opaque comment warned about is the partial-alpha
-	// fragments writing depth, which is exactly what the 0.02 discard
-	// already prevents; raising the rest to 1.0 writes depth for the
-	// pew's interior only.
-	ALPHA = 1.0;
+	vec4 c = texture(tex, vec3(UV, float(layer)));
+	COLOR = vec4(c.gba, c.r);
 }

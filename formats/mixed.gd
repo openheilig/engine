@@ -1,5 +1,5 @@
 extends RefCounted
-## pak/mixed.pak -- the sprite table that static.pak's type id indexes.
+## pak/mixed.pak -- tiled sprites indexed by items.pak record +0x10.
 ##
 ##   header 16 B: u32 tile_count, u16 w, u16 h, i16 dx, i16 dy, u32 pad
 ##   then tile_count fixed 64-byte tiles; entry size is exactly 16 + 64*n.
@@ -14,9 +14,9 @@ extends RefCounted
 ## the same size as its UV rect in pixels, and compositing them produces
 ## coherent objects (a crystal shrine, a boulder, a chair).
 ##
-## 15840 of 32096 entries have zero tiles, including type 1037 -- the most
-## common static type in the world. Those placements are invisible markers
-## (collision, spawn, sound), not art.
+## 15840 of 32096 entries have zero tiles. This says only that the MIX path has
+## no art: static flags 0x20 instead draw item +0x04's texture atlas with static
+## +46..50 miniature parameters. Other zero-MIX placements can be markers.
 
 const Pak := preload("res://formats/pak.gd")
 
@@ -48,7 +48,7 @@ func size_of(i: int) -> Vector2i:
 
 
 ## {size: Vector2i, anchor: Vector2i, tiles: Array[Dictionary]} or {} if the
-## entry has no art. Each tile is {tex: int, src: Rect2, dst: Rect2i}.
+## entry has no MIX art. Each tile is {tex: int, src: Rect2, dst: Rect2i}.
 func sprite(i: int) -> Dictionary:
 	if i <= 0 or i >= _pak.count():
 		return {}

@@ -3,6 +3,7 @@ extends RefCounted
 ## the German authoring names ("DCTower innenunten 1A_1", "TH01 Wand innen 1_02").
 ##
 ##   "ITM" v5, 32768 uniform 128-byte records.
+##   +0x04 u32  texture.pak atlas id for static flags 0x20 (miniatures)
 ##   +0x10 u32  mixed.pak sprite id
 ##   +0x37      NUL-terminated name (ids 1..4 are SERAPHIM/GLADIATOR/MAGICIAN/DARKELVE.GRN)
 ##
@@ -13,11 +14,11 @@ extends RefCounted
 ## Drawing both at once is what produced the "dark voids": unlit interior floors
 ## and walls painted over the roofs they belong under.
 ##
-## The set is identified by NAME, which is why the whole items.pak chain matters:
-##   static.pak type --indexes--> mixed.pak sprite   (209956/209956 verified)
-##   items.pak +0x10 ------------> mixed.pak sprite
-##   items.pak +0x37 ------------> authoring name
-## so inverting +0x10 -> +0x37 gives sprite id -> name.
+## The static's type indexes an items.pak RECORD, whose +0x10 selects MIX art:
+##   static.pak +0x04 ----------> items.pak record
+##   items.pak +0x10 -----------> mixed.pak sprite
+##   items.pak +0x37 -----------> authoring name
+## Direct miniatures instead select item +0x04; their MIX id may be zero.
 ##
 ## Do NOT use the items.pak index as a mixed.pak index. That reading gives 70.2%
 ## art for the innen entries against a 77.6% baseline (worse than chance) and
@@ -25,8 +26,12 @@ extends RefCounted
 ## +0x10 instead hits 100.0% for innen against 82.0% overall.
 
 const Pak := preload("res://formats/pak.gd")
+const Weapons := preload("res://formats/weapons.gd")
 
 const SPRITE_OFF := 0x10
+const MINIATURE_TEXTURE_OFF := 0x04
+const SHADOW_RADIUS_OFF := 0x14
+const NATIVE_TYPE_MAX := Weapons.MAX_TYPE
 const NAME_OFF := 0x37
 const REC_MIN := 0x40
 
@@ -80,6 +85,10 @@ const CATEGORY_BOOTS := 18
 ## reason: every caller has a static's type field, never a sprite id.
 var _sprite: Dictionary[int, int] = {}
 var _texture: Dictionary[int, int] = {}     ## items record -> texture.pak entry (+0x08)
+var _miniature_texture := PackedInt32Array() ## direct atlas, NOT the +0x08 mesh skin
+var _shadow_radius: Dictionary[int, int] = {}
+var _static_shadows: Dictionary[int, Dictionary] = {}
+var _initial_heading_degrees: Dictionary[int, float] = {}
 var _interior: Dictionary[int, bool] = {}   ## items record -> is interior art
 ## items.pak record index -> bitmask of the building LEVELS this part belongs to.
 ## Names run <BUILDING>_<level>_<part>, and the level token is either a digit
@@ -116,17 +125,43 @@ var _name: Dictionary[int, String] = {}
 
 ## items record -> the +0x2e item category. See category_of for the decode.
 var _category: Dictionary[int, int] = {}
+## Raw definition flags used by retail's static draw-list routing.
+var _draw_flags: PackedInt32Array = PackedInt32Array()
 
 func _init(pak: Pak) -> void:
+	var definitions: Array[PackedByteArray] = []
+	definitions.resize(pak.count())
+	for i in pak.count():
+		definitions[i] = pak.blob(i)
+	# Retail fills generated weapon types before consumers resolve their art.
+	# A single ordered pass is significant for chained and forward parents.
+	var weapons := Weapons.new(pak.source_path().get_base_dir().path_join("weapon.pak"))
+	weapons.apply_to(definitions)
 	# Level-AND form (_0U1_) or single-level form (_1_), then a part number
 	# that may carry a letter suffix (_00A) or a part-range (_11U21). The
 	# part token is `\d+[A-Za-z]?(?:U\d+)?` -- the optional trailing letter
 	# and optional U-range belong to the PART, never to the level.
 	var lv := RegEx.create_from_string("_(\\d)(?:U(\\d))?_(\\d+[A-Za-z]?(?:U\\d+)?)$")
+	_draw_flags.resize(pak.count())
+	_miniature_texture.resize(pak.count())
 	for i in pak.count():
-		var r := pak.blob(i)
+		var r := definitions[i]
 		if r.size() < REC_MIN:
 			continue
+		_draw_flags[i] = r.decode_u32(0)
+		_miniature_texture[i] = r.decode_u32(MINIATURE_TEXTURE_OFF)
+		_shadow_radius[i] = r.decode_u32(SHADOW_RADIUS_OFF)
+		if r.size() >= 91:
+			_initial_heading_degrees[i] = r.decode_float(87)
+		if (_draw_flags[i] & 0x10000) != 0:
+			if r.size() < 102:
+				push_error("Items: shadow definition %d is truncated" % i)
+			else:
+				_static_shadows[i] = {
+					"tile": r.decode_u16(91),
+					"offset": Vector2(r.decode_s16(93) * 2, r.decode_s16(95) * 2),
+					"skew": r[99] != 0, "radius": float(r.decode_u16(100)),
+				}
 		_sprite[i] = r.decode_u32(SPRITE_OFF)
 		_category[i] = r[CATEGORY_OFF]
 		var tex := r.decode_u32(TEXTURE_OFF)
@@ -156,12 +191,43 @@ func _init(pak: Pak) -> void:
 func count() -> int:
 	return _interior.size()
 
-## The mixed.pak sprite id a static's type field resolves to, or 0 (no art)
-## when the record is absent or carries no sprite. 0 is the honest answer,
-## not a fallback to the record index: Mixed.sprite(0) is empty, which is
-## exactly what an invisible marker placement should draw.
+## The mixed.pak sprite id a static's type field resolves to, or 0 when absent.
+## Zero means no MIX tiles, not necessarily no art: static flags 0x20 select
+## miniature_texture_of() instead, using the placement's atlas metadata.
 func sprite_of(record: int) -> int:
 	return _sprite.get(record, 0)
+
+## Direct miniature atlas at item +0x04. LGP sub_80E4AC2's miniature branch
+## and Win 2.28 chunk 00017:8483-8651 bind this instead of item +0x10.
+func miniature_texture_of(record: int) -> int:
+	return _miniature_texture[record] if record >= 0 and record < _miniature_texture.size() else 0
+
+## LGP 0x08139092: only a VALID type's stored zero means radius 50.
+func shadow_radius_of(record: int) -> float:
+	if record < 1 or record > NATIVE_TYPE_MAX or not _shadow_radius.has(record):
+		return 0.0
+	var radius: int = _shadow_radius[record]
+	return float(radius if radius != 0 else 50)
+
+## Static SHADOW_TREE00 geometry, not the actor blob radius at +20.
+## LGP 0x080EA104; all 125 start-scene quads match live native vertices.
+func static_shadow_of(record: int) -> Dictionary:
+	return _static_shadows.get(record, {})
+
+## cObjectManager::create (LGP chunk13:8467) sends item
+## record+87 as event64; cObject3D converts that angle through 0x081654CE.
+func initial_heading_degrees(record: int) -> float:
+	if record < 1 or record > NATIVE_TYPE_MAX:
+		return NAN
+	return _initial_heading_degrees.get(record, NAN)
+
+## Native definition admission precedes every property-based draw predicate.
+func has_definition(record: int) -> bool:
+	return record >= 1 and record <= NATIVE_TYPE_MAX and _sprite.has(record)
+
+## Definition flags at record +0x00, not the placement's static.pak flags.
+func draw_flags(record: int) -> int:
+	return _draw_flags[record] if record >= 0 and record < _draw_flags.size() else 0
 
 ## True if this items record is building-interior art.
 func is_interior(record: int) -> bool:

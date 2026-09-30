@@ -82,7 +82,7 @@ const TEX_PX := 128.0
 
 var _pak: Pak
 var _cache: Dictionary = {}   ## material id -> ShaderMaterial (null when unbuildable)
-var _rcache: Dictionary = {}  ## reflection variant: same material, render_priority -1
+var _rcache: Dictionary = {}   ## reflection variant, before the liquid surface
 
 
 func _init(texture_pak: Pak) -> void:
@@ -93,23 +93,29 @@ func _init(texture_pak: Pak) -> void:
 ## load. Cached, including the failure: a material that cannot be built will not
 ## build on the next sector either, and retrying it per sector would re-decode
 ## up to 50 images each time.
-func material_for(id: int) -> ShaderMaterial:
+func material_for(id: int, checkpoint: Callable = Callable()) -> ShaderMaterial:
 	if _cache.has(id):
 		return _cache[id]
-	var mat := _build(id)
+	var mat := await _build(id, checkpoint)
+	# Cancellation is not a decode failure. A later sector must be able to
+	# request this material again rather than inherit a cached null.
+	if checkpoint.is_valid() and not await checkpoint.call():
+		return null
 	_cache[id] = mat
 	return mat
 
 
 ## The reflection variant of a material: an identical ShaderMaterial clone with
-## render_priority -1 so it draws BEFORE the bed surface. Retail draws the
+## lower priority so it draws BEFORE the liquid surface. Retail draws the
 ## mirrored ambient quad first and the bed over it (row 1012); the lower
 ## priority makes the port's transparent queue reproduce that order without a
 ## second MeshInstance3D. Cached like material_for, including the null failure.
-func material_for_reflection(id: int) -> ShaderMaterial:
+func material_for_reflection(id: int, checkpoint: Callable = Callable()) -> ShaderMaterial:
 	if _rcache.has(id):
 		return _rcache[id]
-	var base := material_for(id)
+	var base := await material_for(id, checkpoint)
+	if not _cache.has(id):
+		return null
 	if base == null:
 		_rcache[id] = null
 		return null
@@ -119,12 +125,14 @@ func material_for_reflection(id: int) -> ShaderMaterial:
 	return mat
 
 
-func _build(id: int) -> ShaderMaterial:
+func _build(id: int, checkpoint: Callable) -> ShaderMaterial:
 	if _pak == null or id < 0 or id >= MATERIALS.size():
 		return null
 	var stem: String = MATERIALS[id]
 	var images: Array[Image] = []
 	for i in FRAME_MAX:
+		if checkpoint.is_valid() and not await checkpoint.call():
+			return null
 		var tid := Sacred.TextureFormat.find_model_texture(_pak, "%s%02d" % [stem, i])
 		if tid < 0:
 			break

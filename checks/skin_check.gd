@@ -106,6 +106,17 @@ func _init() -> void:
 	assert(Sacred.TextureFormat.find_model_texture(tp, "wolf.bmp.keepextension") < 0,
 		"a name with a bogus stem resolved -- the lookup is not keying on the stem")
 
+	# Native's reverse hash insertion selects the later duplicate, not the
+	# first. Live hash witness (finding 1258): DWARF 7986, never 7178.
+	# Their decoded pixels differ; existence alone would miss this regression.
+	var dwarf_skin := Sacred.TextureFormat.find_model_texture(tp, "Dwarf.bmp")
+	assert(dwarf_skin == 7986,
+		"DWARF selected texture %d; native name lookup selects the later duplicate 7986" % dwarf_skin)
+	var dwarf_named := Sacred.TextureFormat.decode_texture(tp, dwarf_skin, false)
+	var dwarf_first := Sacred.TextureFormat.decode_texture(tp, 7178, false)
+	assert(dwarf_named.get_data() != dwarf_first.get_data(),
+		"DWARF's duplicate candidates no longer discriminate texture precedence")
+
 	# The image decodes, and it is not an atlas tile.
 	var img := Sacred.TextureFormat.decode_texture(tp, wid, false)
 	assert(img != null, "WOLF's texture did not decode")
@@ -282,21 +293,19 @@ func _init() -> void:
 	var ip := Sacred.Pak.new(install.path_join("pak/items.pak"))
 	assert(ip.is_open(), "cannot open pak/items.pak")
 	var items := Sacred.Items.new(ip)
-	# (a) the twelve items naming one kite shield carry twelve DISTINCT skins,
-	# and the mesh's own texture name is in no pak at all -- so index equality,
-	# or trusting the mesh, cannot produce this.
+	# Generated shields legitimately share the parent's skin; uniqueness
+	# across runtime type ids is not part of this rendering contract.
 	var kite := items.records_naming("SHIELD_KITE.GRN")
 	assert(kite.size() >= 12, "only %d items name SHIELD_KITE.GRN" % kite.size())
 	var seen_skin := {}
 	for r in kite:
 		var t := items.texture_of(r)
 		assert(t > 0, "item %d names SHIELD_KITE.GRN but carries no skin" % r)
+		if seen_skin.has(t):
+			continue
 		assert(Sacred.TextureFormat.decode_texture(tp, t) != null,
 			"item %d's skin (texture.pak %d) does not decode" % [r, t])
 		seen_skin[t] = 1
-	assert(seen_skin.size() == kite.size(),
-		"the %d kite-shield items share only %d skins, so +0x08 is not the skin" % [
-			kite.size(), seen_skin.size()])
 	var ki := models.index_of("SHIELD_KITE.GRN")
 	for nm4 in models.texture_names(ki):
 		assert(Sacred.TextureFormat.find_model_texture(tp, nm4) < 0,

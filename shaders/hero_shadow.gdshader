@@ -1,32 +1,31 @@
 shader_type spatial;
-render_mode blend_mix, unshaded, depth_draw_never, depth_test_disabled, cull_disabled, world_vertex_coords;
+render_mode blend_mix, unshaded, depth_draw_never, cull_disabled, world_vertex_coords, fog_disabled;
 
-// The character drop shadow: retail's cGranny::renderShadow (0x80FDBDC,
-// decompiled) re-draws the character's OWN posed mesh projected onto the
-// ground. The projection compresses the height toward the foot line, stretches
-// the silhouette laterally about the character's axis (retail's measured blob
-// is ~105 px wide -- WIDER than the body, so a pure squash reads too narrow;
-// the stretch is CALIBRATED through the masked hero-box gate, SHADOW_STRETCH
-// env during calibration), and flattens to the ground depth. The compression
-// factor, stretch and alpha are CALIBRATED (SHADOW_K / SHADOW_ALPHA /
-// SHADOW_STRETCH env).
-
-uniform float foot_x = 0.0;
-uniform float foot_y = 0.0;
-uniform float ground_z = 0.0;
-uniform float k = 0.25;
-uniform float stretch = 1.0;
-uniform float alpha : hint_range(0.0, 1.0) = 0.5;
+// LGP 0x080FE8DA / Win 2.28 0x00407960: SHADOWDOT.TGA, five XY quads,
+// black diffuse 0x50000000. Captured GL state: linear filtering, repeat,
+// SRCALPHA/ONE_MINUS_SRCALPHA, LEQUAL, no depth writes/alpha test/stencil.
+// IMPORTANT: Forward+ blends this in LINEAR color, unlike native encoded
+// framebuffer blending. This shader deliberately does not fudge alpha to
+// conceal that unresolved actor/object compositing difference. Forward+'s
+// equal-depth behavior also differs from native LEQUAL.
+uniform sampler2D shadow_texture : filter_linear, repeat_enable;
+uniform vec3 centers[5];
+uniform float half_sizes[5];
+uniform mat3 retail_to_port;
+uniform vec3 world_origin;
+uniform bool root_present;
+varying flat int draw_index;
 
 void vertex() {
-	// VERTEX is in world space (world_vertex_coords); world y is up-positive
-	// and the foot line sits at foot_y (measured lift + cell y).
-	VERTEX.y = foot_y + (VERTEX.y - foot_y) * k;
-	VERTEX.x = foot_x + (VERTEX.x - foot_x) * stretch;
-	VERTEX.z = ground_z;
+	draw_index = int(UV2.x);
+	VERTEX = world_origin + retail_to_port *
+		(centers[draw_index] + VERTEX * half_sizes[draw_index]);
 }
 
 void fragment() {
-	ALBEDO = vec3(0.0, 0.0, 0.0);
-	ALPHA = alpha;
+	if (draw_index == 0 && !root_present) {
+		discard;
+	}
+	ALBEDO = vec3(0.0);
+	ALPHA = texture(shadow_texture, UV).a * (80.0 / 255.0);
 }

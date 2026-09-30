@@ -23,6 +23,30 @@ last time it was run end to end. The lesson this file itself teaches
 applies to its own claim: a README that describes a gate as green hides a
 gate that has gone red.
 
+**2026-09-07, latest:** consolidated run **51 pass, 0 fail** (finding 1235).
+The earlier **49 pass, 2 fail** result is superseded: the explicit animation
+record format flag replaces the count-zero heuristic that refused
+`HORS_DYING_A.GRN`. Both `clip_layout_check` and `fx_hybrid_clip_check` now
+pass. The stale total-coverage assertion was removed; discriminating sampled,
+hybrid-merge and variable-count layout assertions remain.
+
+**2026-09-21, latest:** **55 pass, 0 fail** after shared composition and
+actor shape/lighting repair. `affine_skin_check` rejects lossy TRS transport
+for the actual wolf's sheared bones. `dynamic_support_check` covers authored admission,
+including lowest-set-bit precedence, raw-zero hiding and independent base
+emission. Separate Forward+/Vulkan smoke runs exercise actual occlusion,
+same-cell ordering, hide/restore, full view re-entry and sector unload/revisit.
+Those rendered checks are not implied by a headless pass.
+Actor validation additionally includes a guarded native matrix oracle,
+topology-grounded native normal comparisons, GPU normal readback, and twelve
+inspected wolf idle/walk/run poses. A whole-scene score cannot substitute for
+these checks: the default benchmark contains no wolf.
+
+The obsolete family/rectangle `interior_swap_check` and
+`footprint_bind_check` were removed with that renderer. `door_transition_check`
+now invokes the production door handler, including raw-zero preservation
+while stationary, instead of duplicating its algorithm; its targeted run passes.
+
 This file used to say that `pax_check` was the exception, needing a
 third-party `$SACRED_CHARS` corpus and exiting 1 without one. That stopped
 being true when the check was rewritten to read the install's own

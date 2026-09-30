@@ -1,5 +1,12 @@
 class_name SectorView
 extends Node3D
+
+## Consumers attach sector-owned views before the completed sector is added.
+signal sector_built(key: int, node: Node3D)
+
+## Resumed only by stream(), never by a SceneTree signal after teardown.
+signal _build_continue
+
 ## Streams Sacred's 100x100 sector grid straight out of the retail install,
 ## one MeshInstance3D + Texture2DArray per 64x64 sector, and builds the fixed
 ## block for --region= mode.
@@ -36,69 +43,11 @@ const OVERLAY_Z := DEPTH_STEP * 0.1
 ## observed truncated, count the real maximum before raising it.
 const OVERLAY_MAX := 8
 
-## --bands= upper clamp. 4096 is one band per sector cell (SECT*SECT / SECT =
-## SECT bands would already over-separate; this is a hard ceiling regardless
-## of SECT), the point past which more bands cannot separate more objects.
-## Also removes the divide-by-zero a --bands=0 would otherwise cause in
-## _band_of before main.gd's own clamp turns 0 into 1 (T-02-01).
-const BAND_MAX := 4096
 
-## ground_depth is only NON-decreasing across bands (proven empirically at
-## --bands=100000: two adjacent bands whose first object shares an exact
-## pos.y tie -- common in a grid-aligned world -- get an identical
-## sorting_offset, and unlike triangles inside one mesh, whose submission
-## order alone decided this before banding, Godot's transparent sort has no
-## other tiebreaker between distinct MeshInstance3D nodes; the visible result
-## was thin sliver mis-ordering along a handful of overlapping sprite edges).
-## sorting_offset is a rendering-server real_t (32-bit float internally, even
-## though GDScript's own float is 64-bit); at this scale's worst-case
-## magnitude (640, per DEPTH_STEP's own comment above) float32's ULP is
-## ~7.6e-5, so a naively "far below any real depth step" epsilon like 1e-6
-## rounds away to nothing when added -- measured directly: it left the
-## --bands=100000 mis-order artifact almost unchanged. 0.001 clears that ULP
-## floor by >10x while staying under DEPTH_STEP / HH (~0.0021 per world unit
-## of pos.y), the smallest step a genuinely distinct object can produce.
-const BAND_TIE_EPS := 0.001
-
-## Sprite width, in pixels, above which a placement is treated as a STRUCTURE
-## spanning many ground cells rather than an upright standing on one, and so
-## keeps its authored order instead of being sorted at its foot. See the
-## base_pos comment in _build_objects for why the split exists at all.
-##
-## SWEPT, not chosen. Whole-frame delta against retail's own spawn capture --
-## same script, same millisecond, any-nonzero-difference pixels of 786432:
-##
-##     0 (no height, corner)  17.53%      256  14.24%
-##   128                      15.77%      400  16.85%
-##   192                      14.24%      no threshold, every sprite  21.42%
-##
-## A real minimum with a floor two values wide, not a plateau: below it the
-## uprights lose their foot, above it CW_Tree at 344 and the chapel's 460-wide
-## interior shell start being sorted at a foot that spans half a room, and
-## giving EVERY sprite its height is the worst of the three.
-##
-## (These numbers are the SECOND sweep. The first, taken while the anchor bug
-## above still displaced every non-zero-anchor sprite, showed a flat 160..320
-## plateau and no minimum -- the placement error was masking the very signal
-## the sweep was looking for. Re-measure this constant after anything that
-## moves sprites.)
-const STRUCTURE_W := 256
-
-## REFUTED, and recorded so it is not tried again. (Measured BEFORE the anchor
-## fix in _build_objects, so the absolute numbers are the old baseline; the
-## ordering between them is the finding.) The width test above lets a
-## wine rack move forward over the candles standing ON its own shelves, so the
-## obvious next rule was "only give the height to a genuine UPRIGHT, something
-## far taller than it is wide". It loses at every ratio measured -- same frame,
-## same metric as STRUCTURE_W's sweep:
-##
-##   no aspect gate  17.73%     2.5  19.11%
-##   1.5  18.55%                3.0  19.13%
-##   2.0  18.58%                4.0  20.42%
-##
-## So squat objects gain more from being sorted at their foot than the candles
-## lose by being covered. The candle occlusion is real and still open; it is
-## just not what an aspect ratio fixes.
+## Static painter order comes from the owning cell and its linked records,
+## not sprite width or height. The old STRUCTURE_W=256 heuristic hid shelf
+## candles behind their cabinet; the recovered cell-chain order exposes them
+## at the authored coordinates (research finding 1222).
 
 ## --sortcube=CX,CY marker-cube side length in screen pixels -- one retail cell
 ## width (IsoCamera.HW * 2), so the proxy reads at the same scale a character
@@ -131,18 +80,12 @@ const LiquidScript := preload("res://view/liquid.gd")
 ## DEPTH_STEP that reaches the NEXT cell's ground.
 const LIQUID_Z := DEPTH_STEP * 0.9
 
-const TERRAIN_SHADER: Shader = preload("res://shaders/terrain.gdshader")
-const TERRAIN_MASK_SHADER: Shader = preload("res://shaders/terrain_mask.gdshader")
-const OBJECT_SHADER: Shader = preload("res://shaders/object.gdshader")
+const FloorViewScript := preload("res://view/floor_view.gd")
+const ModelCanvasScript := preload("res://view/model_canvas.gd")
 
-## MUST EQUAL the array length in `shaders/object.gdshader`'s
-## `uniform int hidden_buckets[...]`. GLSL cannot read a GDScript const, so the
-## two agree by convention and this is the only place the number is explained.
-## Changing one without the other makes the shader read past its own array.
-const HIDDEN_BUCKET_SLOTS := 64
 
 @export var load_margin := 64.0                    ## cells loaded beyond the viewport
-@export var loads_per_frame := 1
+const BUILD_SLICE_USEC := 3000
 ## Screen pixels per unit of WldxEntry height. Unknown; 1.0 is a starting guess.
 @export var height_scale := 1.0
 
@@ -154,23 +97,15 @@ var _liquid: RefCounted
 var _tiles: Sacred.Tiles
 var _world: Sacred.World
 var _floor: Sacred.Pak                    ## world/floor.pak, the overlay-tile layer; null = don't draw it
+var _floor_view := FloorViewScript.new()
 ## Typed collections (Godot 4.4+): the key/value contracts here are the whole
 ## reason the streamer is readable, so they are worth stating.
 var _loaded: Dictionary[int, MeshInstance3D] = {}  ## sector key -> mesh, null if it draws nothing
 var _images: Dictionary[int, Image] = {}           ## texture.pak id -> decoded tile
 var _statics: Sacred.Statics
 var _mixed: Sacred.Mixed
-var _items: Sacred.Items                  ## names, for the interior/exterior swap
-var _footprints: Sacred.Footprints
-## Per-sector cache of footprints.resolve() results, keyed gy*100+gx.
-## _footprint_membership calls resolve() per object; without this cache it
-## re-inflates and re-parses the owning sector's decompressed stream for every
-## static -- measured 2026-08-13 as ~1 s per sector build (the startup
-## regression: hundreds of statics x a 3x3-neighbour scan = thousands of
-## zlib inflations per sector).
-var _footprint_cache: Dictionary = {}
-var _bucket_ids: Dictionary[int, int] = {}  ## region_key -> dense shader bucket id (row 663)
-var _force_interior := false              ## --force-interior: capture-only all interior families
+var _items: Sacred.Items
+var _interior: Interior
 var _show_regions := false                ## --regions: overlay building footprints
 var _show_flags1e := false                ## --flags1e: overlay WldxEntry +0x1e bits (row 708)
 var _spawns: Dictionary = {}              ## --spawns: sector -> tier, see main.gd
@@ -178,29 +113,30 @@ var _show_classhi := false                ## --classhi: overlay the +0x1f HIGH n
 var _hide_levels := 0                     ## --hidelevel=N: bitmask of levels to drop
 var _exterior := false                    ## --exterior: drop each building's top level
 var _pending: Array[int] = []             ## sectors queued for a later frame
+var _wanted: Dictionary[int, bool] = {}
+var _build_job: Dictionary = {}
+var _slice_deadline := 0
+var _slice_frame := -1
+var _admission_revision := 0
+var _region_loading := false
+var _region_revision := 0
 var _last_view := Vector3(NAN, NAN, NAN)  ## camera x/y/zoom the wanted-set was derived from
-var _in_sync := false                     ## true once _loaded provably covers the wanted set (stream() sets/clears)
+var _in_sync := false                     ## wanted-set/queue reconciled with the current camera
 var _streaming := true
 var _stats := false
 var _objects := true                      ## draw static object sprites
 var _markers := false                     ## ...as flat coloured squares instead
 var _only_flag := -1                      ## debug: draw only objects with this +0x08 flag
 ## OBJ_TRACE=gx,gy: log every submitted object of that sector (id, class,
-## bucket, quads emitted, anchor pos = the painter sort key, sprite size).
+## trigger/mask, quads emitted, anchor pos = painter sort key, sprite size).
 ## Diagnostic only, off unless set.
 var _obj_trace := Vector2i(-1, -1)
 ## OBJ_ONLY_SIDS=a,b,c: draw only these static types. Diagnostic only.
 var _only_sids: Dictionary[int, bool] = {}
-var _band_count := 1                      ## --bands=N: object depth bands per sector
 var _sortcube := Vector2i(-1, -1)         ## --sortcube=CX,CY: character-proxy marker cube cell, (-1,-1) = off
 var sector_build_calls: int = 0
-var object_mesh_creations: int = 0
-var object_material_creations: int = 0
-var object_texture_decodes: int = 0
-var _run_nodes: Dictionary = {}
-var _run_probe: Dictionary = {}
-var _last_swap_states: Dictionary = {}
-var _has_applied_swap := false
+var _object_data: Dictionary[int, Dictionary] = {}
+## Authored vertices and per-object spans survive raw trigger-state changes.
 
 ## Sector unload/(re)load counters. Not gated on anything view-side (a view has
 ## no notion of "probe") -- counted unconditionally, cheaply, on every event.
@@ -211,6 +147,14 @@ var _has_applied_swap := false
 ## reset-to-read window.
 var probe_unloaded := 0
 var probe_reloaded := 0
+var _scene_actors: Dictionary[int, Dictionary] = {}
+## Main's authored model queue participates in complete-scene readiness.
+var pending_scripted_objects := 0
+var _placement_serial := 0
+
+func _init() -> void:
+	add_child(_floor_view)
+
 
 
 ## Assigns the shared readers and camera reference, and the CLI-derived
@@ -224,13 +168,21 @@ var probe_reloaded := 0
 ##   exterior: bool     -- --exterior
 ##   hide_levels: int   -- --hidelevel= bitmask (default 0)
 ##   only_flag: int     -- --onlyflag=, or -1 for "off" (default -1)
-##   band_count: int    -- --bands=N object depth bands per sector (default 1)
 ##   sortcube: Vector2i -- --sortcube=CX,CY character-proxy marker cube cell,
 ##                         or Vector2i(-1,-1) for "off" (default Vector2i(-1,-1))
 func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacred.World,
-		statics: Sacred.Statics, mixed: Sacred.Mixed, items: Sacred.Items, opts: Dictionary,
-		footprints: Sacred.Footprints = null) -> void:
+		statics: Sacred.Statics, mixed: Sacred.Mixed, items: Sacred.Items, opts: Dictionary) -> void:
 	_cam = cam
+	var shadow_texture: Texture2D
+	if opts.get("objects", true) and not opts.get("markers", false):
+		var shadow_id := Sacred.TextureFormat.find_model_texture(tex_pak, "SHADOW_TREE00.TGA")
+		if shadow_id >= 0:
+			var image := Sacred.TextureFormat.decode_texture(tex_pak, shadow_id, false)
+			if image != null:
+				shadow_texture = ImageTexture.create_from_image(image)
+		if shadow_texture == null:
+			push_error("SectorView: native SHADOW_TREE00 texture is unavailable")
+	_floor_view.configure(cam, shadow_texture)
 	_tex_pak = tex_pak
 	_liquid = LiquidScript.new(tex_pak)
 	_tiles = tiles
@@ -238,11 +190,14 @@ func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacr
 	_statics = statics
 	_mixed = mixed
 	_items = items
-	_footprints = footprints
+	_interior = opts.get("interior", null)
+	if opts.get("objects", true) and _statics != null and _interior == null:
+		push_error("SectorView: exact static admission requires shared Interior/Triggers")
+	if _interior != null:
+		_interior.state_changed.connect(_on_trigger_state_changed)
 	_stats = opts.get("stats", false)
 	_markers = opts.get("markers", false)
 	_objects = opts.get("objects", true)
-	_force_interior = opts.get("force_interior", false)
 	_show_regions = opts.get("regions", false)
 	_show_flags1e = opts.get("flags1e", false)
 	_show_classhi = opts.get("classhi", false)
@@ -250,9 +205,6 @@ func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacr
 	_exterior = opts.get("exterior", false)
 	_hide_levels = opts.get("hide_levels", 0)
 	_only_flag = opts.get("only_flag", -1)
-	# maxi(1, ...) so a caller that reaches setup() from outside main.gd's own
-	# clamp (e.g. a future test harness) can never hand _band_of a divisor of 0.
-	_band_count = maxi(1, opts.get("band_count", 1))
 	_sortcube = opts.get("sortcube", Vector2i(-1, -1))
 	_floor = opts.get("floor_pak", null)
 	# Added once, here, as a direct child of self -- never a child of a sector
@@ -263,59 +215,175 @@ func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacr
 		add_child(_sortcube_mesh)
 
 
-## The streaming body, moved out of main.gd's _process verbatim (its early
-## returns are now local to it) so main.gd._process can also drive the sim
-## accumulator on frames the streamer itself has nothing to do on.
+## Main owns the per-frame entry point; no private _process races the sim.
 func stream(_delta: float) -> void:
-	if not _streaming or _cam == null:
+	if not is_inside_tree() or is_queued_for_deletion():
 		return
-	# The visible set only changes when the camera does. Re-deriving it every
-	# frame allocated a Dictionary and walked the sector grid for nothing, so
-	# a settled view is skipped -- but "settled" must mean the wanted set is
-	# actually loaded, not merely that the camera stopped moving: after a
-	# camera jump the OLD cell's backlog drains one sector per frame below,
-	# and the frame that empties it would otherwise early-return forever with
-	# the new cell's sectors never queued (TSV rows 614/617: want=25,
-	# loaded=14, pending=0 at shot time -- a permanent void frame).
-	var view := Vector3(_cam.position.x, _cam.position.y, _cam.size)
-	if view != _last_view:
-		_last_view = view
-		_in_sync = false
+	for id: int in _scene_actors.keys():
+		if not is_instance_valid(_scene_actors[id]["model"]):
+			_retire_actor(id)
+	_stream_sectors()
+	# Composition runs at frame_pre_draw, after actor placement and skin updates.
+	if DisplayServer.get_name() == "headless":
+		_floor_view.sync()
 
-	if not _pending.is_empty():
-		_add_sector(_pending.pop_front())
+## Keep one crop target per live model, but preserve every native grid-phase
+## occurrence. Ownership stays with the original parent (including sectors).
+func place_actor(model: Node3D, type_id: int, cell: Vector2, support_ref: int,
+		layer: int = 0) -> void:
+	if not is_instance_valid(model) or model.is_queued_for_deletion() or _interior == null or _items == null:
 		return
-	if _in_sync:
+	var id := model.get_instance_id()
+	var actor: Dictionary = _scene_actors.get(id, {})
+	if actor.is_empty():
+		var parent := model.get_parent()
+		if parent == null:
+			push_error("SectorView.place_actor: model must be parented first")
+			return
+		var capture := ModelCanvasScript.new()
+		capture.name = "SceneCapture_%s" % model.name
+		parent.add_child(capture)
+		capture.capture(model)
+		actor = {"model": model, "capture": capture, "type": type_id,
+			"cell": Vector2(NAN, NAN), "support": -1, "layer": layer, "sequence": 0}
+		_scene_actors[id] = actor
+		model.tree_exiting.connect(_retire_actor.bind(id), CONNECT_DEFERRED)
+	if actor["cell"] == cell and actor["support"] == support_ref \
+			and actor["type"] == type_id and actor["layer"] == layer:
 		return
+	_placement_serial += 1
+	actor["sequence"] = _placement_serial
+	actor["cell"] = cell
+	actor["support"] = support_ref
+	actor["layer"] = layer
+	actor["type"] = type_id
+	_apply_actor_admission(actor)
 
-	var want := _wanted_sectors()
-	for key: int in _loaded.keys():
-		if not want.has(key):
-			var node: Node = _loaded[key]
-			if node != null:
-				node.queue_free()
-			_run_nodes.erase(key)
-			_run_probe.erase(key)
-			_loaded.erase(key)
-			probe_unloaded += 1
 
-	var missing: Array[int] = []
-	for key: int in want:
-		if not _loaded.has(key):
-			missing.append(key)
-	if missing.is_empty():
+func _retire_actor(id: int) -> void:
+	if not _scene_actors.has(id):
+		return
+	var actor: Dictionary = _scene_actors[id]
+	# Exiting the tree also happens during temporary removal/reparenting.
+	# Retirement follows destruction, not visibility or tree membership.
+	if is_instance_valid(actor["model"]) and not actor["model"].is_queued_for_deletion():
+		return
+	_scene_actors.erase(id)
+	_floor_view.remove_actor(id)
+	if is_instance_valid(actor["capture"]) and not actor["capture"].is_queued_for_deletion():
+		actor["capture"].queue_free()
+
+
+func _apply_actor_admission(actor: Dictionary) -> void:
+	if not is_instance_valid(actor["model"]):
+		return
+	var phases: Array[Vector3i] = []
+	var position: Vector2 = actor["cell"]
+	var cell := Vector2i(floori(position.x), floori(position.y))
+	var type_id: int = actor["type"]
+	var flags := _items.draw_flags(type_id)
+	var admitted := _items.has_definition(type_id) and (flags & 2) != 0
+	# Ordinary consumer's independent parent mask gate (LGP 0x080E7416).
+	if admitted and (flags & 0x1000) != 0:
+		var parent := _interior.parent_for_cell(cell)
+		if not parent.is_empty():
+			var trigger_id: int = parent["trigger"]
+			if _interior.triggers.has_trigger(trigger_id):
+				var record := _statics.blob(parent["id"])
+				admitted = (_interior.state(trigger_id) & ((2 * int(record[53])) | 1)) != 0
+	if admitted:
+		var category := _items.category_of(type_id)
+		for support_order: int in _interior.dynamic_support_orders(cell, actor["support"]):
+			var pass_id := 3
+			if category == 12:
+				if (flags & 0x800000) != 0:
+					pass_id = 4
+				elif (flags & 4) != 0 and (support_order < 0 or actor["layer"] == 0):
+					pass_id = 0
+			phases.append(Vector3i(pass_id, support_order, 1 if category == 12 else 0))
+	_floor_view.set_actor(actor["model"], actor["capture"],
+		(cell.x + cell.y) * 6400 + cell.x, actor["sequence"], phases)
+
+
+
+func _stream_sectors() -> void:
+	if _streaming:
+		if _cam == null:
+			return
+		var view := Vector3(_cam.position.x, _cam.position.y, _cam.size)
+		if view != _last_view or not _in_sync:
+			_last_view = view
+			_wanted = _wanted_sectors()
+			# Reconcile before advancing any work: camera jumps must never
+			# finish a stale backlog before looking at the new wanted set.
+			if not _build_job.is_empty() and not _wanted.has(_build_job["key"]):
+				_cancel_build()
+			for key: int in _loaded.keys():
+				if not _wanted.has(key):
+					var node: Node = _loaded[key]
+					if node != null:
+						node.queue_free()
+					_object_data.erase(key)
+					_loaded.erase(key)
+					_floor_view.remove_sector(key)
+					probe_unloaded += 1
+			_pending.clear()
+			for key: int in _wanted:
+				if not _loaded.has(key) and (_build_job.is_empty() or _build_job["key"] != key):
+					_pending.append(key)
+			var here := _cam.world_to_cell(Vector2(_cam.position.x, _cam.position.y)) / SECT
+			_pending.sort_custom(func(a: int, b: int) -> bool:
+				return _sector_dist(a, here) < _sector_dist(b, here))
+			_in_sync = true
+	elif not _in_sync:
+		# Re-entered fixed-region owners retain the desired block but never
+		# resume the detached job cancelled by _exit_tree.
+		_pending.clear()
+		for key: int in _wanted:
+			if not _loaded.has(key):
+				_pending.append(key)
 		_in_sync = true
+	# A fixed-region coroutine and main may both call stream in one frame.
+	# They share one allowance, not one allowance per invocation/sector.
+	var frame := Engine.get_process_frames()
+	if _slice_frame == frame:
 		return
+	_slice_frame = frame
+	_slice_deadline = Time.get_ticks_usec() + BUILD_SLICE_USEC
+	if not _build_job.is_empty():
+		_build_continue.emit()
+	while _build_job.is_empty() and not _pending.is_empty() \
+			and Time.get_ticks_usec() < _slice_deadline:
+		_add_sector(_pending.pop_front())
 
-	# Nearest first, then drained one per frame from _pending so a big camera
-	# jump costs many short frames instead of one very long one.
-	var here := _cam.world_to_cell(Vector2(_cam.position.x, _cam.position.y)) / SECT
-	missing.sort_custom(func(a: int, b: int) -> bool:
-		return _sector_dist(a, here) < _sector_dist(b, here))
-	for i in mini(loads_per_frame, missing.size()):
-		_add_sector(missing[i])
-	for i in range(loads_per_frame, missing.size()):
-		_pending.push_back(missing[i])
+
+func _build_checkpoint(job: Dictionary) -> bool:
+	if job["cancelled"]:
+		return false
+	if Time.get_ticks_usec() >= _slice_deadline:
+		job["cpu_usec"] += Time.get_ticks_usec() - job["slice_start"]
+		await _build_continue
+		job["slice_start"] = Time.get_ticks_usec()
+	return not job["cancelled"]
+
+
+func _cancel_build() -> void:
+	if _build_job.is_empty():
+		return
+	_build_job["cancelled"] = true
+	# All suspended construction unwinds now while this owner is alive.
+	# The job owns its detached node and drops it in _add_sector.
+	_build_continue.emit()
+
+
+func _exit_tree() -> void:
+	_region_revision += 1
+	_region_loading = false
+	_cancel_build()
+	_pending.clear()
+	_slice_frame = -1
+	_last_view = Vector3(NAN, NAN, NAN)
+	_in_sync = false
 
 
 func _sector_dist(key: int, here: Vector2) -> float:
@@ -336,36 +404,65 @@ func _wanted_sectors() -> Dictionary[int, bool]:
 
 
 func _add_sector(key: int) -> void:
-	var t0 := Time.get_ticks_usec()
-	var node := _build_sector(key % 100, key / 100)
+	var job := {"key": key, "cancelled": false, "node": null,
+		"terrain": {}, "objects": {}, "cpu_usec": 0, "slice_start": Time.get_ticks_usec()}
+	_build_job = job
+	var node := await _build_sector(key % 100, key / 100, job)
+	# Admission may change during geometry construction. Stage it using the
+	# latest trigger revision, then publish without another yield.
+	var run: Dictionary = job["objects"]
+	if not job["cancelled"] and not run.is_empty():
+		var revision := -1
+		while revision != _admission_revision and not job["cancelled"]:
+			revision = _admission_revision
+			for span: Dictionary in run["spans"]:
+				if not await _build_checkpoint(job):
+					break
+				var trigger_id: int = span["trigger"]
+				span["admitted"] = trigger_id < 0 or span["mask"] == _interior.state(trigger_id)
+	if job["cancelled"]:
+		if is_instance_valid(job["node"]):
+			job["node"].free()
+		_build_job = {}
+		return
+	job["cpu_usec"] += Time.get_ticks_usec() - job["slice_start"]
 	if _stats:
 		print("sector\t%d,%d\t%d quads\t%d tex\t%.1f ms\tcache=%d" % [
 			key % 100, key / 100,
 			0 if node == null else int(node.get_meta("quads")),
 			0 if node == null else int(node.get_meta("layers")),
-			(Time.get_ticks_usec() - t0) / 1000.0, _images.size()])
-	# A sector that builds to nothing is still recorded, as a null, so the
-	# streamer stops retrying it every frame. Storing null rather than an empty
-	# placeholder Node3D keeps the scene tree free of nodes that draw nothing.
+			job["cpu_usec"] / 1000.0, _images.size()])
+	# Commit is synchronous. No reader, signal consumer, or FloorView sees
+	# a half-built sector or admissions sampled across different revisions.
+	var terrain: Dictionary = job["terrain"]
+	if not terrain.is_empty():
+		_floor_view.set_sector(key, terrain["texture"], terrain["arrays"],
+			terrain["masked"], terrain["metadata"], terrain["masked_metadata"])
+	if not run.is_empty():
+		_object_data[key] = run
+		_floor_view.set_objects(key, run)
 	_loaded[key] = node
 	if node != null:
+		sector_built.emit(key, node)
 		add_child(node)
-		# A newly streamed sector has fresh run nodes even when the simulation
-		# state is unchanged. Re-apply the existing visibility state once so
-		# capture-only modes classify late-built sectors without rebuilding them.
-		_has_applied_swap = false
 	probe_reloaded += 1
+	_build_job = {}
 
 
 ## One sector -> one MeshInstance3D with its own Texture2DArray. Returns null if
 ## the sector holds no drawable tile.
-func _build_sector(gx: int, gy: int) -> MeshInstance3D:
+func _build_sector(gx: int, gy: int, job: Dictionary) -> MeshInstance3D:
 	sector_build_calls += 1
 	var cells := _world.entries(gx, gy)
 	if cells.is_empty():
 		return null
-	# Built unconditionally: the cutaway needs them, not just the debug overlay.
-	var regions := Sacred.Regions.new(_world.sector(gx, gy), gx, gy)
+	if not await _build_checkpoint(job):
+		return null
+	var regions: Sacred.Regions
+	if _show_regions:
+		regions = Sacred.Regions.new(_world.sector(gx, gy), gx, gy)
+		if not await _build_checkpoint(job):
+			return null
 
 	var layer_of: Dictionary[int, int] = {}   ## texture.pak id -> layer in this sector's array
 	var images: Array[Image] = []
@@ -374,18 +471,16 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 	var uv2 := PackedVector2Array()
 	var col := PackedColorArray()
 	var idx := PackedInt32Array()
-	# Second surface: the floor.pak quads that carry a MASK tile (row 703).
-	# Retail draws these in a separate pass with the second texture unit on,
-	# so they get their own surface and their own material here rather than
-	# turning the whole terrain transparent. bcus carries the mask's UV and
-	# array layer, which is what CUSTOM0 exists for -- UV2 is already spent on
-	# the art tile's layer.
+	var floor_metadata := PackedInt32Array()
+	# Masked and unmasked payloads retain their cell/stack identity. FloorView
+	# merges their chains into retail's global, encoded-space painter passes.
 	var bpos := PackedVector3Array()
 	var buv := PackedVector2Array()
 	var buv2 := PackedVector2Array()
 	var bcol := PackedColorArray()
 	var bcus := PackedFloat32Array()
 	var bidx := PackedInt32Array()
+	var masked_metadata := PackedInt32Array()
 	# Liquid surfaces: the animated liquid pass (rows 1008/1010). Retail draws
 	# liquid over the ordinary ground rather than instead of it, so the bed
 	# tile stays in the first surface and this rides just above it -- which is
@@ -421,11 +516,16 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 	var ridx2 := PackedInt32Array()
 
 	for i in Sacred.SECT * Sacred.SECT:
+		if not await _build_checkpoint(job):
+			return null
 		var cell := i * Sacred.CELL
 		var x := float(gx * SECT + i % SECT)
 		var y := float(gy * SECT + i / SECT)
 		var px := (x - y) * HW
 		var py := -(x + y) * HH
+		# Cell coordinates name the north corner. Retail's tile centre is
+		# half a cell farther south; do not move objects or the camera.
+		py -= HH
 		var pz := (x + y) * DEPTH_STEP
 		# The cell's own terrain tile, then the OVERLAY tiles world/floor.pak
 		# hangs off WldxEntry +0x0c (row 695): the handle heads a chain whose
@@ -520,6 +620,8 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 				lidx.append_array(idx_liquid)
 		var stack := _tile_stack(cells, cell)
 		for si in stack.size() / 2:
+			if not await _build_checkpoint(job):
+				return null
 			var tile_id := stack[si * 2]
 			var mask_id := stack[si * 2 + 1]
 			var qz := pz + si * OVERLAY_Z
@@ -534,7 +636,7 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 			# array. If its texture will not decode, fall back to drawing the
 			# art alone rather than dropping the quad entirely.
 			var mask_layer := -1.0
-			var mask_uv := Rect2()
+			var mask_uv := PackedVector2Array()
 			if mask_id != 0:
 				var mtex := _tiles.texture_id(mask_id)
 				if not layer_of.has(mtex):
@@ -547,10 +649,9 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 					mask_uv = Sacred.slot_uv(_tiles.orientation(mask_id))
 			var l := float(layer_of[texid])
 			var v := pos.size() if mask_layer < 0.0 else bpos.size()
-			# A tile is a DIAMOND, not a rectangle. Its four corners are lattice
-			# points shared with the neighbouring cells -- four cells meet at each
-			# one -- and that sharing is what lets the per-corner height field join
-			# up instead of tearing the terrain apart.
+			# The logical corners share height/light samples with neighbours.
+			# Retail expands the rendered tips by 0.2 pixels to cover seams
+			# (48.2 x 24.2 half-extents in both LGP and Win 2.28).
 			#
 			# Corner order in the file is W, N, E, S. Solved, not guessed: require
 			# the three cells around every shared vertex to agree, and exactly one
@@ -563,22 +664,12 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 			# vertex Y -- putting it in Z would fight the depth ordering that lets
 			# separate sector meshes coexist.
 			var quad := PackedVector3Array([
-				Vector3(px, py + HH + _h(cells, cell, 1), qz),    # N
-				Vector3(px + HW, py + _h(cells, cell, 2), qz),    # E
-				Vector3(px, py - HH + _h(cells, cell, 3), qz),    # S
-				Vector3(px - HW, py + _h(cells, cell, 0), qz)])   # W
-			# The texture is an 18-slot diamond atlas; the tile's orientation field
-			# picks the slot. Sampling the whole image (as the pre-2.4 viewer did)
-			# squeezes all 18 diamonds into every cell, which is what produced the
-			# regular dotted pattern.
-			# The texture is an 18-slot diamond atlas; the tile's orientation field
-			# picks the slot. The diamond's corners sit at the slot rect's EDGE
-			# MIDPOINTS, so the transparent rect corners are never sampled at all.
-			var r := Sacred.slot_uv(_tiles.orientation(tile_id))
-			var mid := r.position + r.size * 0.5
-			var quad_uv := PackedVector2Array([
-				Vector2(mid.x, r.position.y), Vector2(r.end.x, mid.y),
-				Vector2(mid.x, r.end.y), Vector2(r.position.x, mid.y)])
+				Vector3(px, py + HH + 0.2 + _h(cells, cell, 1), qz),    # N
+				Vector3(px + HW + 0.2, py + _h(cells, cell, 2), qz),    # E
+				Vector3(px, py - HH - 0.2 + _h(cells, cell, 3), qz),    # S
+				Vector3(px - HW - 0.2, py + _h(cells, cell, 0), qz)])   # W
+			# Four asymmetric retail UV tips, shared by the art and mask.
+			var quad_uv := Sacred.slot_uv(_tiles.orientation(tile_id))
 			# +0x14..0x17 are four per-corner light bytes (never zero; 255/235/215/195,
 			# a clean step of -20), in the same W,N,E,S order.
 			var quad_col := PackedColorArray()
@@ -594,18 +685,19 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 				col.append_array(quad_col)
 				uv2.append_array(quad_l)
 				idx.append_array(quad_idx)
+				floor_metadata.append(int(x))
+				floor_metadata.append(int(y))
+				floor_metadata.append(si)
 			else:
 				bpos.append_array(quad)
 				buv.append_array(quad_uv)
 				bcol.append_array(quad_col)
 				buv2.append_array(quad_l)
 				bidx.append_array(quad_idx)
-				# The mask is the SAME diamond in its own atlas slot, so its
-				# corners are that slot's edge midpoints, exactly like the art.
-				var mmid := mask_uv.position + mask_uv.size * 0.5
-				for muv: Vector2 in [
-						Vector2(mmid.x, mask_uv.position.y), Vector2(mask_uv.end.x, mmid.y),
-						Vector2(mmid.x, mask_uv.end.y), Vector2(mask_uv.position.x, mmid.y)]:
+				masked_metadata.append(int(x))
+				masked_metadata.append(int(y))
+				masked_metadata.append(si)
+				for muv: Vector2 in mask_uv:
 					bcus.append_array([muv.x, muv.y, mask_layer, 0.0])
 
 	if images.is_empty():
@@ -619,24 +711,20 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 	arr[Mesh.ARRAY_COLOR] = col
 	arr[Mesh.ARRAY_INDEX] = idx
 	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 
+	if not await _build_checkpoint(job):
+		return null
 	var tex := Texture2DArray.new()
 	tex.create_from_images(images)
-	var mat := ShaderMaterial.new()
-	mat.shader = TERRAIN_SHADER
-	mat.set_shader_parameter(&"tex", tex)
+	if not await _build_checkpoint(job):
+		return null
 
 	var mi := MeshInstance3D.new()
+	job["node"] = mi
 	mi.name = "Sector%d_%d" % [gx, gy]
 	mi.mesh = mesh
-	# Per-surface, NOT material_override: the masked surface needs a different
-	# material and an override would apply this one to both. Nothing else reads
-	# the terrain mesh's material -- the swap code at _apply_swap walks the
-	# object band meshes, which are children with their own overrides.
-	mi.set_surface_override_material(0, mat)
+	var barr: Array = []
 	if not bidx.is_empty():
-		var barr := []
 		barr.resize(Mesh.ARRAY_MAX)
 		barr[Mesh.ARRAY_VERTEX] = bpos
 		barr[Mesh.ARRAY_TEX_UV] = buv
@@ -644,25 +732,20 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 		barr[Mesh.ARRAY_COLOR] = bcol
 		barr[Mesh.ARRAY_CUSTOM0] = bcus
 		barr[Mesh.ARRAY_INDEX] = bidx
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, barr, [], {},
-			Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM0_SHIFT)
-		var bmat := ShaderMaterial.new()
-		bmat.shader = TERRAIN_MASK_SHADER
-		bmat.set_shader_parameter(&"tex", tex)
-		# These are blended, so they join the same transparent queue the object
-		# sprites sort in (they carry sorting_offset; see _build_objects). The
-		# floor must precede every sprite, exactly as retail's floor pass does,
-		# and render_priority is sorted before depth -- without this the
-		# overlays paint OVER the props standing on them and wash them out.
-		bmat.render_priority = -1
-		mi.set_surface_override_material(1, bmat)
+	job["terrain"] = {"texture": tex, "arrays": arr, "masked": barr,
+		"metadata": floor_metadata, "masked_metadata": masked_metadata}
 	if not ridx.is_empty() or not ridx2.is_empty():
 		var rquads := 0
 		var rlids := PackedInt32Array()
 		for set in ([[lid9, rpos, ruv, rcol, ridx], [lid10, rpos2, ruv2, rcol2, ridx2]]):
+			if not await _build_checkpoint(job):
+				return null
 			if (set[4] as PackedInt32Array).is_empty():
 				continue
-			var rmat: ShaderMaterial = _liquid.material_for_reflection(set[0])
+			var rmat: ShaderMaterial = await _liquid.material_for_reflection(
+				set[0], _build_checkpoint.bind(job))
+			if not await _build_checkpoint(job):
+				return null
 			# Same decode-failure guard as the bed: a reflection with no
 			# material must not paint untextured white over the sea.
 			if rmat == null:
@@ -687,9 +770,14 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 		var lquads := 0
 		var lids := PackedInt32Array()
 		for set in ([[lid9, lpos, luv, lcol, lidx], [lid10, lpos2, luv2, lcol2, lidx2]]):
+			if not await _build_checkpoint(job):
+				return null
 			if (set[4] as PackedInt32Array).is_empty():
 				continue
-			var lmat: ShaderMaterial = _liquid.material_for(set[0])
+			var lmat: ShaderMaterial = await _liquid.material_for(
+				set[0], _build_checkpoint.bind(job))
+			if not await _build_checkpoint(job):
+				return null
 			# Only when the frames actually decoded. A liquid surface with no
 			# material would draw untextured white over the sea, which is a
 			# worse picture than the bed tile this is here to cover.
@@ -711,41 +799,42 @@ func _build_sector(gx: int, gy: int) -> MeshInstance3D:
 	mi.set_meta("quads", (idx.size() + bidx.size()) / 6)
 	mi.set_meta("layers", images.size())
 	if _objects:
-		var m := _build_objects(cells, regions, gx, gy, _footprints)
+		var m := await _build_objects(cells, gx, gy, job)
 		if m != null:
 			mi.add_child(m)
+		if job["cancelled"]:
+			return null
 	if _show_regions and not regions.list.is_empty():
-		var r := _build_regions(regions)
+		var r := await _build_regions(regions, job)
 		if r != null:
 			mi.add_child(r)
 	if _show_flags1e:
-		var f := _build_flags1e(cells, gx, gy)
+		var f := await _build_flags1e(cells, gx, gy, job)
 		if f != null:
 			mi.add_child(f)
 	if _show_classhi:
-		var ch := _build_classhi(cells, gx, gy)
+		var ch := await _build_classhi(cells, gx, gy, job)
 		if ch != null:
 			mi.add_child(ch)
 	if not _spawns.is_empty():
-		var sp := _build_spawns(gx, gy)
+		var sp := await _build_spawns(gx, gy, job)
 		if sp != null:
 			mi.add_child(sp)
+	if not await _build_checkpoint(job):
+		return null
 	return mi
 
 
 ## Draws every placed static object as its real sprite.
 ##
-## Each object's art is a set of TILES (mixed.pak), so this emits one quad per
-## tile, batched by texture -- median 10 distinct object textures per sector, so
-## ~10 extra draw calls. Sprites are unrotated screen-space billboards: this is
-## a 2D game drawn in a 3D engine, and the only 3D thing about an object is the
-## Z it sorts on.
+## Regular art is tiled MIX geometry; static flags 0x20 instead select a direct
+## texture atlas miniature (including animated, origin-rotated quads). Both
+## paths share texture-array layers and the global encoded-space painter.
 ##
 ## --markers falls back to flat coloured squares, which is still the cheapest
 ## way to see placement when a sprite fails to load.
-func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy: int,
-		footprints: Sacred.Footprints = null) -> Node3D:
-	if _statics == null or _mixed == null:
+func _build_objects(cells: PackedByteArray, gx: int, gy: int, job: Dictionary) -> Node3D:
+	if _statics == null or _mixed == null or _interior == null:
 		return null
 	var layer_of: Dictionary[int, int] = {}   ## texture.pak id -> layer in this sector's array
 	var images: Array[Image] = []
@@ -753,22 +842,8 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy
 	var mark_col := PackedColorArray()
 	var mark_idx := PackedInt32Array()
 
-	# Painter order matters and the depth buffer cannot supply it: these are
-	# blended sprites, so object.gdshader does not write depth (a sprite's
-	# transparent halo would otherwise punch a hole in everything behind it).
-	# Order therefore comes entirely from SUBMISSION order, and within a single
-	# surface that is index order.
-	#
-	# Which is why everything here goes into ONE mesh with ONE Texture2DArray.
-	# The old code batched by texture into ~10 sibling MeshInstance3Ds, and
-	# Godot sorts transparent instances by AABB centroid distance -- one key per
-	# mesh, for a mesh spanning the whole sector. So the carefully computed
-	# per-vertex Z was never consulted between batches, and a building whose
-	# roof and floor came from different texture pages drew in whichever order
-	# the two centroids happened to fall. That is the "dark voids" artifact:
-	# not voids at all, but a building's own floor and terrace painted over the
-	# roof they belong behind. Every mixed.pak texture is 256x256 (verified:
-	# 209956/209956 tile references), so they array with no padding.
+	# Geometry stays in authored order. FloorView merges object spans across
+	# sectors by native pass, owning-cell diagonal, and static-chain order.
 	var trace_env := OS.get_environment("OBJ_TRACE").split(",")
 	if trace_env.size() == 2:
 		_obj_trace = Vector2i(int(trace_env[0]), int(trace_env[1]))
@@ -777,34 +852,34 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy
 		for s in only_env.split(","):
 			_only_sids[int(s)] = true
 	var objs: Array[Dictionary] = []
+	var shadows: Array[Dictionary] = []
 	# A cell names the HEAD of a chain of statics, not a single one -- walk it,
 	# or every stacked placement stays invisible (2026-08-13: 158 of them in
 	# sector 50,39 alone, including seven KLOSTER_KAPELLE01 level-2 wall pieces,
 	# the candle cabinet, ten candles and the library shelves).
 	for i in Sacred.SECT * Sacred.SECT:
-		for o: Dictionary in _statics.chain(cells.decode_u32(i * Sacred.CELL + 4)):
+		if not await _build_checkpoint(job):
+			return null
+		var head := cells.decode_u32(i * Sacred.CELL + 4)
+		if head == 0:
+			continue
+		var cell_x := gx * SECT + i % SECT
+		var cell_y := gy * SECT + i / SECT
+		var parent: Dictionary = {}
+		if (cells[i * Sacred.CELL + 30] & 1) != 0:
+			parent = _interior.parent_for_cell(Vector2i(cell_x, cell_y))
+		for o: Dictionary in _statics.chain(head):
+			if not await _build_checkpoint(job):
+				return null
+			if _items == null or not _items.has_definition(o["type"]):
+				continue
+			# Main-art exclusions, LGP 0x080E0E96 / Win 0x0062AE90.
+			if (o["flags"] & 0x290) != 0:
+				continue
 			if _only_flag >= 0 and o["flags"] != _only_flag:
 				continue
 			if not _only_sids.is_empty() and not _only_sids.has(o["type"]):
 				continue
-			# The cutaway, OPT-IN via --cutaway because it is not verified.
-			#
-			# Retail never shows a building's inside and its roof at once (captured
-			# 2026-08-07 by driving the game through a door), and the obvious rule
-			# from the region decode is that an object standing on a FLOOR cell is
-			# interior furnishing while one on a WALL cell is structure. Measured
-			# world-wide across the 361 sectors that have regions: of 45188 art
-			# objects, 13137 fall inside a footprint but only 1509 stand on a floor
-			# cell and 4307 on a wall cell. 1509 is far too few to be "all interior
-			# furnishing", and enabling it changes nothing on the sector 64,39 test
-			# building, whose roofs are the actual open artifact. So this stays off
-			# by default rather than silently hiding 1509 objects on a rule that has
-			# never been shown correct.
-			# LEVEL TEST. Building art is named <BUILDING>_<level>_<part>; if the
-			# engine shows one level at a time, hiding a level should reproduce the
-			# retail cutaway. Prediction logged before measuring (results row 321):
-			# hiding level 2 does it, and _0U1_ pieces survive because they are
-			# marked as belonging to two levels.
 			if _hide_levels != 0 and _items != null \
 					and (_items.levels(o["type"]) & _hide_levels) != 0:
 				continue
@@ -814,108 +889,73 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy
 			# so no single index works everywhere.
 			if _exterior and _items != null and _items.is_top_level(o["type"]):
 				continue
-			# SORT AN UPRIGHT AT ITS FOOT, A STRUCTURE AT ITS CORNER.
-			#
-			# static.pak stores a sprite's TOP-LEFT, so ordering placements by
-			# the stored y sorts a 389px chapel pillar as though it stood a
-			# whole sprite-height further back than it does, and everything
-			# nearer than its ROOFLINE paints over its stonework -- the "ivy
-			# in front of the pillar" the two-engine compare charged 7
-			# percentage points of the frame to (row 1016). Adding the height
-			# to reach the sprite's foot fixes that: 20.7% -> 18.1%.
-			#
-			# But it cannot be added unconditionally, and the exception is
-			# measured rather than assumed. A WIDE sprite is not one object
-			# standing at one spot -- it is a structure spanning many ground
-			# cells, and the chapel's 460x889 interior shell reaches further
-			# south than the furniture standing INSIDE it, so its foot sorts
-			# it in front of its own contents and it painted out the wine
-			# rack. A single painter key cannot order a sprite that contains
-			# other sprites; retail draws those in authored order, and the
-			# stored corner IS that order.
-			#
-			# So: only sprites narrow enough to stand in one place get their
-			# height. STRUCTURE_W is swept, not chosen -- see its comment.
-			#
-			# OPEN: this is an empirical split, not a transcribed rule. The
-			# authored draw order retail uses for building parts has not been
-			# recovered; when it is, it replaces the width test outright.
-			var bp: Vector2 = o["pos"]
-			var oh := 0
-			if _mixed != null and _items != null:
-				var osz := _mixed.size_of(_items.sprite_of(o["type"]))
-				if osz.x <= STRUCTURE_W:
-					oh = osz.y
-			o["base_pos"] = Vector2(bp.x, bp.y - float(oh))
+			# Retail visits diagonals (x+y ascending, x ascending), appending
+			# each cell's static chain unchanged to its selected draw list.
+			# Sprite bounds are not a depth key: a candle on a cabinet shares
+			# the cabinet's owning cell but has a different screen-space foot.
+			# LGP sub_80E0E96 routes definitions with bit 4 to lists 0/2,
+			# bit 0x800000 to list 4, and ordinary sprites to list 3.
+			var flags: int = _items.draw_flags(o["type"]) if _items != null else 0
+			var gated: bool = (flags & 0x800004) != 0 or (o["flags"] & 8) != 0
+			o["trigger"] = parent["trigger"] if gated and not parent.is_empty() else -1
+			var draw_pass := 3
+			if (flags & 4) != 0:
+				draw_pass = 0 if o["mask"] == 1 or (o["flags"] & 0x20) != 0 else 2
+			elif (flags & 0x800000) != 0:
+				draw_pass = 4
+			o["draw_pass"] = draw_pass
+			o["cell_order"] = (cell_x + cell_y) * 6400 + cell_x
+			o["chain_order"] = objs.size()
+			o["base_pos"] = IsoCamera.cell_to_world(Vector2(cell_x, cell_y))
+			o["shadow"] = {}
+			if not _markers and (o["flags"] & 0x800) == 0:
+				var definition := _items.static_shadow_of(o["type"])
+				if not definition.is_empty():
+					if o["mask"] == 1:
+						var shadow := _static_shadow_geometry(o["pos"], definition)
+						shadow["order"] = Vector3i(1, o["cell_order"], o["chain_order"])
+						shadows.append(shadow)
+					elif o["mask"] > 1 and (flags & 0x800004) == 0 \
+							and (o["flags"] & 0x28) == 8:
+						o["shadow"] = _static_shadow_geometry(o["pos"], definition)
 			objs.append(o)
 	objs.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		var pa: Vector2 = a["base_pos"]
-		var pb: Vector2 = b["base_pos"]
-		# pos.y is Godot-up, so DESCENDING y is north-to-south = back-to-front.
-		return pa.y > pb.y if not is_equal_approx(pa.y, pb.y) else pa.x < pb.x)
+		if a["draw_pass"] != b["draw_pass"]:
+			return a["draw_pass"] < b["draw_pass"]
+		if a["cell_order"] != b["cell_order"]:
+			return a["cell_order"] < b["cell_order"]
+		return a["chain_order"] < b["chain_order"])
 
 	var n: int = objs.size()
-	var band_repr: Array[float] = []
-	var band_has_repr: Array[bool] = []
-	for _b in _band_count:
-		band_repr.append(0.0)
-		band_has_repr.append(false)
+	# Keep these buffers uniquely owned until finished. Fetch/append/store
+	# through run per tile would copy every accumulated packed array.
+	var bp := PackedVector3Array()
+	var bu := PackedVector2Array()
+	var bu2 := PackedVector2Array()
+	var ba := PackedColorArray()
+	var bidx := PackedInt32Array()
+	var run: Dictionary = {
+		"spans": [], "trigger_ids": {}, "shadows": shadows, "materials": {},
+	}
+	var source_objects := 0
 	for i in n:
-		var band := _band_of(i, n, _band_count)
-		if not band_has_repr[band]:
-			# Same baseline the sort and the per-vertex pz use -- a band whose
-			# representative depth came from a different point than its
-			# members' would order the bands against each other on one rule
-			# and their contents on another.
-			band_repr[band] = ground_depth(objs[i]["base_pos"])
-			band_has_repr[band] = true
-	for b in range(1, _band_count):
-		if band_repr[b] <= band_repr[b - 1]:
-			band_repr[b] = band_repr[b - 1] + BAND_TIE_EPS
-
-	var runs: Array[Dictionary] = []
-	var run: Dictionary = {}
-	var source_objects: int = 0
-	# ONE run per band, holding every object in that band's CONTIGUOUS sorted
-	# range -- the painter-correct structure the Phase-2 research mandates
-	# ("banding must split by contiguous index ranges of the already-sorted
-	# objs array"). The swap is NOT a mesh split: each vertex carries a bucket
-	# id (UV2.y) and object.gdshader discards hidden buckets. This restores the
-	# pre-split painter order (one mesh per band, submission order = index
-	# order) while keeping the swap instant -- no per-run sorting_offset
-	# ambiguity between adjacent tents (2026-08-13: the region-key run split
-	# gave interleaved runs near-identical sorting_offsets, so Godot's
-	# transparent sort mixed the arena camp's OZELT1/2/3 tents -- "building on
-	# building", "pieces from other locations").
-	for i in n:
+		if not await _build_checkpoint(job):
+			return null
 		var obj: Dictionary = objs[i]
 		var raw_pos: Vector2 = obj["pos"]
 		var p: Vector2 = raw_pos
-		var band := _band_of(i, n, _band_count)
-		var classification := _classify_object(obj, raw_pos, gx, gy, regions, footprints)
-		var family: String = classification["family"]
-		var visibility_class: String = classification["class"]
-		var region_key: int = classification.get("region_key", -1)
-		if run.is_empty() or band != run["band"]:
-			if not run.is_empty():
-				runs.append(run)
-			run = {
-				"source_start": i, "source_end": i, "class": visibility_class,
-				"family": family, "region_key": region_key, "band": band, "material_key": "object-array",
-				"depth_key": band_repr[band], "pos": PackedVector3Array(),
-				"uv": PackedVector2Array(), "uv2": PackedVector2Array(),
-				"idx": PackedInt32Array(), "source_ordinals": PackedInt32Array(),
-			}
-		else:
-			run["source_end"] = i
-		run["source_ordinals"].append(i)
+		var visibility_class := "GATED" if obj["trigger"] >= 0 else "SHARED"
+		var trigger_id: int = obj["trigger"]
 		source_objects += 1
+		var index_start := bidx.size()
 		# static.pak +0x04 is an items.pak RECORD index; the mixed.pak sprite id
 		# is that record's +0x10 field (Sacred.Items.sprite_of). Passing the
 		# type straight to Mixed.sprite() only worked for the records whose two
 		# numbers coincide, and drew nothing for the shared furniture library.
-		var spr := _mixed.sprite(_items.sprite_of(obj["type"])) \
-			if not _markers and _items != null else {}
+		var spr: Dictionary = {}
+		if not _markers and _items != null:
+			spr = _miniature_sprite(obj) if (obj["flags"] & 0x20) != 0 \
+				else _mixed.sprite(_items.sprite_of(obj["type"]))
 		if spr.is_empty():
 			if _markers:
 				var c := Color.from_hsv(fmod(obj["type"] * 0.137, 1.0), 0.9, 1.0)
@@ -926,9 +966,8 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy
 				mark_col.append_array([c, c, c, c])
 				mark_idx.append_array([mv, mv + 1, mv + 2, mv, mv + 2, mv + 3])
 			continue
-			continue
-		var quads_before: int = run["pos"].size()
-		var size: Vector2i = spr["size"]
+		var quads_before := bp.size()
+		var size := Vector2(spr["size"])
 		# THE PLACEMENT IS THE TILE ORIGIN. The tiles' dst rects are already
 		# in the sprite's own pixel frame, so they go down at p and nowhere
 		# else; retail adds nothing to them.
@@ -951,388 +990,163 @@ func _build_objects(cells: PackedByteArray, regions: Sacred.Regions, gx: int, gy
 		# What dx/dy IS for is unrecovered; it is not needed to place a sprite.
 		var origin := p
 		var pz := ((-p.y + size.y) / HH) * DEPTH_STEP + 2.0
-		# The swap bucket id: (region_key, class). region_key >= 0 identifies
-		# the building; the class bit (0 = exterior/roof, 1 = interior) picks
-		# which set of that building the swap hides. SHARED buckets (no region,
-		# id -1) are never hidden. The shader compares this against the hidden
-		# list set by apply_swap.
-		var bucket := -1
-		if region_key >= 0:
-			bucket = _dense_bucket_id(region_key) * 2 + (1 if visibility_class == "INTERIOR" else 0)
+		var animation: Color = spr.get("animation", Color(0, 0, 0, 0))
+		# Visibility is an exact trigger/mask index admission, not a binary
+		# shader bucket. UV2.y is unused; UV2.x remains the atlas layer.
 		for tile: Dictionary in spr["tiles"]:
+			if not await _build_checkpoint(job):
+				return null
 			var tid: int = tile["tex"]
 			if not layer_of.has(tid):
-				# BEFORE the call, not after: _image() INSERTS into _images and
-				# then returns, so `not _images.has(tid)` asked afterwards is
-				# always false and the counter could never leave 0. It read as
-				# a perfect cache in every swap-apply line, which is exactly
-				# what a dead instrument looks like from the outside.
-				var was_cached := _images.has(tid)
 				var img := _image(tid)
 				if img == null:
 					continue
-				if not was_cached:
-					object_texture_decodes += 1
 				layer_of[tid] = images.size()
 				images.append(img)
 			var l := float(layer_of[tid])
-			var d: Rect2i = tile["dst"]
+			var d := Rect2(tile["dst"])
 			var s: Rect2 = tile["src"]
 			var x0 := origin.x + d.position.x
 			var y0 := origin.y - d.position.y
 			var x1 := x0 + d.size.x
 			var y1 := y0 - d.size.y
-			var bp: PackedVector3Array = run["pos"]
 			var v: int = bp.size()
-			bp.append_array([Vector3(x0, y0, pz), Vector3(x1, y0, pz), Vector3(x1, y1, pz), Vector3(x0, y1, pz)])
-			run["pos"] = bp
-			var bu: PackedVector2Array = run["uv"]
+			if tile.has("corners"):
+				# Miniature rotation is about the placement origin, not its centre.
+				for corner: Vector2 in tile["corners"]:
+					bp.append(Vector3(origin.x + corner.x, origin.y - corner.y, pz))
+			else:
+				bp.append_array([Vector3(x0, y0, pz), Vector3(x1, y0, pz), Vector3(x1, y1, pz), Vector3(x0, y1, pz)])
 			bu.append_array([s.position, Vector2(s.end.x, s.position.y), s.end, Vector2(s.position.x, s.end.y)])
-			run["uv"] = bu
-			var bu2: PackedVector2Array = run["uv2"]
-			bu2.append_array([Vector2(l, float(bucket)), Vector2(l, float(bucket)),
-				Vector2(l, float(bucket)), Vector2(l, float(bucket))])
-			run["uv2"] = bu2
-			var bidx: PackedInt32Array = run["idx"]
+			bu2.append_array([Vector2(l, -1), Vector2(l, -1),
+				Vector2(l, -1), Vector2(l, -1)])
+			ba.append_array([animation, animation, animation, animation])
 			bidx.append_array([v, v + 1, v + 2, v, v + 2, v + 3])
-			run["idx"] = bidx
+		var index_end := bidx.size()
+		if index_end > index_start:
+			run["spans"].append({"start": index_start, "end": index_end,
+				"trigger": trigger_id, "mask": obj["mask"], "static": obj["id"],
+				"order": Vector3i(obj["draw_pass"], obj["cell_order"], obj["chain_order"]),
+				"shadow": obj["shadow"]})
+			if trigger_id >= 0:
+				run["trigger_ids"][trigger_id] = true
 		if _obj_trace == Vector2i(gx, gy):
-			print("objtrace\ti=%d\tsid=%d\tname=%s\tcell=%s\tclass=%s\trk=%d\tbucket=%d\ttiles=%d\tquads=%d\tpos=%.1f,%.1f\tsize=%s" % [
+			print("objtrace\ti=%d\tsid=%d\tname=%s\tcell=%s\tclass=%s\ttrigger=%d\tmask=%d\ttiles=%d\tquads=%d\tpos=%.1f,%.1f\tsize=%s" % [
 				i, obj["type"], _items.name_of(obj["type"]) if _items != null else "",
-				Sacred.Footprints._object_cell(raw_pos), visibility_class, region_key,
-				bucket, spr["tiles"].size(),
-				(run["pos"].size() - quads_before) / 4, raw_pos.x, raw_pos.y, size])
-	if not run.is_empty():
-		runs.append(run)
+				Sacred.Footprints._object_cell(raw_pos), visibility_class, trigger_id,
+				obj["mask"], spr["tiles"].size(),
+				(bp.size() - quads_before) / 4, raw_pos.x, raw_pos.y, size])
 
-	var root := Node3D.new()
-	root.name = "Objects"
-	var sector_key := gy * 100 + gx
-	var sector_nodes: Array[Dictionary] = []
+	var root: Node3D
+	if not await _build_checkpoint(job):
+		return null
+	var tex: Texture2DArray
 	if not images.is_empty():
-		var tex := Texture2DArray.new()
+		tex = Texture2DArray.new()
 		tex.create_from_images(images)
-		var mat := ShaderMaterial.new()
-		mat.shader = OBJECT_SHADER
-		mat.set_shader_parameter(&"tex", tex)
-		object_material_creations += 1
-		for run_meta: Dictionary in runs:
-			var run_idx: PackedInt32Array = run_meta["idx"]
-			if run_idx.is_empty():
-				continue
-			var run_mesh := _mesh_of(run_meta["pos"], run_meta["uv"], run_idx,
-				PackedColorArray(), mat, run_meta["uv2"])
-			object_mesh_creations += 1
-			run_mesh.sorting_use_aabb_center = false
-			run_mesh.sorting_offset = run_meta["depth_key"]
-			run_mesh.name = "Run_%d_%d_%s" % [run_meta["source_start"], run_meta["source_end"], run_meta["class"]]
-			run_mesh.set_meta("source_start", run_meta["source_start"])
-			run_mesh.set_meta("source_end", run_meta["source_end"])
-			root.add_child(run_mesh)
-			run_meta["node"] = run_mesh
-			sector_nodes.append(run_meta)
-		_run_nodes[sector_key] = sector_nodes
-		_run_probe[sector_key] = sector_nodes.duplicate(true)
-	else:
-		_run_nodes.erase(sector_key)
-		_run_probe.erase(sector_key)
+		if not await _build_checkpoint(job):
+			return null
+	run["texture"] = tex
+	run["pos"] = bp
+	run["uv"] = bu
+	run["uv2"] = bu2
+	run["animation"] = ba
+	run["idx"] = bidx
+	job["objects"] = run
 	if not mark_idx.is_empty():
+		root = Node3D.new()
+		root.name = "Objects"
 		var mm := StandardMaterial3D.new()
 		mm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		mm.vertex_color_use_as_albedo = true
 		root.add_child(_mesh_of(marks, PackedVector2Array(), mark_idx, mark_col, mm))
 	if _stats:
-		print("object-runs\\tsector=%d,%d\\tsource=%d\\truns=%d\\tclass=%s\\tshared_material=%s" % [gx, gy, source_objects, sector_nodes.size(), _run_class_counts(sector_nodes), sector_nodes.size() > 0])
-	if root.get_child_count() == 0:
-		root.free()
-		return null
+		print("object-canvas\tsector=%d,%d\tsource=%d\tspans=%d\tshadows=%d" % [gx, gy, source_objects, run["spans"].size(), shadows.size()])
 	return root
 
 
-## Debug overlay: one flat diamond per classified region cell, colour-coded.
-## This exists to VERIFY the decode against the retail captures -- the class
-## grid reads as a walkable-area map with doors and thresholds, which is what
-## it turned out to be (results log 308), not the interior floor plan it was
-## first taken for.
-func _classify_object(obj: Dictionary, p: Vector2, gx: int, gy: int, regions: Sacred.Regions,
-		footprints: Sacred.Footprints = null) -> Dictionary:
-	var family := _items.family_of(obj["type"]) if _items != null else ""
-	var region_key := -1
-	# Bind the object to its region (building) BEFORE the level branches so
-	# levelled pieces (roof/interior) toggle only their own building, never a
-	# same-family building elsewhere in the world (2026-08-13: OZELT1 has 7
-	# regions; the old family-only match cropped all 7 when one tent was
-	# entered). _footprint_membership handles both containment and the
-	# near-footprint overhang case (tent corners 1-2 cells outside the rect).
-	if footprints != null:
-		var fp_res := _footprint_membership(p, gx, gy, footprints, family)
-		if family == "":
-			family = fp_res["family"]
-		if region_key < 0:
-			region_key = fp_res["region_key"]
-	var levels: int = _items.levels(obj["type"]) if _items != null else 0
-	var top_level: bool = _items.is_top_level(obj["type"]) if _items != null else false
-	if top_level:
-		return {"class": "INTERIOR", "family": family, "region_key": region_key}
-	if levels != 0 and (levels & (levels - 1)) != 0:
-		return {"class": "SHARED", "family": family, "region_key": region_key}
-	# A levelled piece that is neither the top level nor a shared (0U1) wall is
-	# ROOF/STRUCTURE: it must vanish when the player enters the building.
-	# Before this, such pieces fell through to the cell-based rule below, so a
-	# roof piece sitting on a FLOOR cell was classed INTERIOR (visible inside:
-	# "roof doesn't crop cleanly") and a wall over a FLOOR cell was invisible
-	# from outside ("walls wrong"). The level token is authoritative; the cell
-	# is not (2026-08-13).
-	if levels != 0:
-		return {"class": "EXTERIOR", "family": family, "region_key": region_key}
-	# Unlevelled piece (prop, ground): classify by the region cell class.
-	# A prop whose cell is inside ANY region footprint -- even on an EMPTY
-	# (class 0) cell -- is building interior content (beds, barrels, weapon
-	# racks, forge) and must hide when the building shows its exterior.
-	# Measured 2026-08-13: 58 interior props sit on EMPTY cells in the arena
-	# camp and contaminated the exterior view because the old rule only caught
-	# FLOOR-cell props (15). _footprint_membership already resolved which
-	# region the cell belongs to; bind the prop to it.
-	if region_key >= 0:
-		return {"class": "INTERIOR", "family": family, "region_key": region_key}
-	var object_cell := Sacred.Footprints._object_cell(p)
-	for region_index_candidate: int in regions.list.size():
-		var region: Dictionary = regions.list[region_index_candidate]
-		var anchor: Vector2i = region["cell"]
-		var local := object_cell - anchor
-		if local.x < 0 or local.y < 0 or local.x >= int(region["size"].x) or local.y >= int(region["size"].y):
-			continue
-		var cls := Sacred.Regions.cell_class(region, local.x, local.y)
-		if cls == Sacred.Regions.FLOOR or (_items != null and _items.is_interior(obj["type"])):
-			return {"class": "INTERIOR", "family": family,
-				"region_key": gx * 1000000 + gy * 1000 + region_index_candidate}
-		if cls == Sacred.Regions.WALL or cls == Sacred.Regions.DOOR or cls == Sacred.Regions.STEP:
-			return {"class": "EXTERIOR", "family": family,
-				"region_key": gx * 1000000 + gy * 1000 + region_index_candidate}
-	return {"class": "SHARED", "family": family, "region_key": region_key}
+## Native item +91/+93/+95/+99/+100: one skewed or rectangular atlas quad.
+## Coordinates are retail screen units; camera projection supplies zoom/panning.
+func _static_shadow_geometry(position: Vector2, definition: Dictionary) -> Dictionary:
+	var offset: Vector2 = definition["offset"]
+	var radius: float = definition["radius"]
+	var left := offset.x if definition["skew"] else offset.x - radius
+	var right := offset.x + 2.0 * radius if definition["skew"] else offset.x + radius
+	var points := PackedVector3Array([
+		Vector3(position.x + left, position.y - offset.y + radius, 0),
+		Vector3(position.x + right, position.y - offset.y + radius, 0),
+		Vector3(position.x + offset.x - radius, position.y - offset.y, 0),
+		Vector3(position.x + offset.x + radius, position.y - offset.y, 0)])
+	var tile: int = definition["tile"]
+	var uv := Vector2(tile % 16, tile / 16) * 0.0625
+	return {"points": points, "uv": PackedVector2Array([
+		uv, uv + Vector2(0.0625, 0), uv + Vector2(0, 0.0625), uv + Vector2(0.0625, 0.0625)])}
 
 
-## The footprint containing the object's cell, as {family, region_key}, or
-## {family: "", region_key: -1} if none. region_key is the packed Interior key
-## (gx*1e6 + gy*1e3 + index) of the footprint's OWNING sector -- the same
-## packing Interior.derive uses, so the view's run binding and the sim's state
-## dictionary agree on the key.
-##
-## Pass 1: exact rect containment in the owning sector (the common case).
-##
-## Pass 2 (nearest same-family region): for a piece whose CELL falls outside
-## every rect -- a tent corner overhanging its footprint, or a piece sitting in
-## the 1-cell GAP between two adjacent tents' rects (measured at the arena
-## camp: OZELT1/2/3 tents at sector 53,28 with overlapping footprints) -- bind
-## to the nearest region of the SAME family. The game places a tent's pieces
-## around its footprint; overhang and inter-tent gaps are normal, and the swap
-## must crop THAT tent, not a same-named tent elsewhere in the world (OZELT1
-## has 7 world regions) and not its neighbour of a different family.
-func _footprint_membership(p: Vector2, gx: int, gy: int, footprints: Sacred.Footprints,
-		piece_family: String = "") -> Dictionary:
-	if footprints == null or _world == null or not _world.has_sector(gx, gy):
-		return {"family": "", "region_key": -1}
-	var cell := Sacred.Footprints._object_cell(p)
-	# Pass 1: exact rect containment in the owning sector. For a LEVELLED piece
-	# with a known family, containment alone is not binding: the arena camp's
-	# three tents (OZELT1/2/3) have overlapping 16x19 footprint rects, and an
-	# OZELT1 piece can physically sit inside the OZELT2 region's rect (measured
-	# at sector 53,28: OZELT1_0_03 at cell (3408,1830) is inside region 1 =
-	# OZELT2). A levelled piece belongs to its FAMILY's region, so pass 1 is
-	# used only when the piece's family matches the containing region's.
-	var resolved := _resolved_footprints(gx, gy)
-	var keys: Array = resolved.keys()
-	keys.sort()
-	for key: int in keys:
-		var fp: Dictionary = resolved[key]
-		if Rect2i(fp["anchor"], fp["size"]).has_point(cell):
-			var fam: String = str(fp.get("family", ""))
-			if piece_family == "" or fam == piece_family:
-				return {"family": fam,
-					"region_key": gx * 1000000 + gy * 1000 + key}
-	# Pass 2: nearest region of the SAME family as the piece, in the 3x3 block
-	# around the cell's sector. It requires a known family, because "same
-	# family" is the only thing bounding it: the search has no distance limit,
-	# so an UNLEVELLED piece -- a tree, a bush, a flower, which has no family --
-	# used to fall through the family filter and bind to whatever region was
-	# nearest anywhere in that 3x3 block. Measured 2026-08-13 at the chapel:
-	# "CW_Tree 34(B)" at cell (3191,2505), 22 cells west of the 3213..3246 x
-	# 2502..2531 rect, was classified INTERIOR on region 50,39,0, so a stand of
-	# trees outside the building appeared in front of its walls the moment the
-	# roof came off. A prop that is inside a rect still binds -- that is pass 1,
-	# and it is what makes a building's barrels and beds interior content.
-	if piece_family == "":
-		return {"family": "", "region_key": -1}
-	var sx := int(floor(float(cell.x) / float(Sacred.SECT)))
-	var sy := int(floor(float(cell.y) / float(Sacred.SECT)))
-	var best_family := ""
-	var best_key := -1
-	var best_dist := 1 << 30
-	for dy in range(-1, 2):
-		for dx in range(-1, 2):
-			var nsx := sx + dx
-			var nsy := sy + dy
-			if nsx < 0 or nsy < 0 or nsx >= 100 or nsy >= 100:
-				continue
-			if not _world.has_sector(nsx, nsy):
-				continue
-			var near := _resolved_footprints(nsx, nsy)
-			var nkeys: Array = near.keys()
-			nkeys.sort()
-			for nkey: int in nkeys:
-				var fp: Dictionary = near[nkey]
-				var fam: String = str(fp.get("family", ""))
-				if fam == "":
-					continue
-				if piece_family != "" and fam != piece_family:
-					continue
-				var rect := Rect2i(fp["anchor"], fp["size"])
-				var dxd := maxi(rect.position.x - cell.x, cell.x - (rect.end.x - 1))
-				dxd = maxi(dxd, 0)
-				var dyd := maxi(rect.position.y - cell.y, cell.y - (rect.end.y - 1))
-				dyd = maxi(dyd, 0)
-				var d := dxd * dxd + dyd * dyd
-				if d < best_dist:
-					best_dist = d
-					best_family = fam
-					best_key = nsx * 1000000 + nsy * 1000 + nkey
-	return {"family": best_family, "region_key": best_key}
-
-
-## Cached footprints.resolve() for one sector: inflate and parse once, reuse
-## for every object classified in that sector's build (the startup regression
-## fix -- before this, each object re-inflated the sector stream).
-func _resolved_footprints(gx: int, gy: int) -> Dictionary:
-	var key := gy * 100 + gx
-	if _footprint_cache.has(key):
-		return _footprint_cache[key]
-	var resolved := _footprints.resolve(_world.sector(gx, gy), gx, gy)
-	_footprint_cache[key] = resolved
-	return resolved
-
-
-func _run_class_counts(runs: Array[Dictionary]) -> String:
-	var counts: Dictionary[String, int] = {"EXTERIOR": 0, "INTERIOR": 0, "SHARED": 0}
-	for run_meta: Dictionary in runs:
-		var name: String = run_meta["class"]
-		counts[name] = int(counts.get(name, 0)) + 1
-	return "E%d/I%d/S%d" % [counts["EXTERIOR"], counts["INTERIOR"], counts["SHARED"]]
-
-
-## Dense, per-view renumbering of region keys for the shader bucket channel.
-##
-## The bucket id travels to the GPU in UV2.y, a FLOAT32 vertex attribute. The
-## packed region key (gx*1000000 + gy*1000 + idx) reaches ~5e7, so the bucket
-## rk*2+bit reaches ~1e8 where the float32 ULP is 8 -- EXTERIOR and INTERIOR
-## collapsed onto ONE id and every interior object was discarded (row 663,
-## measured: intact only for gx <= 8, i.e. essentially the whole world broken).
-## Renumbering densely from 0 keeps ids in the low hundreds, exactly
-## representable. Nothing else needs the packed value: it stays the key of the
-## simulation-side state dictionary and is translated here, at the boundary.
-##
-## ponytail: ids are never recycled on sector unload, so a very long session
-## walking thousands of distinct buildings would eventually climb. The ceiling
-## is 2^23 ids (float32 exact-integer range) -- ~8M buildings, unreachable.
-func _dense_bucket_id(region_key: int) -> int:
-	if not _bucket_ids.has(region_key):
-		_bucket_ids[region_key] = _bucket_ids.size()
-	return _bucket_ids[region_key]
-
-
-func apply_swap(states: Dictionary) -> void:
-	if _has_applied_swap and states == _last_swap_states:
-		return
-	_last_swap_states = states.duplicate(true)
-	_has_applied_swap = true
-	# The swap is a shader-side bucket discard: one mesh per band keeps the
-	# painter-correct contiguous submission order (Phase-2 research), and the
-	# shader drops fragments whose bucket (region_key*2 + class bit) is hidden.
-	# Bucket id: region_key*2 + (1 if INTERIOR else 0). For each region in
-	# INTERIOR state, its EXTERIOR bucket is hidden; for each region in
-	# EXTERIOR state, its INTERIOR bucket is hidden (when not force-interior).
-	# _force_interior hides every EXTERIOR bucket and shows all INTERIOR.
-	var hidden: Array[int] = []
-	if _force_interior:
-		# Hide every EXTERIOR bucket (region_key*2) of every region present in
-		# the resident sectors. Each band mesh holds mixed classes, so the
-		# bucket set comes from the region keys of all runs, not any one run's
-		# "class" field.
-		# Every region key that ever entered a mesh, not the band-first object of
-		# each run: run_meta["region_key"] is the FIRST object's key only, so
-		# collecting from it missed most keys (row 663, second bug).
-		for rk: int in _bucket_ids:
-			var b := _bucket_ids[rk] * 2
-			if not hidden.has(b):
-				hidden.append(b)
+## Native miniature path: LGP 00012:2442-2514; Win 2.28 00017:8503-8590.
+## Atlas dimensions are explicitly 256 in both binaries, not inferred from MIX.
+## COLOR carries four normalized animation bytes. Dynamic lighting is not
+## implemented for either object path:
+## retail uses sub_83ACF42 only when its night/interior lighting gate is enabled,
+## and item flag 0x20000 also registers a light and draws a separate glow then.
+func _miniature_sprite(obj: Dictionary) -> Dictionary:
+	var texture_id: int = _items.miniature_texture_of(obj["type"])
+	if texture_id <= 0:
+		return {}
+	var params: PackedByteArray = obj["miniature"]
+	var animated: bool = (obj["flags"] & 0x40) != 0
+	var size: Vector2
+	var source: Rect2
+	var animation := Color(0, 0, 0, 0)
+	var angle := 0.0
+	if animated:
+		if params[0] == 0 or params[1] == 0 or params[3] == 0:
+			push_error("Invalid miniature atlas/timing divisor for item %d" % obj["type"])
+			return {}
+		size = Vector2(256.0 / params[0], 256.0 / params[1])
+		source = Rect2(Vector2.ZERO, size / 256.0)
+		angle = float(params[2]) * TAU / 256.0
+		animation = Color(params[0] / 255.0, params[1] / 255.0,
+			params[3] / 255.0, params[4] / 255.0)
 	else:
-		for region_key: int in states:
-			var state_value: Variant = states[region_key]
-			var state: int = int(state_value["state"]) if state_value is Dictionary else int(state_value)
-			# Each region contributes exactly one hidden bucket: when INTERIOR,
-			# hide its exterior (roof); when EXTERIOR, hide its interior.
-			var hide_interior: bool = state != Interior.State.INTERIOR
-			if not _bucket_ids.has(region_key):
-				continue   # region not present in any loaded mesh
-			var bucket := _bucket_ids[region_key] * 2 + (1 if hide_interior else 0)
-			if not hidden.has(bucket):
-				hidden.append(bucket)
-	# Set the uniform on every band mesh's material. All band meshes in a
-	# sector share ONE material, so one pass covers them; the uniform is set
-	# per-material to be safe across sectors (each sector builds its own).
-	hidden.sort()
-	# THE COUNT AND THE ARRAY MUST BE CLAMPED TOGETHER. `hidden_buckets` is
-	# declared `uniform int[HIDDEN_BUCKET_SLOTS]` in object.gdshader and the
-	# fragment loop runs to `hidden_bucket_count`, so passing an unclamped count
-	# alongside a clamped array makes the shader index past the end -- garbage
-	# ints compared against real bucket ids, discarding fragments of unrelated
-	# buildings. That is a WRONG PICTURE with no error raised, which is why the
-	# overflow is reported here rather than quietly truncated.
-	#
-	# Truncation itself is not safe either: `hidden.sort()` orders by dense
-	# bucket id, so the survivors are the earliest-registered regions and the
-	# building the player just walked into is exactly the one whose roof stops
-	# being hidden. Interior.derive() registers every footprint it sees and
-	# never retires one, so a town reaches this ceiling.
-	var n := mini(hidden.size(), HIDDEN_BUCKET_SLOTS)
-	if hidden.size() > HIDDEN_BUCKET_SLOTS:
-		push_error("SectorView: %d hidden buckets exceeds the shader's %d slots; %d regions will draw their roofs"
-			% [hidden.size(), HIDDEN_BUCKET_SLOTS, hidden.size() - HIDDEN_BUCKET_SLOTS])
-	# Built once, not per material: every material gets the same contents.
-	var arr := PackedInt32Array()
-	arr.resize(HIDDEN_BUCKET_SLOTS)
-	for i in n:
-		arr[i] = hidden[i]
-	var set_count := 0
-	for sector_key: int in _run_nodes:
-		for run_meta: Dictionary in _run_nodes[sector_key]:
-			var node: MeshInstance3D = run_meta["node"]
-			var mat := node.material_override as ShaderMaterial
-			if mat == null:
-				continue
-			mat.set_shader_parameter(&"hidden_bucket_count", n)
-			mat.set_shader_parameter(&"hidden_buckets", arr)
-			set_count += 1
-			break   # one material per sector; move to the next sector
-	print("swap-apply\\tvisible=%d\\thidden_buckets=%d\\tbuilds=%d\\tmeshes=%d\\tmaterials=%d\\tdecodes=%d" % [
-		_run_nodes.size(), hidden.size(), sector_build_calls, object_mesh_creations, object_material_creations, object_texture_decodes])
+		size = Vector2(params[2], params[2])
+		source = Rect2(Vector2(params[0], params[1]) / 256.0, size / 256.0)
+	var tile := {"tex": texture_id, "src": source, "dst": Rect2(Vector2.ZERO, size)}
+	if angle != 0.0:
+		var corners := PackedVector2Array([
+			Vector2.ZERO, Vector2(size.x, 0), size, Vector2(0, size.y)])
+		# Native screen Y points down: (x*cos+y*sin, y*cos-x*sin).
+		for i in corners.size():
+			corners[i] = corners[i].rotated(-angle)
+		tile["corners"] = corners
+	return {"size": size, "tiles": [tile], "animation": animation}
 
 
-## Does this state entry toggle runs bound to (region_key, family)?
-## A run carrying a concrete region key (region_key >= 0) is toggled ONLY by
-## that exact region's state -- two buildings of the same family must not
-## crop each other (2026-08-13: OZELT1 has 7 world regions; the old family-only
-## match cropped all 7 when one tent was entered). A run with no region key
-## (region_key < 0 -- a prop or ground piece with no footprint) matches by
-## family, which is safe because such runs are SHARED and never toggled.
-func _region_state_matches(region_key: int, states: Dictionary,
-		run_region_key: int, run_family: String) -> bool:
-	var state_value: Variant = states[region_key]
-	var state: int = int(state_value["state"]) if state_value is Dictionary else int(state_value)
-	if state != Interior.State.INTERIOR:
-		return false
-	if run_region_key >= 0:
-		return run_region_key == region_key
-	return run_family != "" and str(state_value.get("family", "")) == run_family
+
+
+
+
+## Update only runs containing the changed trigger, across every resident sector.
+## Vertices/UVs/animation and original index order survive every state change.
+func _on_trigger_state_changed(trigger_id: int, _previous: int, _state: int) -> void:
+	_admission_revision += 1
+	for run: Dictionary in _object_data.values():
+		if run["trigger_ids"].has(trigger_id):
+			_apply_run_admission(run)
+	for actor: Dictionary in _scene_actors.values():
+		_apply_actor_admission(actor)
+
+
+func _apply_run_admission(run: Dictionary) -> void:
+	var changed := false
+	for span: Dictionary in run["spans"]:
+		var trigger_id: int = span["trigger"]
+		var admitted: bool = trigger_id < 0 or span["mask"] == _interior.state(trigger_id)
+		if not span.has("admitted") or span["admitted"] != admitted:
+			span["admitted"] = admitted
+			changed = true
+	if changed:
+		_floor_view.invalidate_objects()
 
 
 
@@ -1347,7 +1161,7 @@ func _region_state_matches(region_key: int, states: Dictionary,
 ## diamond because the sector's iso outline is staggered and the existing
 ## overlays already lay quads out this way -- one copied loop beats a second
 ## piece of projection maths.
-func _build_spawns(gx: int, gy: int) -> Node3D:
+func _build_spawns(gx: int, gy: int, job: Dictionary) -> Node3D:
 	const TIER_COLOUR := {
 		1: Color(0.2, 0.9, 0.2, 0.30),
 		2: Color(1.0, 0.7, 0.1, 0.34),
@@ -1361,6 +1175,8 @@ func _build_spawns(gx: int, gy: int) -> Node3D:
 	var col := PackedColorArray()
 	var idx := PackedInt32Array()
 	for i in Sacred.SECT * Sacred.SECT:
+		if not await _build_checkpoint(job):
+			return null
 		var x := float(gx * SECT + i % SECT)
 		var y := float(gy * SECT + i / SECT)
 		var px := (x - y) * HW
@@ -1386,11 +1202,13 @@ func _build_spawns(gx: int, gy: int) -> Node3D:
 ## nibble is essentially only {0,1,2} = OPEN/WALL/FLOOR, and the ground
 ## texture predicts the high nibble only 0.647 of the time -- correlated, not
 ## determined. Drawing it is the same move that settled +0x1e.
-func _build_classhi(cells: PackedByteArray, gx: int, gy: int) -> Node3D:
+func _build_classhi(cells: PackedByteArray, gx: int, gy: int, job: Dictionary) -> Node3D:
 	var pos := PackedVector3Array()
 	var col := PackedColorArray()
 	var idx := PackedInt32Array()
 	for i in Sacred.SECT * Sacred.SECT:
+		if not await _build_checkpoint(job):
+			return null
 		var h := cells.decode_u8(i * Sacred.CELL + 0x1f) >> 4
 		var c := Color.from_hsv(float(h) / 16.0, 0.9, 1.0, 0.65)
 		var x := float(gx * SECT + i % SECT)
@@ -1427,7 +1245,7 @@ func _build_classhi(cells: PackedByteArray, gx: int, gy: int) -> Node3D:
 ##   bit 2 (0x04) BLUE   -- cell's static handle is special (solved, row 708)
 ##
 ## Bits 3..7 are never set anywhere in the world, so they are not drawn.
-func _build_flags1e(cells: PackedByteArray, gx: int, gy: int) -> Node3D:
+func _build_flags1e(cells: PackedByteArray, gx: int, gy: int, job: Dictionary) -> Node3D:
 	const COLOURS := {
 		0x01: Color(1.0, 0.15, 0.15, 0.60),
 		0x02: Color(0.15, 1.0, 0.15, 0.60),
@@ -1437,6 +1255,8 @@ func _build_flags1e(cells: PackedByteArray, gx: int, gy: int) -> Node3D:
 	var col := PackedColorArray()
 	var idx := PackedInt32Array()
 	for i in Sacred.SECT * Sacred.SECT:
+		if not await _build_checkpoint(job):
+			return null
 		var v := cells.decode_u8(i * Sacred.CELL + 0x1e)
 		if v == 0:
 			continue
@@ -1468,7 +1288,7 @@ func _build_flags1e(cells: PackedByteArray, gx: int, gy: int) -> Node3D:
 	return root
 
 
-func _build_regions(regions: Sacred.Regions) -> Node3D:
+func _build_regions(regions: Sacred.Regions, job: Dictionary) -> Node3D:
 	const COLOURS := {
 		Sacred.Regions.WALL: Color(1.0, 0.2, 0.2, 0.55),
 		Sacred.Regions.FLOOR: Color(0.2, 0.6, 1.0, 0.35),
@@ -1483,6 +1303,8 @@ func _build_regions(regions: Sacred.Regions) -> Node3D:
 		var size: Vector2i = r["size"]
 		for cy in size.y:
 			for cx in size.x:
+				if not await _build_checkpoint(job):
+					return null
 				var k := Sacred.Regions.cell_class(r, cx, cy)
 				if not COLOURS.has(k):
 					continue
@@ -1510,12 +1332,6 @@ func _build_regions(regions: Sacred.Regions) -> Node3D:
 	return root
 
 
-## Which of `bands` contiguous slices index `i` of `n` (already back-to-front
-## sorted) objects falls into. Binned by INDEX, never by tile, so one object's
-## whole floor-then-walls-then-roof run always lands in exactly one band.
-## Never called when n == 0 (the loop over objs simply doesn't iterate then).
-func _band_of(i: int, n: int, bands: int) -> int:
-	return mini(int(floor(float(i) * bands / n)), bands - 1)
 
 
 ## Same absolute iso-depth scale as the marker formula at _build_objects'
@@ -1666,45 +1482,78 @@ func _evict(cache: Dictionary) -> void:
 		cache.erase(keys[i])
 
 
-## Fixed-block mode: the regression check. Loads every sector in the block,
-## fits the camera to it, and prints the same "<quads> quads, <textures>
-## textures" line the pre-streaming viewer printed.
+## Fixed-block callers await this method. It pumps the same scheduler as
+## streaming and never substitutes a synchronous construction path.
 func load_region(cx: int, cy: int, r: int) -> void:
+	if not is_inside_tree():
+		push_error("SectorView.load_region requires an owner attached to SceneTree")
+		return
+	_region_revision += 1
+	var revision := _region_revision
+	_region_loading = true
 	_streaming = false
-	var quads := 0
-	var texids: Dictionary[int, bool] = {}
+	_cancel_build()
+	_pending.clear()
+	_wanted.clear()
 	for gy in range(cy - r, cy + r + 1):
 		for gx in range(cx - r, cx + r + 1):
-			var node := _build_sector(gx, gy)
-			if node == null:
-				continue
-			add_child(node)
-			_loaded[gy * 100 + gx] = node
-			quads += int(node.get_meta("quads"))
-			for tid in _world.tile_ids(gx, gy):
-				texids[_tiles.texture_id(tid)] = true
-	var span := float(r * 2 + 1) * SECT
-	_cam.size = span * 2.0 * HH * 1.1
-	_cam.look_at_cell(Vector2(cx * SECT + SECT * 0.5, cy * SECT + SECT * 0.5))
+			var key := gy * 100 + gx
+			_wanted[key] = true
+			if not _loaded.has(key):
+				_pending.append(key)
+	for key: int in _loaded.keys():
+		if not _wanted.has(key):
+			var node: Node = _loaded[key]
+			if node != null:
+				node.queue_free()
+			_loaded.erase(key)
+			_object_data.erase(key)
+			_floor_view.remove_sector(key)
+	if _cam != null:
+		var span := float(r * 2 + 1) * SECT
+		_cam.size = span * 2.0 * HH * 1.1
+		_cam.look_at_cell(Vector2(cx * SECT + SECT * 0.5, cy * SECT + SECT * 0.5))
+	while not _pending.is_empty() or not _build_job.is_empty():
+		if revision != _region_revision or not is_inside_tree():
+			return
+		stream(0.0)
+		await get_tree().process_frame
+	if revision != _region_revision or not is_inside_tree():
+		return
+	var quads := 0
+	var texids: Dictionary[int, bool] = {}
+	for key: int in _wanted:
+		var node: MeshInstance3D = _loaded[key]
+		if node == null:
+			continue
+		quads += int(node.get_meta("quads"))
+		for tid in _world.tile_ids(key % 100, key / 100):
+			while Time.get_ticks_usec() >= _slice_deadline:
+				await get_tree().process_frame
+				if revision != _region_revision or not is_inside_tree():
+					return
+				stream(0.0)
+			texids[_tiles.texture_id(tid)] = true
+	if _cam != null:
+		_floor_view.sync()
+		while pending_scripted_objects > 0 or not _floor_view.is_settled():
+			await get_tree().process_frame
+			if revision != _region_revision or not is_inside_tree():
+				return
+			_floor_view.sync()
+	_region_loading = false
 	print("%d quads, %d textures" % [quads, texids.size()])
 
 
-## True once the streamer has nothing left to load -- either it is not
-## streaming at all (--region= mode already finished its one-shot build), or
-## the wanted set and the loaded set agree. The settle test main.gd's
-## _maybe_screenshot and _actor_probe both pump frames against.
-##
-## Set membership, not counts: after a camera jump the backlog of the OLD
-## cell's sectors drains one per frame (stream() above), and a count-only
-## test passes spuriously the moment _loaded.size() happens to equal the new
-## wanted size while every loaded sector is still the old cell's -- a --shot
-## then fires on an unstreamed void (TSV row 614). _pending must be empty
-## AND every wanted key actually loaded.
+## Both sector payloads and the displayed canvas must cover the current view.
 func is_settled() -> bool:
+	if _region_loading or pending_scripted_objects > 0 \
+			or not _pending.is_empty() or not _build_job.is_empty():
+		return false
+	if _cam != null and not _floor_view.is_settled():
+		return false
 	if not _streaming:
 		return true
-	if not _pending.is_empty():
-		return false
 	var want := _wanted_sectors()
 	if want.size() != _loaded.size():
 		return false

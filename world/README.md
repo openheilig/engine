@@ -15,12 +15,20 @@ this directory for those names and fails if one appears.
 | `movement.gd` | Movement resolution against the cell grid. |
 | `path_window.gd` | The sliding path window — pathfinding over a bounded region rather than the whole world. |
 | `walkable.gd` | Which region classes are open ground. An allowlist, not a blocklist. |
-| `interior.gd` | Interior/exterior swap for supported buildings. |
+| `interior.gd` | Authored parent/child building identity and mutable raw u16 trigger state, shared with rendering. Initial focus placement and door/storey transitions select the authored support grid. |
 | `record_store.gd` | The record/replay id space and storage. |
 | `replay.gd` | Deterministic replay, and the three opt-in perturbation flags the determinism gate uses. |
 | `script.gd` | The `funkcode.bin` interpreter. Refuses a whole hook it cannot run — including when the HOST, not the opcode set, is the narrow part. |
 | `quest_log.gd` | Quest state and the player's quest book: the host `script.gd` writes into. |
 | `quest_cast.gd` | A `QuestLog` that also receives the NPCs a hook creates. Emits placements as DATA; turning one into a rig is `main.gd`'s job, because this layer may not touch the scene tree. |
+
+
+Building art compares its authored mask with the exact trigger state. Zero
+is a valid state, not an absent value. `formats/triggers.gd` loads the raw
+table; `replace_state`, `set_bits`, and `reset_bits` notify every resident
+sprite using that trigger. Family names and overlapping rectangles do not
+determine visibility. Script-created trigger slots, save restoration, and
+the native interaction-event/prerequisite pipeline are not yet wired.
 
 ## Why determinism matters here
 

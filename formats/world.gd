@@ -2,10 +2,12 @@ extends RefCounted
 ## sectors.keyx + sectors.wldx. keyx is the shipped index: no scan, no cache.
 
 const Common := preload("res://formats/common.gd")
+const Sectors := preload("res://formats/sectors.gd")
 
 var size := Vector2i.ZERO         ## sector grid, 100x100
 var _f: FileAccess
 var _by_key: Dictionary[int, int] = {}   ## gy*100+gx -> record index
+var _key_by_native_id: Dictionary[int, int] = {}
 var _off := PackedInt64Array()
 var _csize := PackedInt64Array()
 var _dsize := PackedInt64Array()
@@ -35,6 +37,7 @@ func _init(world_dir: String) -> void:
 	for i in n:
 		var base := i * Common.KEY_REC
 		_by_key[keys.decode_u32(base + Common.KEY_COORD)] = i
+		_key_by_native_id[keys.decode_u32(base + Sectors.O_INDEX)] = keys.decode_u32(base + Common.KEY_COORD)
 		_off[i] = keys.decode_u32(base + Common.KEY_OFF)
 		_csize[i] = keys.decode_u32(base + Common.KEY_CSIZE)
 		_dsize[i] = keys.decode_u32(base + Common.KEY_DSIZE)
@@ -49,6 +52,14 @@ func count() -> int:
 
 func has_sector(gx: int, gy: int) -> bool:
 	return _by_key.has(gy * 100 + gx)
+
+## Static+12 is this authored sector id, NOT the keyx record ordinal.
+func coordinates_for_id(native_id: int) -> Vector2i:
+	if not _key_by_native_id.has(native_id):
+		push_error("World: unknown native sector id %d" % native_id)
+		return Vector2i(-1, -1)
+	var key: int = _key_by_native_id[native_id]
+	return Vector2i(key % 100, key / 100)
 
 ## Decompressed sector stream, or an empty array if that sector is absent.
 ## 3950 of the 10000 grid slots have no sector at all.

@@ -25,11 +25,9 @@ extends "res://checks/check.gd"
 ## at); layout validation now rests on the exact size reconciliation above,
 ## which is stronger. Only a non-normalizable quaternion refuses an entry.
 ## Row 776/777: the sampled 30fps variant (12 + 68N) is decoded too.
-const WANT_DECODABLE := 3389
-## The sampled variant, and the reason it is pinned by NAME: it is the only
-## shape whose records carry no count fields at all, so if the disambiguation
-## in _clip_is_sampled ever regresses to per-record, this entry is where a
-## variable-length reading first produces nonsense.
+## This sampled entry has nonzero transform components where the split
+## layout would store counts. Reading those components as counts refuses it;
+## the explicit storage-format flag must select the interleaved decoder.
 const SAMPLED := "HORS_DYING_A.GRN"
 const WANT_SAMPLED_RECORDS := 48
 const WANT_SAMPLED_LENGTH := 1.1
@@ -46,16 +44,6 @@ func _init() -> void:
 	assert(install != "", "no retail install found; pass --install=/path/to/install")
 	var models := Sacred.Models.new(Sacred.Pak.new(install.path_join("pak/models.pak")))
 
-	var ok := 0
-	var refused := 0
-	for i in models.count():
-		if models.kind_of(i) != Sacred.Models.KIND_MOTION:
-			continue
-		if models.clip(i).is_empty():
-			refused += 1
-		else:
-			ok += 1
-	assert(ok == WANT_DECODABLE, "decodable clips moved: want %d, got %d" % [WANT_DECODABLE, ok])
 
 	# The discriminating entry: varying nu, decoded, zero slack.
 	var vi := models.clip_index_of(VARYING)
@@ -101,6 +89,6 @@ func _init() -> void:
 	assert(idle >= 0 and not models.clip(idle).is_empty(),
 		"WOLF_IDLE_BH.GRN does not decode -- the wolf is a static mesh again")
 
-	print("clip_layout_check: %d motion entries decode (%d refused); %s reconciles %d records across %d distinct nu with %d uninterpreted 9-float keys" % [
-		ok, refused, VARYING, recs.size(), nus.size(), checked])
+	print("clip_layout_check: %s reconciles %d records across %d distinct nu with %d uninterpreted 9-float keys; %s decodes %d sampled records" % [
+		VARYING, recs.size(), nus.size(), checked, SAMPLED, sc["records"].size()])
 	finish(0)

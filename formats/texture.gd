@@ -15,29 +15,24 @@ const Common := preload("res://formats/common.gd")
 ##     x0 = col * 104 + (row % 2) * 52,   y0 = row * 25
 ## Slot 17 ends at (255, 248), so all 18 fit with no wrap.
 const SLOT_COUNT := 18
-const SLOT_W := 100      ## measured opaque diamond width  (stride is 104)
-const SLOT_H := 49       ## measured opaque diamond height (row step is 25, so 50)
 const SLOT_DX := 104
 const SLOT_DY := 25
 const SLOT_STAGGER := 52
 const ATLAS := 256.0
-## Half-texel shrink of the sampled rect. Without it, linear filtering at the
-## diamond's tips reaches into the 4 px of padding between slots and draws a
-## faint dark grid over the whole world.
-const SLOT_INSET := 1.0
 
 
-## Normalised UV rect of atlas slot n, covering the slot's *opaque* diamond
-## bounding box (not the 104x50 lattice cell) and inset to keep the filter off
-## the padding. The diamond's four tips are this rect's edge midpoints.
-static func slot_uv(n: int) -> Rect2:
+## Retail's four UVs in mesh order N, E, S, W, not a bounding rectangle.
+## LGP 1.0.02 and Win 2.28 ENG initialize the table at cWorld +2096
+## with asymmetric tips and a selective 0.002 bias; live floor draws agree.
+static func slot_uv(n: int) -> PackedVector2Array:
 	var row := n / 2
-	var col := n % 2
-	return Rect2(
-		(col * SLOT_DX + (row % 2) * SLOT_STAGGER + SLOT_INSET) / ATLAS,
-		(row * SLOT_DY + SLOT_INSET) / ATLAS,
-		(SLOT_W - 2 * SLOT_INSET) / ATLAS,
-		(SLOT_H - 2 * SLOT_INSET) / ATLAS)
+	var x := float((n % 2) * SLOT_DX + (row % 2) * SLOT_STAGGER)
+	var y := float(row * SLOT_DY)
+	return PackedVector2Array([
+		Vector2((x + 50.0) / ATLAS + 0.002, (y + 0.5) / ATLAS + 0.002),
+		Vector2((x + 97.5) / ATLAS + 0.002, (y + 23.5) / ATLAS),
+		Vector2((x + 50.0) / ATLAS, (y + 48.0) / ATLAS + 0.002),
+		Vector2((x + 2.0) / ATLAS + 0.002, (y + 23.5) / ATLAS + 0.002)])
 
 
 
@@ -177,7 +172,7 @@ static func _stems(pak: Pak) -> Dictionary:
 	if _name_index.has(key):
 		return _name_index[key]
 	var out: Dictionary = {}
-	for i in pak.count():
+	for i in range(pak.count() - 1, -1, -1):
 		# Read the name from the entry's own bytes, NOT through blob(i, 0). The
 		# index's `size` is the ZLIB PAYLOAD length and the 32-byte name sits
 		# before it, so gating on that size drops every small entry:
@@ -194,7 +189,7 @@ static func _stems(pak: Pak) -> Dictionary:
 		var dot := nm.rfind(".")
 		if dot > 0:
 			nm = nm.substr(0, dot)
-		# first wins: a later duplicate stem must not shadow the earlier entry
+		# Native inserts headers backwards into a first-match hash: last wins.
 		if nm != "" and not out.has(nm):
 			out[nm] = i
 	_name_index[key] = out
