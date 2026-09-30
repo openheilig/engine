@@ -79,6 +79,37 @@ func restore_states(states: PackedInt32Array) -> bool:
 	return true
 
 
+## W2: door open/close, transcribed from the use-object executors
+## sub_82E2CF2 / sub_82BAE52: OPEN = setState(state | 1), CLOSE =
+## resetState(1) on the door static's OWN trigger (object+52 <- static +39).
+## Doors are item category 10; visibility follows free from the exact-mask
+## interior admission. The interactive personality (flags & 0x44): a locked
+## trigger (state 0x4000 set) refuses, and an unopened door with a nonzero
+## prerequisite (+12) refuses too -- retail plays a locked sound there; the
+## port has no prerequisite checker yet, so it just refuses (named gap).
+## Returns true when the state changed (or was already open).
+func open_door(trigger_id: int) -> bool:
+	if not has_trigger(trigger_id):
+		return false
+	var st := state(trigger_id)
+	if st & 1:
+		return true
+	if st & 0x4000:
+		return false
+	var rec := record(trigger_id)
+	if (rec["flags"] & 0x44) != 0 and st == 0 and rec["prerequisite"] != 0:
+		return false  # locked: retail plays sounds 331/332 here
+	return set_bits(trigger_id, 1)
+
+
+func close_door(trigger_id: int) -> bool:
+	if not has_trigger(trigger_id):
+		return false
+	if state(trigger_id) & 1 == 0:
+		return true
+	return reset_bits(trigger_id, 1)
+
+
 ## Ordinary building setters: LGP 0x083A51DA / 0x083A5AC8, cross-build
 ## Win 0x00415F00 / 0x00416280. Interaction triggers (flags&0x44) additionally
 ## require the event/prerequisite/delayed-unlock systems, not implemented here.
