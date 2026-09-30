@@ -42,7 +42,7 @@ static var _unique_cache: PackedInt32Array = []
 ## unique/set table instead of the generic arms (retail: first kill of a
 ## creature type per session; the caller owns the seen-types set).
 static func roll(items, balance, creature_class: int, creature_level: int,
-		rng: RandomNumberGenerator, first_of_type: bool) -> int:
+		rng: RandomNumberGenerator, first_of_type: bool, weapons = null) -> int:
 	if first_of_type:
 		var uniques := unique_table()
 		if uniques.size() == UNIQUE_COUNT:
@@ -60,13 +60,15 @@ static func roll(items, balance, creature_class: int, creature_level: int,
 		return gold_item(creature_level)
 	r = rng.randi_range(0, 999)
 	if r < drop_waffe:
-		return pick_category(items, 5, rng)
+		return pick_category(items, 5, rng, weapons, creature_level)
 	r = rng.randi_range(0, 999)
 	if r < drop_ruestung:
 		return pick_category(items,
-			ARM_CATEGORIES[rng.randi_range(0, ARM_CATEGORIES.size() - 1)], rng)
+			ARM_CATEGORIES[rng.randi_range(0, ARM_CATEGORIES.size() - 1)], rng,
+			weapons, creature_level)
 	return pick_category(items,
-		OTHER_CATEGORIES[rng.randi_range(0, OTHER_CATEGORIES.size() - 1)], rng)
+		OTHER_CATEGORIES[rng.randi_range(0, OTHER_CATEGORIES.size() - 1)], rng,
+		weapons, creature_level)
 
 
 ## The tiered gold pile for a creature level (5132 ≤4, 5133 ≤9, 5134 ≤19,
@@ -78,13 +80,28 @@ static func gold_item(creature_level: int) -> int:
 	return int(GOLD_TIERS[-1][0])
 
 
-## Uniform valid record of `category` (getRandomItem's category filter,
-## without the level window). 0 when the category is empty.
-static func pick_category(items, category: int, rng: RandomNumberGenerator) -> int:
+## Uniform valid record of `category` within getRandomItem's level window
+## (sub_835EA48): item level (weapon.pak +153) and required level (+148)
+## must both sit under the window top, and the item level over the lower
+## bound. `quality` is the caller-supplied multiplier (decomp v14).
+## Pieces with no weapon row (non-equipment categories) are unfiltered.
+static func pick_category(items, category: int, rng: RandomNumberGenerator,
+		weapons = null, level: int = 0, quality: int = 1) -> int:
 	var pool: Array[int] = []
 	for i in items.record_count():
-		if items.category_of(i) == category:
-			pool.append(i)
+		if items.category_of(i) != category:
+			continue
+		if weapons != null:
+			var row: int = weapons.row_for_type(i)
+			if row >= 0:
+				var spread: int = maxi(1, (level / 3) if level <= 8 else 3)
+				var top: int = level + (1 + rng.randi_range(0, spread - 1)) * quality
+				var lo: int = maxi(0, int(floor(level * 0.5 - 15.0)))
+				var ilev: int = weapons.item_level(row)
+				var req: int = weapons.req_level(row)
+				if not (ilev < top and req < top and ilev >= lo):
+					continue
+		pool.append(i)
 	if pool.is_empty():
 		return 0
 	return pool[rng.randi_range(0, pool.size() - 1)]

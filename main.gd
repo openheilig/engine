@@ -1755,9 +1755,11 @@ func _begin_encounter(install: String, items) -> void:
 						# the first kill of the type drawing from the unique
 						# table. Definition 7442 remains only as the
 						# --spawn-loot debug default.
+						var wpn: Sacred.Weapons = Sacred.Weapons.new(
+							_install_ref.path_join("pak/weapon.pak"))
 						var def := Sacred.LootRoll.roll(items, balance_ref,
-							_encounter.foe_class, _encounter.foe_level, rng, 
-							not _loot_seen_types.has(_encounter.foe_id))
+							_encounter.foe_class, _encounter.foe_level, rng,
+							not _loot_seen_types.has(_encounter.foe_id), wpn)
 						_loot_seen_types[_encounter.foe_id] = true
 						if def > 0:
 							session_ref.spawn_item_ground(def, kc)

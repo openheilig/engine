@@ -11,6 +11,9 @@ const EXTRA_SIZE := 64
 var found := false
 var _types := PackedInt32Array()
 var _parents := PackedInt32Array()
+var _req := PackedInt32Array()
+var _level := PackedInt32Array()
+var _row_of_type: Dictionary = {}
 
 func _init(path: String) -> void:
 	var file := FileAccess.open(path, FileAccess.READ)
@@ -27,12 +30,38 @@ func _init(path: String) -> void:
 		return
 	_types.resize(count)
 	_parents.resize(count)
+	_req.resize(count)
+	_level.resize(count)
 	for row in count:
 		file.seek(HEADER_SIZE + row * RECORD_SIZE)
-		var record := file.get_buffer(132)
+		# 154 bytes: +148 is the REQUIRED level and +153 the ITEM level --
+		# the pair TypeManager::getRandomItem's window filters on
+		# (tmp/e2-loot/item-level.md; sub_814D1CC returns the raw 258-byte
+		# weapon.pak row, so those offsets are file bytes).
+		var record := file.get_buffer(154)
 		_types[row] = record.decode_u32(128)
 		_parents[row] = record.decode_u32(36)
+		_req[row] = record[148]
+		_level[row] = record[153]
+		var t := _types[row]
+		if t > 0:
+			# Retail's load stamps the reverse index per row, so the LAST row
+			# wins (loadWeaponInfo's u16 stamp at items base + type*128 + 40).
+			_row_of_type[t] = row
 	found = true
+
+## E2: the weapon row carrying an items.pak type's stats, -1 when none.
+func row_for_type(type: int) -> int:
+	return _row_of_type.get(type, -1)
+
+## Required level (weapon.pak row +148).
+func req_level(row: int) -> int:
+	return _req[row] if row >= 0 and row < _req.size() else 0
+
+## Item level (weapon.pak row +153) -- the level getRandomItem's window
+## filters on.
+func item_level(row: int) -> int:
+	return _level[row] if row >= 0 and row < _level.size() else 0
 
 ## Stamp all weapon-row indices BEFORE copying any inherited definition.
 ## PackedByteArray assignment has value semantics; later parent mutations

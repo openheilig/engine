@@ -57,6 +57,22 @@ func _init() -> void:
 	expect(gold > 50, "gold tier appeared %d/%d times -- gold arm dead" % [gold, rolls])
 	expect(weapon > 50, "weapon category appeared %d/%d times -- weapon arm dead" % [weapon, rolls])
 
+	# The level window (E2-followup): weapon.pak-backed categories filter by
+	# the row's +148/+153 levels. At creature level 2 the window top is tiny,
+	# so a tier-8 weapon (Kampfstab row: 8/12) must never be picked.
+	var weapons := Sacred.Weapons.new(install.path_join("pak/weapon.pak"))
+	var kstab: int = weapons.row_for_type(2015)
+	expect(kstab >= 0 and weapons.req_level(kstab) == 8 and weapons.item_level(kstab) == 12,
+		"Kampfstab row levels %d/%d, expected 8/12"
+			% [weapons.req_level(kstab), weapons.item_level(kstab)])
+	var high := 0
+	for i in 400:
+		var wid: int = Sacred.LootRoll.pick_category(items, 5, rng, weapons, 2, 1)
+		var wrow: int = weapons.row_for_type(wid) if wid > 0 else -1
+		if wrow >= 0 and (weapons.item_level(wrow) >= 12 or weapons.req_level(wrow) >= 8):
+			high += 1
+	expect(high == 0, "%d/400 level-2 weapon picks exceed the window" % high)
+
 	# First-of-type roll always returns a unique-table member.
 	var uid := Sacred.LootRoll.roll(items, balance, 5, 2, rng, true)
 	expect(uniques.has(uid), "first-of-type roll returned %d, not in the unique table" % uid)
