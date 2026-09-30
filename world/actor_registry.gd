@@ -77,6 +77,18 @@ func despawn(id: int) -> void:
 		_ids.remove_at(i)
 
 
+## P1 save/restore: drops every actor so SaveState can replay the snapshot's
+## ids through spawn() -- restoring the id sequence exactly rather than
+## aliasing snapshot ids onto fresh allocations. An EMPTY registry starts
+## ids from 1 again (the only state in which rewinding is safe); SaveState
+## then raises _next_id to the snapshot's watermark via spawn/despawn,
+## preserving the monotonic contract.
+func clear() -> void:
+	_by_id.clear()
+	_ids.clear()
+	_next_id = 1
+
+
 func count() -> int:
 	return _ids.size()
 

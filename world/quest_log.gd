@@ -102,6 +102,27 @@ func mark_entered(quest: int) -> void:
 	_entered[quest] = true
 
 
+## Every quest id this log has marked entered, ascending -- the save
+## snapshot's "port bookkeeping" half (P1): _entered is the port's own
+## flag, separate from the bytecode's bits, and both halves persist.
+func entered_ids() -> PackedInt32Array:
+	var out: PackedInt32Array = PackedInt32Array(_entered.keys())
+	out.sort()
+	return out
+
+
+## Bulk restore for SaveState: replaces BOTH halves of the quest state with
+## the snapshot's. _var keys arrive as decimal strings (the bytecode's own
+## spelling, see state_of); entered ids arrive as ints.
+func restore_states(states: Dictionary, entered: Array) -> void:
+	_var.clear()
+	for k in states:
+		_var[str(k)] = int(states[k])
+	_entered.clear()
+	for q in entered:
+		_entered[int(q)] = true
+
+
 ## Started and not yet finished. This is the question a quest book asks, and
 ## answering it needs both the file's variable and the port's own flag.
 func is_running(quest: int) -> bool:

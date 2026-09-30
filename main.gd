@@ -101,6 +101,12 @@ var _checkpoint_made := false           ## true once world_moved() has run -- a 
 var _scenario_freeze_at := NAN          ## manifest freeze_anim: park every rig at this
                                         ## clip time before checkpoint+shots so pixel
                                         ## repeats compare the same pose (NAN = no freeze)
+## P1: --save=PATH writes a session snapshot at the settle boundary and
+## quits; --load=PATH restores one before the first streamed frame. Both
+## are ordinary CLI flags, not scenario-only -- a save that only works
+## inside a harness flag is not a save.
+var _save_path := ""
+var _load_path := ""
 ## The live quest log and cast the new-game hook produced. Null until
 ## _begin_encounter/_build_quest_cast run; the Checkpoint reads whatever the
 ## scenario actually reached.
@@ -659,6 +665,10 @@ func _ready() -> void:
 			_checkpoint_path = a.trim_prefix("--checkpoint-out=")
 		elif a.begins_with("--checkpoint-ref="):
 			_checkpoint_ref = a.trim_prefix("--checkpoint-ref=")
+		elif a.begins_with("--save="):
+			_save_path = a.trim_prefix("--save=")
+		elif a.begins_with("--load="):
+			_load_path = a.trim_prefix("--load=")
 		elif a.begins_with("--crowd="):
 			_has_crowd = true
 			_crowd_arg = a.trim_prefix("--crowd=")
@@ -955,6 +965,8 @@ func _ready() -> void:
 		# otherwise claim the run and bypass the checkpoint entirely --
 		# exactly what the first verification run showed.
 		await _run_scenario()
+	elif _save_path != "" or _load_path != "":
+		await _run_save_or_load()
 	elif Drive.wanted(OS.get_cmdline_user_args() + OS.get_cmdline_args()):
 		# --drive=/--shots= hand the streamed world to drive.gd, which owns the
 		# timeline, the captures and the quit. Without this branch those flags
@@ -989,6 +1001,53 @@ func _load_scenario_manifest(path: String) -> Dictionary:
 		push_error("scenario: manifest schema %s is not 1 -- refusing to guess the format" % str(parsed.get("schema")))
 		return {}
 	return parsed
+
+
+## P1: the plain --save=/--load= route (no --scenario=). Save captures a
+## session snapshot at the settle boundary and quits; load restores one
+## over the fresh new-game world before the first capture, so a restart
+## continues the saved state. Both refuse loudly rather than pretending.
+func _run_save_or_load() -> void:
+	if _player_id == ActorRegistry.INVALID_ID or _quest_log == null:
+		push_error("save/load: no new-game state (player_id=%d, quest_log=%s)"
+			% [_player_id, _quest_log != null])
+		get_tree().quit(1)
+		return
+	if _save_path != "":
+		var session := _session_dict()
+		var snap := SaveState.snapshot(session)
+		var err: String = SaveStore.save(_save_path, snap)
+		if err != "":
+			push_error("save: %s" % err)
+			get_tree().quit(1)
+			return
+		print("save\twritten=%s\tactors=%d\tquests=%d\ttick=%d" % [
+			_save_path, snap["actors"].size(), snap["quest_states"].size(),
+			snap["tick"]])
+		await _maybe_screenshot()
+		return
+	# LOAD: restore over the fresh world, then report the restored hero.
+	var snap := SaveStore.load(_load_path)
+	if snap.is_empty():
+		push_error("load: %s has no usable save" % _load_path)
+		get_tree().quit(1)
+		return
+	var err: String = SaveState.restore(snap, _session_dict())
+	if err != "":
+		push_error("load: %s" % err)
+		get_tree().quit(1)
+		return
+	var p := _registry.get_actor(_player_id)
+	print("load\trestored=%s\tcell=%.6f,%.6f\thp=%d\tquests=%d" % [
+		_load_path, p.cell.x, p.cell.y, p.hp, _quest_log.vars().size()])
+	await _maybe_screenshot()
+
+
+## The authoritative-state dictionary SaveState consumes: the same objects
+## the scenario checkpoint reads, keyed for the snapshot.
+func _session_dict() -> Dictionary:
+	return {"registry": _registry, "quest_log": _quest_log,
+		"player_id": _player_id, "tick": _sim.tick, "tick_hz": _tick_hz}
 
 
 func _run_scenario() -> void:

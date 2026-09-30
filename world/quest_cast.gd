@@ -45,6 +45,13 @@ var script_vars: Dictionary[String, int] = {}
 var _by_handle: Dictionary[String, int] = {}
 
 
+## P1 save/restore: clears the handle index alongside `cast` so a restored
+## cast rebuilds its own map. A stale index would route handles at entries
+## the snapshot replaced.
+func reset_handles() -> void:
+	_by_handle.clear()
+
+
 # --- ScriptVM host interface -------------------------------------------------
 
 ## SetVar(name, value). NOT SetVarBit -- see QuestLog.set_var(), which takes a
