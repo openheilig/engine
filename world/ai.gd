@@ -21,6 +21,10 @@ var attack_range: float = 1.8
 var attack_cooldown: float = 2.0
 var cooldown_remaining: float = 0.0
 var attack_count: int = 0
+## Called when the brain's attack kills the target (hp reaches 0). The
+## session connects this to award XP, drop loot, advance the quest — the
+## B1→C2→C3 wiring point.
+var on_target_killed: Callable = Callable()
 
 
 func setup(hostile_id: int, target: int, range_cells: float, cooldown_s: float) -> void:
@@ -87,3 +91,5 @@ func _attack(reg: ActorRegistry, actor: ActorState, target: ActorState) -> void:
 	target.hp = maxi(0, target.hp - roundi(dmg[0]))
 	if target.hp == 0:
 		target.flags &= ~ActorState.FLAG_ALIVE
+		if on_target_killed.is_valid():
+			on_target_killed.call(target_id, actor_id)
