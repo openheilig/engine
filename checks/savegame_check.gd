@@ -40,6 +40,12 @@ func _init() -> void:
 		"hero name %s, expected Seraphim" % hero.get("name"))
 	expect(int(hero.get("class_type", 0)) == 1, "hero class type must be 1")
 
+	# The calendar: structural fields and the 0xDEADC0DE end sentinel.
+	var cal: Dictionary = sg.calendar()
+	expect(cal.get("i0", 0) == 56 and abs(float(cal.get("f4", 0)) - 24.0) < 0.01,
+		"calendar head fields drifted: %s" % str(cal))
+	expect(bool(cal.get("end_sentinel", false)), "calendar must end with 0xDEADC0DE")
+
 	# A nonexistent section reads empty.
 	expect(sg.section(0x77).is_empty(), "unknown section reads empty")
 

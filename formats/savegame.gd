@@ -71,6 +71,24 @@ func has_section(id: int) -> bool:
 	return sections.has(id)
 
 
+## X1: the 0x8B calendar section (34 bytes on the shipped save), decoded
+## structurally: seven u16-ish fields, two floats, and the 0xDEADC0DE
+## end sentinel. The fields' SEMANTICS (in-game day/hour/...) are not
+## pinned yet -- raw values only, no invented names.
+func calendar() -> Dictionary:
+	var b := section(SEC_CALENDAR)
+	if b.size() < 34:
+		return {}
+	return {
+		"i0": b.decode_u32(0), "f4": b.decode_float(4),
+		"i8": b.decode_u32(8),
+		"w12": b.decode_u16(12), "w14": b.decode_u16(14),
+		"w16": b.decode_u16(16), "w18": b.decode_u16(18),
+		"f20": b.decode_float(20),
+		"end_sentinel": b.decode_u32(30) == 0xDEADC0DE,
+	}
+
+
 ## X1: the 0xC3 hero blob decoder, transcribed from game01.pak's real
 ## bytes: +0 u32 (slot/count, 2 on the shipped save), +4 u32 class type
 ## (1 = Seraphim, the GetTypeName numbering), +8 a fixed-width UTF-16LE
