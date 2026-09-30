@@ -382,6 +382,8 @@ var _loot_seen_types := {}
 var _hero_path := ""
 ## G1: --class=<dir> selects the playable class (default Seraphim).
 var _start_class := START_CLASS
+## G2: the class-data base ("bin" or "bin/addon" for the Underworld).
+var _campaign := ""
 var _start_template := START_TEMPLATE
 ## U0: the inventory panel (I toggles it).
 var _inventory_panel: Sacred.InventoryPanel
@@ -749,6 +751,11 @@ func _ready() -> void:
 			# the install by relative path. Set before any reader opens.
 			Sacred.Pak.mod_root = a.trim_prefix("--mod=")
 			Sacred.Pak.install_root = install
+		elif a.begins_with("--campaign="):
+			# G2: the Underworld campaign's class data lives under
+			# bin/addon/<class> (its own startcode/vectoren); its start
+			# fingerprint is cell 6265,3864 for every class.
+			_campaign = a.trim_prefix("--campaign=")
 		elif a.begins_with("--class="):
 			# G1: select the playable class; the template resolves from the
 			# class's own templates by CharacterType (see _apply_retail_start).
@@ -1939,7 +1946,8 @@ func _apply_retail_start(install: String) -> void:
 		_player_model = CLASS_MODEL[_start_class]
 	else:
 		push_warning("start: no body mesh mapped for %s -- drawing %s" % [_start_class, _player_model])
-	var sc := Sacred.Startcode.new(install.path_join("bin").path_join(_start_class))
+	var base := "bin/addon" if _campaign != "" else "bin"
+	var sc := Sacred.Startcode.new(install.path_join(base).path_join(_start_class))
 	_scripted_objects_by_sector.clear()
 	for object: Dictionary in sc.objects:
 		var cell: Vector2i = object["cell"]
@@ -3961,7 +3969,8 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		print("quest\tid=%d\tskipped=--noquests" % START_QUEST)
 		return
 	var start := Time.get_ticks_msec()
-	var dir := install.path_join("bin/%s" % _start_class)
+	var base := "bin/addon" if _campaign != "" else "bin"
+	var dir := install.path_join(base).path_join(_start_class)
 	var vec := Sacred.Vectoren.new(dir)
 	if not vec.found or not vec.has_quest(START_QUEST):
 		printerr("quest\tid=%d\tnot in %s" % [START_QUEST, dir])
@@ -4710,7 +4719,8 @@ func _run_sector_scripts(s: Vector2i) -> void:
 	if _session == null:
 		return
 	if _sector_vec == null:
-		var dir := _install_ref.path_join("bin/%s" % _start_class)
+		var base := "bin/addon" if _campaign != "" else "bin"
+		var dir := _install_ref.path_join(base).path_join(_start_class)
 		_sector_vec = Sacred.Vectoren.new(dir)
 		if _sector_vec.found:
 			_sector_funkcode = FileAccess.get_file_as_bytes(
