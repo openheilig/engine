@@ -922,7 +922,6 @@ func _ready() -> void:
 			_cam.move_click.connect(_on_move_click)
 			if _sim.interior != null:
 				_sim.interior.place_focus(player_cell, _player_type, _retail_start_layer)
-			# World layer, so it is built here rather than beside the rigs: the
 			# hostile is an actor whether or not anything is drawn.
 			#
 			# RETAIL'S NEW GAME RUNS QUEST 74's OnEnter: its console line

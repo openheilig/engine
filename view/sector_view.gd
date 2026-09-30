@@ -838,7 +838,8 @@ func _build_sector(gx: int, gy: int, job: Dictionary) -> MeshInstance3D:
 ## _build_objects so a base cell can contribute BOTH its own chain and the
 ## state-selected storey child's grid chain (F1, findings row 1328).
 func _build_chain(head: int, cell_x: int, cell_y: int, parent: Dictionary,
-		job: Dictionary, objs: Array[Dictionary], shadows: Array[Dictionary]) -> void:
+		job: Dictionary, objs: Array[Dictionary], shadows: Array[Dictionary],
+		pre_admitted: bool = false) -> void:
 	for o: Dictionary in _statics.chain(head):
 		if not await _build_checkpoint(job):
 			return
@@ -868,7 +869,8 @@ func _build_chain(head: int, cell_x: int, cell_y: int, parent: Dictionary,
 		# bit 0x800000 to list 4, and ordinary sprites to list 3.
 		var flags: int = _items.draw_flags(o["type"]) if _items != null else 0
 		var gated: bool = (flags & 0x800004) != 0 or (o["flags"] & 8) != 0
-		o["trigger"] = parent["trigger"] if gated and not parent.is_empty() else -1
+		o["trigger"] = -1 if pre_admitted else (
+			parent["trigger"] if gated and not parent.is_empty() else -1)
 		var draw_pass := 3
 		if (flags & 4) != 0:
 			draw_pass = 0 if o["mask"] == 1 or (o["flags"] & 0x20) != 0 else 2
