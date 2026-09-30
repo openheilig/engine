@@ -371,6 +371,8 @@ var _tex_pak_ref: Sacred.Pak
 ## Held from _ready; lets the loot path build models.pak lazily when no
 ## scripted-object job has done it yet.
 var _install_ref := ""
+## --spawn-loot=<defid>: debug drop at the spawn cell (0 = disabled).
+var _spawn_loot_def := 0
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
 ## --hideplayer: build the player view and keep the camera following it
 ## exactly like the ordinary case, but never make its mesh visible. A
@@ -501,6 +503,12 @@ func _ready() -> void:
 	# certain (row 609): a body whose clip splays it must still be drawable.
 	_animate_player = not ("--noanim" in argv)
 	_dress_player_enabled = not ("--nodress" in argv)
+	# --spawn-loot=<defid>: drop a ground item at the hero's spawn cell so
+	# the loot-view path (kill drop + pickup) is exercisable without a fight.
+	# Debug only, same class as --spawn.
+	for a in argv:
+		if a.begins_with("--spawn-loot="):
+			_spawn_loot_def = int(a.trim_prefix("--spawn-loot="))
 	_wear_garments = "--dress-garments" in argv
 	_show_hud = not ("--nohud" in argv)
 	for a in argv:
@@ -903,6 +911,14 @@ func _ready() -> void:
 			# frame, and its hostile stands offscreen at monster107. The
 			# encounter IS new-game state; only --fight resolves it headlessly.
 			_begin_encounter(install, items)
+			# C2 debug: drop the requested item at the spawn so the loot-view
+			# path photographs without a fight.
+			if _spawn_loot_def > 0 and _session != null:
+				var drop := Vector2i(int(player_cell.x) + 2, int(player_cell.y))
+				var iid := _session.spawn_item_ground(_spawn_loot_def, drop)
+				_loot_dirty = iid > 0
+				print("loot\tspawned=%d\tdef=%d\tcell=%d,%d"
+					% [iid, _spawn_loot_def, drop.x, drop.y])
 			print("spawn\tcell=%.6f,%.6f\tclass=%d\tcomponent=%d\tsectors=%d" % [
 				player_cell.x, player_cell.y, spawn["class"], spawn["component"], spawn["sectors"]])
 			# The models pak is opened whenever ANY rig is wanted, not only when
@@ -1887,6 +1903,10 @@ func _advance_scripted_objects() -> void:
 
 func _build_scripted_object(record: Dictionary, sector: Node3D, view: SectorView) -> Dictionary:
 	var type_id: int = record["model"]
+	# The enqueue guard checked _interior, but streaming can unload the
+	# interior between the job's enqueue and this deferred build step.
+	if view._interior == null:
+		return {}
 	var name := view._items.name_of(type_id)
 	if name.is_empty():
 		push_warning("scripted objects: unresolved model for type %d" % type_id)
