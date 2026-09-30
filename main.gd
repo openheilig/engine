@@ -1164,6 +1164,9 @@ func _process(delta: float) -> void:
 			_hostile_brain.step(_sim, _registry, delta)
 		if _hero_brain != null:
 			_hero_brain.step(_sim, _registry, delta)
+	# C3: after combat resolves, check whether the hero died.
+	if _session != null:
+		_session.check_hero_death()
 	# Plan 04-03 Task 2: --noplayer means no player at all, not just an
 	# invisible one -- the camera must keep behaving exactly as it does today
 	# (Task 2's own reference-capture regression: --sector=50,50 with the
