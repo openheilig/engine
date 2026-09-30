@@ -79,8 +79,9 @@ func instance(id: int) -> Instance:
 
 ## Moves `id` to a new location/owner. Transactional: an invalid transfer
 ## (unknown instance, unequippable-to-nonexistent owner) returns a reason
-## and mutates nothing.
-func transfer(id: int, to: int, owner_or_zero: int, slot: int = -1) -> String:
+## and mutates nothing. GROUND transfers take the world cell in `at`.
+func transfer(id: int, to: int, owner_or_zero: int, slot: int = -1,
+		at: Vector2i = Vector2i.ZERO) -> String:
 	var i: Instance = _by_id.get(id, null)
 	if i == null:
 		return "unknown instance %d" % id
@@ -97,8 +98,7 @@ func transfer(id: int, to: int, owner_or_zero: int, slot: int = -1) -> String:
 	i.location = to
 	i.owner_id = owner_or_zero
 	i.slot = slot if to == Location.EQUIPPED else -1
-	if to != Location.GROUND:
-		i.cell = Vector2i.ZERO
+	i.cell = at if to == Location.GROUND else Vector2i.ZERO
 	return ""
 
 

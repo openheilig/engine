@@ -55,9 +55,9 @@ func _init() -> void:
 	# session object, so equality is by construction -- what this asserts is
 	# that snapshotting a session that was never rendered works.
 	var snap := s1.snapshot()
-	if int(snap.get("schema", 0)) != SaveState.SCHEMA:
+	if int(snap.get("schema", 0)) != GameSession.SCHEMA:
 		fails += 1
-		printerr("session snapshot missing schema")
+		printerr("session snapshot missing schema %d" % GameSession.SCHEMA)
 	if s1.restore(snap) != "":
 		fails += 1
 		printerr("session roundtrip of its own snapshot failed")

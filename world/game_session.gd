@@ -30,6 +30,11 @@ const START_CLASS := "type_npc_seraphim"
 const START_TEMPLATE := "hero01.ptx"
 ## bin/ tree for the class's script bytecode and start position.
 const START_SET := 6
+## SaveState schema v2: v1's state plus the item instances. SaveState.SCHEMA
+## stays at 1 (its own actor/quest contract); the session carries the
+## version because it composes the fragments.
+const SCHEMA := 2
+const SCHEMA_KEY_ITEMS := "items"
 
 var install := ""
 var start_class := START_CLASS
@@ -37,6 +42,7 @@ var start_template := START_TEMPLATE
 var registry: ActorRegistry
 var quest_log: QuestCast
 var sim: Sim
+var items: ItemInstances
 var player_id: int = ActorRegistry.INVALID_ID
 var player_cell := Vector2.ZERO
 var player_hp := 0
@@ -56,6 +62,7 @@ static func new_game(install_path: String, spawn_cell: Vector2) -> GameSession:
 	s.registry = ActorRegistry.new()
 	s.quest_log = QuestCast.new()
 	s.sim = Sim.new(s.tick_hz)
+	s.items = ItemInstances.new()
 
 	# Hero max HP: the transcribed sub_81F4FFA base over the template's
 	# (STK, REPHY) pair -- live-witnessed on two classes (119, 147;
@@ -74,21 +81,6 @@ static func new_game(install_path: String, spawn_cell: Vector2) -> GameSession:
 	return s
 
 
-func snapshot() -> Dictionary:
-	return SaveState.snapshot(_as_session_dict())
-
-
-func restore(snap: Dictionary) -> String:
-	var err := SaveState.restore(snap, _as_session_dict())
-	if err == "":
-		var p := registry.get_actor(player_id)
-		if p != null:
-			player_cell = p.cell
-			player_hp = p.hp
-			player_hp_max = p.hp_max
-	return err
-
-
 ## Commands enter here -- the one path. v1 carries movement; combat/art
 ## commands arrive with B1/B2 through the same door.
 func move_command(goal: Vector2i) -> void:
@@ -97,9 +89,73 @@ func move_command(goal: Vector2i) -> void:
 	sim.pending_goal_tick = -1
 
 
+## Spawns a fresh item instance on the ground at `cell`. Returns the
+## instance id (<= 0 on refusal -- items.pak definitions are not validated
+## here; the definition reader owns that).
+func spawn_item_ground(definition_id: int, cell: Vector2i) -> int:
+	return items.spawn(definition_id, cell)
+
+
+## C2 command: an actor picks up a GROUND instance. Transactional; returns
+## "" or the reason.
+func pickup_item(instance_id: int, by_actor: int = player_id) -> String:
+	var i := items.instance(instance_id)
+	if i == null:
+		return "no instance %d" % instance_id
+	if i.location != ItemInstances.Location.GROUND:
+		return "instance %d is not on the ground" % instance_id
+	if registry.get_actor(by_actor) == null:
+		return "actor %d does not exist" % by_actor
+	return items.transfer(instance_id, ItemInstances.Location.INVENTORY, by_actor)
+
+
+## C2 command: an actor drops an owned instance onto the ground at `cell`.
+## Transactional; returns "" or the reason.
+func drop_item(instance_id: int, cell: Vector2i, by_actor: int = player_id) -> String:
+	var i := items.instance(instance_id)
+	if i == null:
+		return "no instance %d" % instance_id
+	if i.location != ItemInstances.Location.INVENTORY \
+			and i.location != ItemInstances.Location.EQUIPPED:
+		return "instance %d is not carried" % instance_id
+	if i.owner_id != by_actor:
+		return "instance %d is not owned by actor %d" % [instance_id, by_actor]
+	return items.transfer(instance_id, ItemInstances.Location.GROUND, 0, -1, cell)
+
+
 func _as_session_dict() -> Dictionary:
 	return {"registry": registry, "quest_log": quest_log,
 		"player_id": player_id, "tick": tick, "tick_hz": tick_hz}
+
+
+func snapshot() -> Dictionary:
+	var snap := SaveState.snapshot(_as_session_dict())
+	snap[SCHEMA_KEY_ITEMS] = items.snapshot()
+	snap["schema"] = SCHEMA
+	return snap
+
+
+func restore(snap: Dictionary) -> String:
+	if int(snap.get("schema", -1)) < SCHEMA:
+		return "schema %s is older than %d" % [str(snap.get("schema")), SCHEMA]
+	# SaveState validates its own v1 fragment contract; the session owns the
+	# composite version. Normalize the copy handed down so the fragment
+	# validator sees its own version, never the composite's.
+	var fragment: Dictionary = snap.duplicate()
+	fragment["schema"] = SaveState.SCHEMA
+	var err := SaveState.restore(fragment, _as_session_dict())
+	if err != "":
+		return err
+	# A v1 snapshot has no items array -- nothing to restore, nothing lost:
+	# v1 saves predate item instances entirely. v2+ carries them.
+	if int(snap.get("schema", 1)) >= SCHEMA:
+		items = ItemInstances.from_snapshot(snap.get(SCHEMA_KEY_ITEMS, []))
+	var p := registry.get_actor(player_id)
+	if p != null:
+		player_cell = p.cell
+		player_hp = p.hp
+		player_hp_max = p.hp_max
+	return ""
 
 
 ## The hero's RecordStore id: the first real static-art definition with
