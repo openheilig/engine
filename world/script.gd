@@ -35,19 +35,38 @@ const STR := -1
 ## Transcribed from analysis/tools/formats/startcode.py, which is the authority
 ## on this table; not re-derived here.
 const VARIANT := -3
+const STR2 := -4
+const NUMSTR := -5
+const END := -2
 const SENTINEL := 0xfffffffe
 ## Payload width of a VARIANT tag when its u32 is NOT the sentinel.
-const VARIANT_FIXED := {0x04: 12}
+##
+## THE FULL ENGINE-DERIVED TAG TABLE (finding 1293): widths recovered by
+## FOLLOWING CONTROL FLOW from the interpreter jump-table handlers at
+## 0x086f3fbc to the shared epilogue -- derived from the interpreter, not
+## fitted to the data. The decoder previously carried only the ten tags the
+## eight implemented opcodes use, so it REFUSED real hooks containing any of
+## the other ~140 (0x52/0x1f/0x0a hit on the first non-tutorial quests).
+## Unlisted tags below 0xa2 are ZERO-WIDTH markers (the default handler is
+## `inc [esi]; jmp epilogue`); 0xa2+ fails retail's bounds check and ends
+## the record.
+const VARIANT_FIXED := {0x04: 12, 0x0c: 12, 0x0d: 12, 0x3c: 12, 0x37: 1, 0x4b: 1, 0x71: 0}
 const WIDTH := {
-	0x01: STR,      ## NUL-terminated string
-	0x02: 4,        ## i32, CreateNPC's creature id
-	0x04: VARIANT,  ## an NPC name, or an (x, y, z) cell -- see VARIANT
-	0x09: STR,      ## CreateNPC's task name
-	0x0b: 4,        ## i32
-	0x1d: 4,        ## i32, AutoSave's argument
-	0x36: 4,        ## i32
-	0x67: STR,      ## CreateNPC's combat art
-	0x6b: 2,        ## i16
+	0x00: END, 0x01: STR, 0x02: 4, 0x03: 2, 0x04: VARIANT, 0x05: STR,
+	0x09: STR, 0x0a: 2, 0x0b: 4, 0x0c: VARIANT, 0x0d: VARIANT, 0x11: 4,
+	0x15: 8, 0x16: STR, 0x17: END, 0x18: END, 0x19: 12, 0x1c: 4, 0x1d: 4,
+	0x1e: STR, 0x1f: 3, 0x20: 12, 0x21: END, 0x22: END, 0x28: 1, 0x29: STR,
+	0x2a: 12, 0x33: 8, 0x34: 8, 0x35: 12, 0x36: 4, 0x37: VARIANT, 0x38: 4,
+	0x3a: STR2, 0x3b: 4, 0x3c: VARIANT, 0x3d: 16, 0x3e: STR, 0x40: STR,
+	0x41: STR, 0x47: STR, 0x48: NUMSTR, 0x49: NUMSTR, 0x4a: NUMSTR,
+	0x4b: VARIANT, 0x4d: 12, 0x52: STR, 0x53: 4, 0x54: 4, 0x55: 4, 0x56: 4,
+	0x57: 4, 0x5d: NUMSTR, 0x5e: NUMSTR, 0x5f: 4, 0x60: STR, 0x63: STR,
+	0x67: STR, 0x68: STR, 0x69: STR, 0x6a: STR, 0x6b: 2, 0x6c: 2,
+	0x6d: NUMSTR, 0x6e: NUMSTR, 0x6f: STR, 0x71: VARIANT, 0x73: 4, 0x75: 4,
+	0x76: END, 0x77: STR, 0x79: 8, 0x7a: NUMSTR, 0x7d: STR, 0x7e: 4,
+	0x7f: 4, 0x81: STR, 0x82: STR, 0x83: STR, 0x84: 4, 0x86: 4, 0x87: 8,
+	0x88: 8, 0x89: 8, 0x8b: 1, 0x8c: 4, 0x8f: STR, 0x90: 4, 0x92: STR,
+	0x93: 2, 0x94: END, 0x95: STR, 0x9b: 2, 0x9c: 2, 0x9d: STR, 0x9f: 3,
 }
 const END_TAGS := {0x00: true}
 
@@ -161,32 +180,93 @@ func _args(code: PackedByteArray, from: int, to: int) -> Variant:
 		if END_TAGS.has(tag):
 			break
 		if not WIDTH.has(tag):
-			push_error("ScriptVM: unknown argument tag 0x%02x at %d" % [tag, p - 1])
-			return null
+			if tag >= 0xa2:
+				# Fails retail's bounds check: the record ends here, exactly
+				# as the interpreter's own cursor does.
+				break
+			# Unlisted sub-0xa2 tag: the interpreter's default handler is
+			# `inc [esi]; jmp epilogue` -- a ZERO-WIDTH marker. The old
+			# narrow-table decoder refused here; refusing a marker is what
+			# made real hooks undecodable (finding 1293).
+			continue
 		var w: int = WIDTH[tag]
 		if w == VARIANT:
-			# The u32 decides the shape. Read it before anything else, and let
-			# it fall through to the STR branch when it is the sentinel rather
-			# than duplicating the string walk.
-			if p + 4 > to:
-				push_error("ScriptVM: variant tag 0x%02x has no selector at %d" % [tag, p])
-				return null
-			if code.decode_u32(p) == SENTINEL:
+			# The u32 decides the shape -- read it ONLY when four bytes
+			# remain, exactly like the Python reference: a shorter tail is
+			# not an error, it means the fixed payload is all there is.
+			if p + 4 <= to and code.decode_u32(p) == SENTINEL:
 				p += 4
 				w = STR
 			else:
 				var fixed: int = VARIANT_FIXED.get(tag, 0)
 				if p + fixed > to:
-					push_error("ScriptVM: variant tag 0x%02x overruns at %d" % [tag, p])
-					return null
-				# All three components, not just x and y: a caller that wants a
-				# cell takes the first two, and one that drops z silently would
-				# make a 12-byte payload look like an 8-byte one to the cursor.
-				var v := Vector3i(code.decode_s32(p), code.decode_s32(p + 4),
-					code.decode_s32(p + 8))
-				out.append([tag, v])
+					# Python reference: a payload that overruns the record is
+					# a silent break, not a failure ("else: break" with ok
+					# untouched) -- the engine reads on.
+					break
+				if fixed == 12:
+					# The cell triple (0x04 and siblings): all three
+					# components, not just x and y -- a caller that wants a
+					# cell takes the first two, and one that drops z silently
+					# would make a 12-byte payload look like an 8-byte one.
+					out.append([tag, Vector3i(code.decode_s32(p),
+						code.decode_s32(p + 4), code.decode_s32(p + 8))])
+				else:
+					# Python-reference semantics: the fixed payload is ONE
+					# little-endian integer of exactly `fixed` bytes (0x4b
+					# carries a single byte; 0x71 has none and yields 0).
+					var v := 0
+					for i in fixed:
+						v |= code[p + i] << (8 * i)
+					out.append([tag, v])
 				p += fixed
 				continue
+		if w == STR2:
+			# The handler calls strcpy TWICE: two NUL-terminated strings with
+			# no tag byte between them (0x3a: "HERO" then "res:17562").
+			for _i in 2:
+				var e2 := p
+				while e2 < to and code[e2] != 0:
+					e2 += 1
+				if e2 >= to:
+					push_error("ScriptVM: unterminated STR2 string at %d" % p)
+					return null
+				out.append([tag, code.slice(p, e2).get_string_from_ascii()])
+				p = e2 + 1
+			continue
+		if w == NUMSTR:
+			# Handler 0x0826cb0e: a u32 into the numeric slot array, THEN a
+			# NUL-terminated string into the string slots. A SECOND string
+			# follows behind two gates the handler applies in order (row 838):
+			# the stored u32 must be NEGATIVE ("the operand is the variable
+			# named below") and the byte after the first string must be
+			# non-zero -- EXCEPT 0x7a, whose handler 0x0826de28 has no second
+			# branch at all; it strncasecmps the string against "res:" and
+			# strtol's the remainder into a resource id.
+			# TRUNCATION IS A SILENT BREAK, not a failure: every `end < 0`
+			# here breaks the arg loop with the record still ok -- the engine
+			# reads on. Only the STR families treat a missing NUL as invalid.
+			if p + 4 > to:
+				break
+			var num := code.decode_s32(p)
+			out.append([tag, num])
+			p += 4
+			var e3 := p
+			while e3 < to and code[e3] != 0:
+				e3 += 1
+			if e3 >= to:
+				break
+			out.append([tag, code.slice(p, e3).get_string_from_ascii()])
+			p = e3 + 1
+			if tag != 0x7a and (num & 0x80000000) != 0 and p < to and code[p] != 0:
+				var e4 := p
+				while e4 < to and code[e4] != 0:
+					e4 += 1
+				if e4 >= to:
+					break
+				out.append([tag, code.slice(p, e4).get_string_from_ascii()])
+				p = e4 + 1
+			continue
 		if w == STR:
 			var e := p
 			while e < to and code[e] != 0:
