@@ -731,6 +731,11 @@ func _ready() -> void:
 			_save_path = a.trim_prefix("--save=")
 		elif a.begins_with("--load="):
 			_load_path = a.trim_prefix("--load=")
+		elif a.begins_with("--mod="):
+			# D1: a data mod is a directory of replaced pak files overlaid on
+			# the install by relative path. Set before any reader opens.
+			Sacred.Pak.mod_root = a.trim_prefix("--mod=")
+			Sacred.Pak.install_root = install
 		elif a.begins_with("--class="):
 			# G1: select the playable class; the template resolves from the
 			# class's own templates by CharacterType (see _apply_retail_start).

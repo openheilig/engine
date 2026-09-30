@@ -22,9 +22,34 @@ var kinds := PackedInt32Array()
 var _f: FileAccess
 ## The archive path as opened -- cache keys and diagnostics.
 var path := ""
+## True when this archive was served from the mod overlay, not the install.
+var from_mod := false
+
+## D1: the data-mod overlay. Set once at startup: paths under `root` that
+## exist in `mod_root` (same relative suffix) are served from the mod
+## instead -- an ordinary data-mod is a directory of replaced pak files.
+## Empty disables the overlay. Nothing else in the readers changes: the
+## bytes simply come from the mod copy.
+static var mod_root := ""
+static var install_root := ""
+
+static func resolve(archive_path: String) -> String:
+	if mod_root != "" and install_root != "" and archive_path.begins_with(install_root):
+		var suffix := archive_path.substr(install_root.length())
+		var candidate := mod_root + suffix
+		if FileAccess.file_exists(candidate):
+			return candidate
+	return archive_path
+
+## Did the overlay serve this archive?
+func is_mod() -> bool:
+	return from_mod
+
 
 func _init(archive_path: String) -> void:
-	path = archive_path
+	var open_path := resolve(archive_path)
+	from_mod = open_path != archive_path
+	path = open_path
 	_f = FileAccess.open(path, FileAccess.READ)
 	if _f == null:
 		push_error("Pak: cannot open %s (%s)" % [path, error_string(FileAccess.get_open_error())])
