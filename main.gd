@@ -373,6 +373,8 @@ var _tex_pak_ref: Sacred.Pak
 var _install_ref := ""
 ## --spawn-loot=<defid>: debug drop at the spawn cell (0 = disabled).
 var _spawn_loot_def := 0
+## C3: the death fact line fires once per death (reset by respawn).
+var _hero_dead_reported := false
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
 ## --hideplayer: build the player view and keep the camera following it
 ## exactly like the ordinary case, but never make its mesh visible. A
@@ -1197,6 +1199,12 @@ func _process(delta: float) -> void:
 	# C3: after combat resolves, check whether the hero died.
 	if _session != null:
 		_session.check_hero_death()
+		if _session.hero_dead and not _hero_dead_reported:
+			_hero_dead_reported = true
+			var hp := _session.registry.get_actor(_session.player_id)
+			print("hero-death\tcell=%s\thp=%d\tlevel=%d"
+				% [hp.cell if hp != null else Vector2.ZERO,
+					hp.hp if hp != null else 0, _session.hero_level])
 	# C2: rebuild loot views after a kill drop or a pickup consumption.
 	if _loot_dirty:
 		_sync_loot_views()
