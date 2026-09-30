@@ -191,6 +191,13 @@ func _init(pak: Pak) -> void:
 func count() -> int:
 	return _interior.size()
 
+
+## Total items.pak records (the _category map holds one entry per record).
+## NOT count() -- that one counts interior-flagged items only, a name it
+## carried from the interior-hiding work.
+func record_count() -> int:
+	return _category.size()
+
 ## The mixed.pak sprite id a static's type field resolves to, or 0 when absent.
 ## Zero means no MIX tiles, not necessarily no art: static flags 0x20 select
 ## miniature_texture_of() instead, using the placement's atlas metadata.

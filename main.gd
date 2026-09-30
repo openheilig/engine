@@ -375,6 +375,8 @@ var _install_ref := ""
 var _spawn_loot_def := 0
 ## C3: the death fact line fires once per death (reset by respawn).
 var _hero_dead_reported := false
+## E2: creature ids whose first-kill unique roll has been consumed.
+var _loot_seen_types := {}
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
 ## --hideplayer: build the player view and keep the camera following it
 ## exactly like the ordinary case, but never make its mesh visible. A
@@ -1710,6 +1712,7 @@ func _begin_encounter(install: String, items) -> void:
 			# wiring in isolation; encounter_check proves strike's finish.)
 			var exp_value: int = _encounter.foe_exp
 			var session_ref := _session
+			var balance_ref := Sacred.Balance.new(install)
 			_hero_brain = hero_brain
 			# B2: the hero's delegated swing goes through Encounter.strike,
 			# which owns to-hit, damage, the kill, the quest's OnExit and
@@ -1734,9 +1737,19 @@ func _begin_encounter(install: String, items) -> void:
 					if foe_actor2 != null:
 						kc = Vector2i(int(foe_actor2.cell.x), int(foe_actor2.cell.y))
 					if session_ref != null:
-						# C2: loot at the kill location (stand-in definition
-						# until the E2 ITEM gate lands).
-						session_ref.spawn_item_ground(7442, kc)
+						# C2/E2: the rolled drop at the kill location -- the
+						# retail generic roll (no per-creature tables), with
+						# the first kill of the type drawing from the unique
+						# table. Definition 7442 remains only as the
+						# --spawn-loot debug default.
+						var def := Sacred.LootRoll.roll(items, balance_ref,
+							_encounter.foe_class, _encounter.foe_level, rng, 
+							not _loot_seen_types.has(_encounter.foe_id))
+						_loot_seen_types[_encounter.foe_id] = true
+						if def > 0:
+							session_ref.spawn_item_ground(def, kc)
+							print("loot\trolled=%d\tclass=%d\tlevel=%d"
+								% [def, _encounter.foe_class, _encounter.foe_level])
 					_loot_dirty = true
 					print("kill\tid=%d\tkiller=%d\txp=%d\tcell=%d,%d\tart=%d"
 						% [encounter_ref.foe_id, _player_id, exp_value, kc.x, kc.y, art])

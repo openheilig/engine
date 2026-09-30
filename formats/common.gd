@@ -42,3 +42,36 @@ const KEY_LIQ10 := KEY_ENV + 0xF8   ## = 737
 ## textures -- so decompress_dynamic() is never needed.
 static func inflate(z: PackedByteArray, out_size: int) -> PackedByteArray:
 	return z.decompress(out_size, FileAccess.COMPRESSION_DEFLATE)
+
+
+## Translate a virtual address in the retail Linux binary to a file offset
+## via the ELF32 program headers. Returns -1 when the binary is missing,
+## not ELF32, or the address falls in a BSS-only range. Shared by readers
+## that pull static tables out of install/sacred at runtime (sound names,
+## the unique-item drop table).
+static func elf_vaddr_offset(path: String, vaddr: int) -> int:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return -1
+	# Magic + class/data/version bytes; EI_OSABI is 3 (Linux) in this
+	# binary, so bytes 4-7 read 0x03010101, not the textbook 0x00010101.
+	if f.get_32() != 0x464C457F or (f.get_32() & 0x00FFFFFF) != 0x00010101:
+		return -1
+	f.seek(28)
+	var phoff := f.get_32()
+	f.seek(42)
+	var phentsize := f.get_16()
+	var phnum := f.get_16()
+	for i in phnum:
+		f.seek(phoff + i * phentsize)
+		var p_type := f.get_32()
+		var p_offset := f.get_32()
+		var p_vaddr := f.get_32()
+		f.get_32()  # p_paddr
+		var p_filesz := f.get_32()
+		var p_memsz := f.get_32()
+		if p_type == 1 and p_vaddr <= vaddr and vaddr < p_vaddr + p_memsz:
+			if vaddr - p_vaddr >= p_filesz:
+				return -1
+			return p_offset + (vaddr - p_vaddr)
+	return -1
