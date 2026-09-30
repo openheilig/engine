@@ -43,6 +43,9 @@ const NO_CELL := Vector2i(-1, -1)
 var script_vars: Dictionary[String, int] = {}
 
 var _by_handle: Dictionary[String, int] = {}
+## The quest origin for position-less CreateNPC (the hero's cell), set by
+## the runner before executing quest hooks.
+var quest_origin := Vector2i.ZERO
 
 
 ## P1 save/restore: clears the handle index alongside `cast` so a restored
@@ -63,6 +66,11 @@ func set_script_var(name: String, value: int) -> void:
 
 func create_npc(handle: String, creature: int, name: String, task: String,
 		art: String, cell: Vector2i = NO_CELL) -> void:
+	# A position-less quest CreateNPC spawns at the quest origin (the
+	# hero's cell), not NO_CELL: retail's nun appears on the hero and
+	# walks to her Goto target (the creature push displaces the hero).
+	if cell == NO_CELL and quest_origin != Vector2i.ZERO:
+		cell = quest_origin
 	var key := handle.to_lower()
 	if _by_handle.has(key):
 		# Retail's sector scripts create every NPC under the placeholder

@@ -122,6 +122,9 @@ const BOOK_TITLE := 0
 
 var executed := 0               ## records run across every run() call
 var refused_op := -1            ## the opcode that caused the last refusal
+## F1: the quest origin for position-less CreateNPC -- the caller sets it
+## to the hero's cell before running quest hooks.
+var quest_origin := Vector2i.ZERO
 
 
 ## Runs one hook. `host` receives the effects and must implement
@@ -326,8 +329,10 @@ func _apply(rec: Dictionary, host: Object) -> void:
 				host.set_script_var(str(a[0][1]), int(a[1][1]))
 		OP_CREATE_NPC:
 			# QUEST shape: (string handle, i32 creature, string name, string
-			# task, i16, string art), NO POSITION -- the cell arrives from a
-			# later NPC_Goto against the handle.
+			# task, i16, string art), NO POSITION -- retail spawns the NPC
+			# at the QUEST ORIGIN (the hero's cell: quest 1's nun spawns on
+			# the hero and walks to her Goto target, displacing her via the
+			# creature push), and the later NPC_Goto then walks her.
 			# SECTOR shape (Sector50039Enter et al): (string handle -- the
 			# placeholder "NON_UNIQUE", i32 creature, VARIANT cell as an
 			# (x, y, 0) triple, i32 seed) -- the cell is INLINE and there is
@@ -339,7 +344,7 @@ func _apply(rec: Dictionary, host: Object) -> void:
 			elif a.size() >= 3:
 				host.create_npc(str(a[0][1]), int(a[1][1]), str(a[2][1]),
 					str(a[3][1]) if a.size() >= 4 else "",
-					str(a[5][1]) if a.size() >= 6 else "")
+					str(a[5][1]) if a.size() >= 6 else "", quest_origin)
 		OP_NPC_GOTO:
 			# (string handle, VARIANT cell). The cell is the (x, y, z) triple;
 			# z is 0 on every record read so far and is dropped HERE rather than

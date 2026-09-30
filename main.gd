@@ -3996,6 +3996,11 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 	var vm := ScriptVM.new()
 	var cast := QuestCast.new()
 	_quest_cast = cast   # E1: retained so Checkpoint.capture can read the live cast
+	# F1: position-less quest CreateNPC spawns at the hero's cell (retail's
+	# nun appears on the hero, and her Goto walk pushes the hero south).
+	vm.quest_origin = _retail_start
+	cast.quest_origin = _retail_start
+	cast.quest_origin = vm.quest_origin
 	if not vm.run(code, hook["offset"], hook["length"], cast):
 		# A REFUSAL IS REPORTED, NOT SWALLOWED. ScriptVM refuses a whole hook
 		# rather than skipping the opcode it cannot run, so this is "she is
