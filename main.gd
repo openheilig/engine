@@ -436,6 +436,12 @@ var _hud: Hud = null
 var _sectors = null                                  ## Sacred.Sectors
 var _sector_now := Vector2i(-1, -1)
 var _sector_env := {}                                ## the current sector's env
+## A0: retail's cMSS equivalent -- one looping stream, swapped on the same
+## sector-change condition _update_sector_env already implements. Id 0
+## inherits (retail's own guard), a resolved-but-missing file warns once.
+var _music_player: AudioStreamPlayer
+var _music_now := 0
+var _music_noaudio := false                          ## audio unavailable
 
 # Plan 05-08: crowd benchmark. Opt-in only -- _has_crowd stays false unless
 # --crowd= is literally present, so a bare "0" or a negative value still
@@ -4531,9 +4537,46 @@ func _update_sector_env(cell: Vector2) -> void:
 		return
 	if int(env["music"]) != 0:
 		_sector_env = env
+		_play_music(int(env["music"]))
 	print("sector-env\t%d,%d\tmusic=%d\tclimate=%d\tregion=%d\tatmo2=%d\tplaying=%d" % [
 		s.x, s.y, int(env["music"]), int(env["climate"]), int(env["region"]),
 		int(env["atmo2"]), int(_sector_env.get("music", 0))])
+
+
+## A0: play the sector's music id through the recovered table. Retail's
+## chain is getSndName -> cMSS::playMusic -> ".\MP3\<NAME>.ogg" lowercased
+## by the fopen wrapper; here that is install/mp3/<stem>.ogg streamed with
+## loop enabled. ATMO ids use the ambience bus volume, music ids the music
+## volume -- both retail's own branch. Failures warn once and stay quiet.
+func _play_music(id: int) -> void:
+	if _music_noaudio or id == _music_now:
+		return
+	_music_now = id
+	var rel: String = Sacred.SoundNames.ogg_relpath(id)
+	if rel.is_empty():
+		return  # getSndName's miss path: retail plays nothing.
+	if _music_player == null:
+		if AudioServer.get_bus_count() == 0:
+			_music_noaudio = true
+			return
+		_music_player = AudioStreamPlayer.new()
+		_music_player.bus = "Master"
+		add_child(_music_player)
+	var path := _install_ref.path_join(rel)
+	if not FileAccess.file_exists(path):
+		push_warning("music: %s is missing from the install" % rel)
+		return
+	var stream := AudioStreamOggVorbis.load_from_file(path)
+	if stream == null:
+		push_warning("music: %s did not decode" % rel)
+		return
+	stream.loop = true
+	_music_player.stream = stream
+	# The one volume branch retail makes: ATMO* on the ambience fader.
+	_music_player.volume_db = -10.0 if Sacred.SoundNames.is_atmo(id) else -6.0
+	_music_player.play()
+	print("music\tid=%d\tfile=%s\tatmo=%s\tplaying=%s"
+		% [id, rel, Sacred.SoundNames.is_atmo(id), _music_player.playing])
 
 
 ## Turns the hero to face where it is going.

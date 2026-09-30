@@ -19,6 +19,7 @@ extends RefCounted
 
 const Common := preload("res://formats/common.gd")
 const TextureFormat := preload("res://formats/texture.gd")
+const SoundNames := preload("res://formats/sound_names.gd")
 
 ## Layout constants -- re-exported from formats/common.gd.
 const SECT := Common.SECT
