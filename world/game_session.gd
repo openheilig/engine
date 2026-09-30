@@ -246,6 +246,10 @@ func snapshot() -> Dictionary:
 	snap["hero_skill_points"] = hero_skill_points
 	snap["hero_base_stk"] = hero_base_stk
 	snap["hero_base_rephy"] = hero_base_rephy
+	# W2: trigger states persist -- opened doors and selected storeys
+	# survive save/load (retail saves the whole trigger state table).
+	if sim != null and sim.interior != null:
+		snap["trigger_states"] = sim.interior.triggers.snapshot_states()
 	snap["schema"] = SCHEMA
 	return snap
 
@@ -271,6 +275,9 @@ func restore(snap: Dictionary) -> String:
 	hero_skill_points = maxi(0, int(snap.get("hero_skill_points", 0)))
 	hero_base_stk = int(snap.get("hero_base_stk", hero_base_stk))
 	hero_base_rephy = int(snap.get("hero_base_rephy", hero_base_rephy))
+	if sim != null and sim.interior != null \
+			and snap.get("trigger_states") is PackedInt32Array:
+		sim.interior.triggers.restore_states(snap["trigger_states"])
 	var p := registry.get_actor(player_id)
 	if p != null:
 		player_cell = p.cell

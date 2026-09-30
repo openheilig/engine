@@ -57,6 +57,28 @@ func replace_state(trigger_id: int, value: int) -> bool:
 		state_changed.emit(trigger_id, previous, value)
 	return true
 
+## W2: the whole state array for save/snapshot. 2268 u16 states -- trivial
+## to carry whole, and matching retail's own save-everything shape.
+func snapshot_states() -> PackedInt32Array:
+	var out := PackedInt32Array()
+	out.resize(count())
+	for i in count():
+		out[i] = _records.decode_u16(i * RECORD_SIZE + 10)
+	return out
+
+
+## Counterpart: restores every state exactly (replace_state keeps zero and
+## fires state_changed for the interior's bindings). False if the array is
+## the wrong size -- a partial restore would be a silently different world.
+func restore_states(states: PackedInt32Array) -> bool:
+	if states.size() != count():
+		push_error("Triggers: restore size %d != %d" % [states.size(), count()])
+		return false
+	for i in count():
+		replace_state(i, states[i])
+	return true
+
+
 ## Ordinary building setters: LGP 0x083A51DA / 0x083A5AC8, cross-build
 ## Win 0x00415F00 / 0x00416280. Interaction triggers (flags&0x44) additionally
 ## require the event/prerequisite/delayed-unlock systems, not implemented here.
