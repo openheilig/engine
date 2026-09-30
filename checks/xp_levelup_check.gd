@@ -40,16 +40,21 @@ func _init() -> void:
 	s.award_xp(10000)
 	expect(s.hero_level >= 3, "XP %d should be past threshold(2)" % s.hero_xp)
 
+	# --- skill points award on level-up ---
+	expect(s.hero_skill_points > 0, "level-up must award skill points")
+	var sp_at_level2 := s.hero_skill_points
 	# --- save/load roundtrip preserves level and XP ---
 	var snap := s.snapshot()
 	var s2 := GameSession.new_game(install, Vector2(3236.5, 2511.5))
 	expect(s2.hero_level == 1, "fresh session starts at level 1")
+	expect(s2.hero_skill_points == 0, "fresh session starts with 0 skill points")
 	if s2.restore(snap) != "":
 		fails += 1
 		printerr("restore failed")
 	expect(s2.hero_level == s.hero_level, "level must survive roundtrip")
 	expect(s2.hero_xp == s.hero_xp, "XP must survive roundtrip")
 	expect(s2.player_hp_max == s.player_hp_max, "max HP must survive roundtrip")
+	expect(s2.hero_skill_points == s.hero_skill_points, "skill points must survive roundtrip")
 
 	print("xp_levelup_check\tOK\tlevel=%d\txp=%d\thp_max=%d"
 		% [s.hero_level, s.hero_xp, s.player_hp_max])

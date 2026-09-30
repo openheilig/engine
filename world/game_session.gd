@@ -49,6 +49,7 @@ var player_hp := 0
 var player_hp_max := 0
 var hero_level: int = 1
 var hero_xp: int = 0
+var hero_skill_points: int = 0
 var hero_base_stk: int = 0
 var hero_base_rephy: int = 0
 var tick := 0
@@ -109,6 +110,10 @@ func award_xp(amount: int) -> void:
 		var old_fraction := 1.0 if player_hp_max <= 0 \
 			else float(player_hp) / float(player_hp_max)
 		hero_level = new_level
+		# One skill point per level (a port decision; retail's exact
+		# per-level skill-point curve is un-decoded, the LEVELUP block
+		# shows the field exists but its rate is a named next step).
+		hero_skill_points += 1
 		player_hp_max = ActorStats.max_hp(
 			hero_base_stk, hero_base_rephy, hero_base_stk, hero_base_rephy,
 			hero_level)
@@ -238,6 +243,7 @@ func snapshot() -> Dictionary:
 	snap[SCHEMA_KEY_ITEMS] = items.snapshot()
 	snap["hero_level"] = hero_level
 	snap["hero_xp"] = hero_xp
+	snap["hero_skill_points"] = hero_skill_points
 	snap["hero_base_stk"] = hero_base_stk
 	snap["hero_base_rephy"] = hero_base_rephy
 	snap["schema"] = SCHEMA
@@ -262,6 +268,7 @@ func restore(snap: Dictionary) -> String:
 	# C3: hero progression persists with the session.
 	hero_level = maxi(1, int(snap.get("hero_level", 1)))
 	hero_xp = maxi(0, int(snap.get("hero_xp", 0)))
+	hero_skill_points = maxi(0, int(snap.get("hero_skill_points", 0)))
 	hero_base_stk = int(snap.get("hero_base_stk", hero_base_stk))
 	hero_base_rephy = int(snap.get("hero_base_rephy", hero_base_rephy))
 	var p := registry.get_actor(player_id)
