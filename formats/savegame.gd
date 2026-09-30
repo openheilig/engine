@@ -161,6 +161,58 @@ func engine() -> Dictionary:
 		"end_sentinel": end_sentinel == 0xFACEDEAD}
 
 
+
+
+## X1: the 0x8D inventory section (raw, 142,341 bytes on the shipped
+## save), decoded per the byte-validated layout (tmp/x1-saves/inventory.md):
+## u32 count (32), then count records of {u32 0xDEADC0DE sentinel + 4436
+## fixed bytes + quest/scroll arrays} + u8 terminator. Each record's 20x8
+## item grid holds 256 12-byte slots {u32 objectRef, u8 x, u8 y, u8 count,
+## u8 pad, u16 value}; ref 0 = empty. Returns {} when absent.
+func inventory() -> Array:
+	var b := section(SEC_INVENTORY)
+	if b.size() < 8:
+		return []
+	var count := b.decode_u32(0)
+	var out: Array = []
+	var p := 4
+	for k in count:
+		if p + 4 > b.size() or b.decode_u32(p) != 0xDEADC0DE:
+			return out  # desync: report what walked so far
+		p += 4
+		var rec: Dictionary = {"owner_slot": b.decode_u16(p), "grid_w": 0,
+			"grid_h": 0, "items": []}
+		# header u16s at +0..+11: owner, flags, ?, ?, gridW, gridH
+		rec["grid_w"] = b.decode_u16(p + 8)
+		rec["grid_h"] = b.decode_u16(p + 10)
+		# item grid: 256 12-byte slots at fixed offset +4020 within the
+		# record's fixed block (4436 = 12 header + 1024 blob + 3072 grid
+		# + 120 equipment + 200 blob + 8 u32s -- grid at +12+1024 = +1036
+		# from the fixed-block start, i.e. p+12+1024 after the sentinel).
+		var grid := p + 12 + 1024
+		for s in 256:
+			var base := grid + s * 12
+			var ref := b.decode_u32(base)
+			if ref == 0:
+				continue
+			rec["items"].append({"ref": ref,
+				"x": b[base + 4], "y": b[base + 5], "count": b[base + 6],
+				"value": b.decode_u16(base + 10)})
+		out.append(rec)
+		# advance: 4436 fixed + quest array (u32 n + n*8) + scroll array
+		# (u32 n + n*4)
+		p += 4436
+		if p + 4 > b.size():
+			return out
+		var nq := b.decode_u32(p)
+		p += 4 + 8 * nq
+		if p + 4 > b.size():
+			return out
+		var ns := b.decode_u32(p)
+		p += 4 + 4 * ns
+	return out
+
+
 ## X1: the 0xC3 hero blob decoder, transcribed from game01.pak's real
 ## bytes: +0 u32 (slot/count, 2 on the shipped save), +4 u32 class type
 ## (1 = Seraphim, the GetTypeName numbering), +8 a fixed-width UTF-16LE

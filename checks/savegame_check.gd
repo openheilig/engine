@@ -35,10 +35,10 @@ func _init() -> void:
 
 	# The 0xC3 hero blob decodes: the shipped save's hero is "Seraphim",
 	# class type 1 (GetTypeName numbering).
-	var hero: Dictionary = sg.hero_blob()
-	expect(String(hero.get("name", "")) == "Seraphim",
-		"hero name %s, expected Seraphim" % hero.get("name"))
-	expect(int(hero.get("class_type", 0)) == 1, "hero class type must be 1")
+	var blob_hero: Dictionary = sg.hero_blob()
+	expect(String(blob_hero.get("name", "")) == "Seraphim",
+		"hero name %s, expected Seraphim" % blob_hero.get("name"))
+	expect(int(blob_hero.get("class_type", 0)) == 1, "hero class type must be 1")
 
 	# The calendar: structural fields and the 0xDEADC0DE end sentinel.
 	var cal: Dictionary = sg.calendar()
@@ -62,6 +62,24 @@ func _init() -> void:
 			% walk.get("walked"))
 	expect(int(walk.get("families", {}).get(3, 0)) == 170,
 		"family 3 count %s, expected 170" % walk.get("families", {}).get(3))
+
+	# The 0x8D inventory: 32 creatures; the hero's grid holds her 4
+	# starting items (refs 0x13-0x16) in a 20x8 grid.
+	var inv: Array = sg.inventory()
+	expect(inv.size() == 32, "inventory creatures %d, expected 32" % inv.size())
+	# Creature 0's grid is empty; the HERO is the record with owner slot 1.
+	var hero: Dictionary = {}
+	for rec in inv:
+		if int(rec.get("owner_slot", -1)) == 1:
+			hero = rec
+	expect(not hero.is_empty(), "the owner-slot-1 hero record must exist")
+	expect(int(hero.get("grid_w", 0)) == 20 and int(hero.get("grid_h", 0)) == 8,
+		"hero grid %sx%s, expected 20x8" % [hero.get("grid_w"), hero.get("grid_h")])
+	var refs: Array = []
+	for it in hero["items"]:
+		refs.append(int(it["ref"]))
+	for want in [0x13, 0x14, 0x15, 0x16]:
+		expect(refs.has(want), "hero grid must carry object ref 0x%x" % want)
 
 	# A nonexistent section reads empty.
 	expect(sg.section(0x77).is_empty(), "unknown section reads empty")
