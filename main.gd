@@ -387,6 +387,8 @@ var _campaign := ""
 var _start_template := START_TEMPLATE
 ## U0: the inventory panel (I toggles it).
 var _inventory_panel: Sacred.InventoryPanel
+## M1: UI text scale (--ui-scale, 0.5..3.0).
+var _ui_scale := 1.0
 ## S1: the Seraphim vectoren + funkcode for the sector scheduler, and the
 ## visited-sector set that decides Init vs Enter.
 var _sector_vec: Sacred.Vectoren
@@ -746,6 +748,9 @@ func _ready() -> void:
 			_save_path = a.trim_prefix("--save=")
 		elif a.begins_with("--load="):
 			_load_path = a.trim_prefix("--load=")
+		elif a.begins_with("--ui-scale="):
+			# M1: scale the text surfaces (inventory panel) for readability.
+			_ui_scale = clampf(float(a.trim_prefix("--ui-scale=")), 0.5, 3.0)
 		elif a.begins_with("--mod="):
 			# D1: a data mod is a directory of replaced pak files overlaid on
 			# the install by relative path. Set before any reader opens.
@@ -4621,6 +4626,7 @@ func _build_hud(tex_pak) -> void:
 				break
 	print("hud\tpieces=%d\tmissing=%s" % [_hud.drawn, _hud.missing])
 	_inventory_panel = Sacred.InventoryPanel.new()
+	_inventory_panel.scale_text(_ui_scale)
 	add_child(_inventory_panel)
 	# M1: F11 toggles windowed fullscreen; the view is orthographic at a
 	# fixed zoom, so a mode switch needs no re-layout.

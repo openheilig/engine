@@ -15,12 +15,22 @@ func _init() -> void:
 	_label = Label.new()
 	_label.position = Vector2(16, 64)
 	_label.size = Vector2(360, 400)
-	_label.add_theme_font_size_override("font_size", 14)
+	_label.add_theme_font_size_override("font_size", _font_size)
 	_label.add_theme_color_override("font_color", Color(1, 0.95, 0.8))
 	_label.add_theme_color_override("font_outline_color", Color(0, 0, 0))
 	_label.add_theme_constant_override("outline_size", 4)
 	add_child(_label)
 	visible = false
+
+
+var _font_size := 14
+
+
+## M1: scale the panel's text for readability.
+func scale_text(factor: float) -> void:
+	_font_size = int(14.0 * factor)
+	if _label != null:
+		_label.add_theme_font_size_override("font_size", _font_size)
 
 
 func toggle() -> void:
