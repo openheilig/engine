@@ -1147,6 +1147,10 @@ func _process(delta: float) -> void:
 		_view.stream(delta)
 	if not _probe_active and not _replay_active:
 		_advance_sim(delta, _focus_cell())
+	# Arrival pickups consume after the tick that moved the hero, so the
+	# same frame's view sees the item already in inventory.
+	if _session != null:
+		_session.after_tick()
 	# Plan 04-03 Task 2: --noplayer means no player at all, not just an
 	# invisible one -- the camera must keep behaving exactly as it does today
 	# (Task 2's own reference-capture regression: --sector=50,50 with the

@@ -123,6 +123,44 @@ func drop_item(instance_id: int, cell: Vector2i, by_actor: int = player_id) -> S
 	return items.transfer(instance_id, ItemInstances.Location.GROUND, 0, -1, cell)
 
 
+## C2, arrival-based pickup: clicking an item's cell routes a WALK to that
+## cell plus a pending pickup that executes when the path completes. The
+## goal and the pending id are one command; `after_tick` (called by the
+## composition root after each sim advance) completes it.
+const NO_PICKUP := 0
+var pending_pickup_id: int = NO_PICKUP
+
+
+func request_pickup(instance_id: int) -> String:
+	var i := items.instance(instance_id)
+	if i == null:
+		return "no instance %d" % instance_id
+	if i.location != ItemInstances.Location.GROUND:
+		return "instance %d is not on the ground" % instance_id
+	pending_pickup_id = instance_id
+	move_command(Vector2i(i.cell.x, i.cell.y))
+	return ""
+
+
+## The composition root calls this after each sim advance. Consumes the
+## pending pickup when the hero has arrived at the item's cell.
+func after_tick() -> void:
+	if pending_pickup_id == NO_PICKUP:
+		return
+	var i := items.instance(pending_pickup_id)
+	if i == null:
+		pending_pickup_id = NO_PICKUP
+		return
+	var hero := registry.get_actor(player_id)
+	if hero == null:
+		return
+	if hero.cell.distance_to(Vector2(i.cell.x + 0.5, i.cell.y + 0.5)) <= 1.5:
+		var err := pickup_item(pending_pickup_id)
+		pending_pickup_id = NO_PICKUP
+		if err != "":
+			push_warning("arrival pickup refused: %s" % err)
+
+
 func _as_session_dict() -> Dictionary:
 	return {"registry": registry, "quest_log": quest_log,
 		"player_id": player_id, "tick": tick, "tick_hz": tick_hz}
