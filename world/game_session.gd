@@ -236,6 +236,10 @@ func _as_session_dict() -> Dictionary:
 func snapshot() -> Dictionary:
 	var snap := SaveState.snapshot(_as_session_dict())
 	snap[SCHEMA_KEY_ITEMS] = items.snapshot()
+	snap["hero_level"] = hero_level
+	snap["hero_xp"] = hero_xp
+	snap["hero_base_stk"] = hero_base_stk
+	snap["hero_base_rephy"] = hero_base_rephy
 	snap["schema"] = SCHEMA
 	return snap
 
@@ -255,6 +259,11 @@ func restore(snap: Dictionary) -> String:
 	# v1 saves predate item instances entirely. v2+ carries them.
 	if int(snap.get("schema", 1)) >= SCHEMA:
 		items = ItemInstances.from_snapshot(snap.get(SCHEMA_KEY_ITEMS, []))
+	# C3: hero progression persists with the session.
+	hero_level = maxi(1, int(snap.get("hero_level", 1)))
+	hero_xp = maxi(0, int(snap.get("hero_xp", 0)))
+	hero_base_stk = int(snap.get("hero_base_stk", hero_base_stk))
+	hero_base_rephy = int(snap.get("hero_base_rephy", hero_base_rephy))
 	var p := registry.get_actor(player_id)
 	if p != null:
 		player_cell = p.cell
