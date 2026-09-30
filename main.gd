@@ -4638,12 +4638,69 @@ func _run_sector_scripts(s: Vector2i) -> void:
 		return
 	var phase := "Init" if first else "Enter"
 	var n := 0
-	for p in cast.placed():
+	var placed := cast.placed()
+	var ids: Array[int] = []
+	for p in placed:
 		var id := _registry.spawn(int(p["creature"]),
 			Vector2(p["cell"]) + Vector2(0.5, 0.5), 40, 40)
+		ids.append(id if id > 0 else 0)
 		if id > 0:
 			n += 1
 	print("sector-script\tsector=%s\tphase=%s\tspawned=%d" % [s, phase, n])
+	if n > 0:
+		if _scripted_models == null and _install_ref != "":
+			var mpak := Sacred.Pak.new(_install_ref.path_join("pak/models.pak"))
+			if mpak.is_open():
+				_scripted_models = Sacred.Models.new(mpak)
+		if _scripted_models != null:
+			_spawn_sector_views(placed, ids, _scripted_models, _shadow_items, _tex_pak_ref)
+
+
+## S1/W2: rig views for the sector scheduler's runtime spawns -- the same
+## pipeline _build_quest_cast uses (mesh resolve, one shared Rigs decode,
+## rest_clip idle, cell-desynchronised seek), driven by actor ids instead of
+## cast handles. Appended to _creature_views so the tree frees them by the
+## established route.
+func _spawn_sector_views(placed: Array, ids: Array[int], models: Sacred.Models,
+		items: Sacred.Items, tex_pak: Sacred.Pak) -> void:
+	if _scripted_models == null:
+		return
+	var wanted := PackedInt32Array()
+	var resolved: Array[Dictionary] = []
+	for j in placed.size():
+		var e: Dictionary = placed[j]
+		if j >= ids.size() or ids[j] == 0:
+			continue
+		var nm: String = items.name_of(int(e["creature"]))
+		var mi: int = models.index_of(nm) if nm != "" else -1
+		if mi < 0:
+			continue
+		resolved.append({"type": int(e["creature"]), "name": nm, "mesh": mi,
+			"cell": Vector2(e["cell"]) + Vector2(0.5, 0.5), "actor": ids[j]})
+		if not wanted.has(mi):
+			wanted.append(mi)
+	if resolved.is_empty():
+		return
+	var rigs: Sacred.Rigs = Sacred.Rigs.new(models, wanted)
+	for pick: Dictionary in resolved:
+		var pv := PlayerView.new(models, pick["name"], tex_pak,
+			PackedStringArray(), items.texture_of(int(pick["type"])))
+		if pv.node == null:
+			continue
+		add_child(pv.node)
+		var cell: Vector2 = pick["cell"]
+		pv.update(cell)
+		pv.configure_actor(int(pick["type"]), items, _shadow_creatures)
+		_update_native_actor(pv, cell, Vector2.ZERO,
+			_sim.interior.initial_support_ref(Vector2i(cell), pv.actor_type, 0))
+		_creature_views.append(pv)
+		_creature_cells.append(cell)
+		var ci: int = rigs.rest_clip(pick["mesh"])
+		var mv := pv.node as ModelView
+		if mv != null and ci >= 0 and mv.play_clip(models, ci):
+			mv.seek_anim(fmod(absf(cell.x * 7.0 + cell.y * 13.0),
+				maxf(0.001, mv.anim_length)))
+	print("sector-views\tbuilt=%d" % resolved.size())
 
 
 ## Turns the hero to face where it is going.
