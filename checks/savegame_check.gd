@@ -53,6 +53,16 @@ func _init() -> void:
 	expect(String(eng.get("world_path", "")).begins_with("WORLD"),
 		"engine world path %s" % eng.get("world_path"))
 
+	# The 0xA0 objects walk: compression, header, and the 274-object prefix.
+	var walk: Dictionary = sg.walk_objects()
+	expect(int(walk.get("count", 0)) == 1553,
+		"object slots %d, expected 1553" % walk.get("count"))
+	expect(int(walk.get("walked", 0)) == 274,
+		"walked %d objects, expected 274 (slot-384 desync)"
+			% walk.get("walked"))
+	expect(int(walk.get("families", {}).get(3, 0)) == 170,
+		"family 3 count %s, expected 170" % walk.get("families", {}).get(3))
+
 	# A nonexistent section reads empty.
 	expect(sg.section(0x77).is_empty(), "unknown section reads empty")
 

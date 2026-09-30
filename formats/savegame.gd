@@ -55,7 +55,14 @@ func _init(path: String) -> void:
 	found = true
 
 
+const COMPRESSED: PackedInt32Array = [SEC_OBJECTS, SEC_SCRIPTS, SEC_PARTICLES]
+const ZLIB_MAGIC := 0xBAADC0DE
+
+
 ## The section bytes for `id`, or an empty buffer when absent.
+## 0xA0/0xA1/0xA2 are zlib-compressed on disk: [0xBAADC0DE][csize][24
+## zeros][zlib stream]; the index size is the UNCOMPRESSED size
+## (X1ObjectsRE). Other sections are raw.
 func section(id: int) -> PackedByteArray:
 	if not sections.has(id):
 		return PackedByteArray()
@@ -64,7 +71,54 @@ func section(id: int) -> PackedByteArray:
 		return PackedByteArray()
 	var where: Vector2i = sections[id]
 	f.seek(where.x)
-	return f.get_buffer(where.y)
+	if not COMPRESSED.has(id):
+		return f.get_buffer(where.y)
+	if f.get_32() != ZLIB_MAGIC:
+		push_error("Savegame: section 0x%02x lacks the compressed framing" % id)
+		return PackedByteArray()
+	var csize := f.get_32()
+	f.seek(f.get_position() + 24)  # reserved zeros; the stream starts at +0x20
+	return f.get_buffer(csize).decompress(where.y, FileAccess.COMPRESSION_DEFLATE)
+
+
+## X1: a skeleton walk of the 0xA0 OBJECTS section. Returns
+## {count, walked, families, desync_slot} -- bodies are skipped by
+## dword-scanning for the 0xDEADC0DE end marker, which desyncs when a body
+## embeds that value as data (slot 384 on the shipped save; the rigorous
+## skip needs per-family sizes from the factory table).
+func walk_objects() -> Dictionary:
+	var payload := section(SEC_OBJECTS)
+	if payload.is_empty():
+		return {}
+	var p := 0
+	if payload.decode_u32(p) != 0x80:
+		return {}
+	p += 4
+	var count := payload.decode_u32(p)
+	p += 4
+	var families: Dictionary = {}
+	var walked := 0
+	var desync := -1
+	for i in count:
+		if p + 4 > payload.size():
+			desync = i; break
+		var family := payload.decode_u32(p)
+		p += 4
+		if family == 0:
+			continue
+		if p + 4 > payload.size() or payload.decode_u32(p) != 0xBAADBEEF:
+			desync = i; break
+		p += 4
+		var scan := p
+		while scan + 4 <= payload.size() and payload.decode_u32(scan) != 0xDEADC0DE:
+			scan += 4
+		if scan + 4 > payload.size():
+			desync = i; break
+		families[family] = int(families.get(family, 0)) + 1
+		walked += 1
+		p = scan + 4
+	return {"count": count, "walked": walked, "families": families,
+		"desync_slot": desync}
 
 
 func has_section(id: int) -> bool:
