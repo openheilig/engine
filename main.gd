@@ -387,6 +387,15 @@ var _inventory_panel: Sacred.InventoryPanel
 var _sector_vec: Sacred.Vectoren
 var _sector_funkcode := PackedByteArray()
 var _sectors_visited: Dictionary[Vector2i, bool] = {}
+## A0-followup: the fight-music state machine (cMSS::update sub_84E06E8's
+## shape). Hostile count over living combat-capable actors; start after the
+## >1 s cooldown; end plays a fight-over jingle then restores sector music.
+var _fight_music_active := false
+var _fight_cooldown := 0.0
+## Fight-track table @0x880DB40 (6537 absent from the name table -- retail
+## bug preserved by excluding it).
+const FIGHT_TRACKS: PackedInt32Array = [6530, 6531, 6532, 6533, 6534, 6535, 6564, 6565, 6536, 6709, 6708]
+const JINGLE_FIGHT_OVER: PackedInt32Array = [6570, 6571, 6572, 6573, 6574]
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
 ## --hideplayer: build the player view and keep the camera following it
 ## exactly like the ordinary case, but never make its mesh visible. A
@@ -1234,6 +1243,9 @@ func _process(delta: float) -> void:
 			print("hero-death\tcell=%s\thp=%d\tlevel=%d"
 				% [hp.cell if hp != null else Vector2.ZERO,
 					hp.hp if hp != null else 0, _session.hero_level])
+	# A0-followup: the fight-music state machine.
+	if _session != null and _registry != null:
+		_update_fight_music(delta)
 	# C2: rebuild loot views after a kill drop or a pickup consumption.
 	if _loot_dirty:
 		_sync_loot_views()
@@ -4727,6 +4739,57 @@ func _spawn_sector_views(placed: Array, ids: Array[int], models: Sacred.Models,
 			mv.seek_anim(fmod(absf(cell.x * 7.0 + cell.y * 13.0),
 				maxf(0.001, mv.anim_length)))
 	print("sector-views\tbuilt=%d" % resolved.size())
+
+
+## A0-followup: cMSS::update's fight-music shape. Hostile = a living actor
+## that is not the hero and carries combat metas (the encounter sets at/pa).
+## Start: count > 0 after the >1 s cooldown, a random fight track. End:
+## count 0 while the flag is up -- a random fight-over jingle, then the
+## sector music restores when the jingle finishes.
+func _update_fight_music(delta: float) -> void:
+	_fight_cooldown = maxf(0.0, _fight_cooldown - delta)
+	var hostiles := 0
+	for aid in _registry.ids():
+		var a: ActorState = _registry.get_actor(int(aid))
+		if a == null or a.id == _player_id 				or (a.flags & ActorState.FLAG_ALIVE) == 0:
+			continue
+		if a.has_meta("at"):
+			hostiles += 1
+	if _fight_music_active:
+		if hostiles == 0:
+			_fight_music_active = false
+			_play_music_id(JINGLE_FIGHT_OVER[randi() % JINGLE_FIGHT_OVER.size()],
+				false, _play_sector_music)
+	elif hostiles > 0 and _fight_cooldown <= 0.0:
+		_fight_music_active = true
+		_fight_cooldown = 1.0
+		_play_music_id(FIGHT_TRACKS[randi() % FIGHT_TRACKS.size()], true)
+
+
+func _play_music_id(id: int, loop: bool, on_done: Callable = Callable()) -> void:
+	if _music_noaudio or _music_player == null:
+		return
+	var rel: String = Sacred.SoundNames.ogg_relpath(id, _install_ref)
+	if rel.is_empty():
+		return
+	var path := _install_ref.path_join(rel)
+	if not FileAccess.file_exists(path):
+		return
+	var stream := AudioStreamOggVorbis.load_from_file(path)
+	if stream == null:
+		return
+	stream.loop = loop
+	if on_done.is_valid():
+		if not _music_player.finished.is_connected(on_done):
+			_music_player.finished.connect(on_done, CONNECT_ONE_SHOT)
+	_music_player.stream = stream
+	_music_player.play()
+
+
+func _play_sector_music() -> void:
+	if _sector_env.has("music"):
+		_fight_cooldown = 1.0
+		_play_music(int(_sector_env["music"]))
 
 
 ## Turns the hero to face where it is going.
