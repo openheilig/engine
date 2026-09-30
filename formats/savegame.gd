@@ -69,3 +69,27 @@ func section(id: int) -> PackedByteArray:
 
 func has_section(id: int) -> bool:
 	return sections.has(id)
+
+
+## X1: the 0xC3 hero blob decoder, transcribed from game01.pak's real
+## bytes: +0 u32 (slot/count, 2 on the shipped save), +4 u32 class type
+## (1 = Seraphim, the GetTypeName numbering), +8 a fixed-width UTF-16LE
+## name. Returns {} when the section is absent.
+func hero_blob() -> Dictionary:
+	var b := section(SEC_HERO_BLOB)
+	if b.size() < 12:
+		return {}
+	var name := ""
+	var start := 8
+	var end := b.size()
+	# The name runs until a UTF-16 zero terminator (the rest of the blob is
+	# portart/face data).
+	var i := start
+	while i + 1 < end:
+		if b[i] == 0 and b[i + 1] == 0:
+			name = b.slice(start, i).get_string_from_utf16()
+			break
+		i += 2
+	if name == "":
+		name = b.slice(start, end).get_string_from_utf16()
+	return {"count": b.decode_u32(0), "class_type": b.decode_u32(4), "name": name}

@@ -33,6 +33,13 @@ func _init() -> void:
 	expect(blob.size() == 556 and blob.count(0) < blob.size(),
 		"the hero blob must carry content")
 
+	# The 0xC3 hero blob decodes: the shipped save's hero is "Seraphim",
+	# class type 1 (GetTypeName numbering).
+	var hero: Dictionary = sg.hero_blob()
+	expect(String(hero.get("name", "")) == "Seraphim",
+		"hero name %s, expected Seraphim" % hero.get("name"))
+	expect(int(hero.get("class_type", 0)) == 1, "hero class type must be 1")
+
 	# A nonexistent section reads empty.
 	expect(sg.section(0x77).is_empty(), "unknown section reads empty")
 
