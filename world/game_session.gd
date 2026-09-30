@@ -119,6 +119,43 @@ func award_xp(amount: int) -> void:
 			p.hp_max = player_hp_max
 
 
+## C3: checks whether the hero has died (HP reached 0). Sets the death
+## flag; `respawn_hero()` is the recovery path.
+var hero_dead := false
+
+
+## Call after each sim advance (or after combat damage). When the hero's
+## HP reaches 0, clears FLAG_ALIVE and sets the death flag.
+func check_hero_death() -> void:
+	if hero_dead:
+		return
+	var p := registry.get_actor(player_id)
+	if p == null:
+		return
+	if p.hp <= 0:
+		p.hp = 0
+		p.flags &= ~ActorState.FLAG_ALIVE
+		hero_dead = true
+
+
+## C3: respawns the hero at `cell` with full HP, clearing the death flag.
+## The cell is the composition root's start cell; the session doesn't
+## own it. Returns "" on success.
+func respawn_hero(cell := Vector2.ZERO) -> String:
+	if not hero_dead:
+		return "hero is not dead"
+	var p := registry.get_actor(player_id)
+	if p == null:
+		return "player_id %d does not resolve" % player_id
+	p.flags |= ActorState.FLAG_ALIVE
+	p.hp = player_hp_max
+	if cell != Vector2.ZERO:
+		p.cell = cell
+		player_cell = cell
+	hero_dead = false
+	return ""
+
+
 ## Spawns a fresh item instance on the ground at `cell`. Returns the
 ## instance id (<= 0 on refusal -- items.pak definitions are not validated
 ## here; the definition reader owns that).
