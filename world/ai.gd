@@ -25,6 +25,11 @@ var attack_count: int = 0
 ## session connects this to award XP, drop loot, advance the quest — the
 ## B1→C2→C3 wiring point.
 var on_target_killed: Callable = Callable()
+## B2: when valid, the swing is delegated entirely (e.g. Encounter.strike,
+## which owns to-hit, damage, kill and quest completion). The brain keeps
+## range/cooldown pacing and the kill callback never fires from a delegated
+## swing — the delegate owns its own kill follow-up.
+var attack_delegate: Callable = Callable()
 
 
 func setup(hostile_id: int, target: int, range_cells: float, cooldown_s: float) -> void:
@@ -64,6 +69,10 @@ func step(sim: Sim, reg: ActorRegistry, dt: float) -> void:
 	if cooldown_remaining > 0.0:
 		return
 	cooldown_remaining = attack_cooldown
+	if attack_delegate.is_valid():
+		# The delegate owns to-hit, damage, kill and its own follow-up.
+		attack_delegate.call()
+		return
 	_attack(reg, actor, target)
 
 

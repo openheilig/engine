@@ -1704,35 +1704,42 @@ func _begin_encounter(install: String, items) -> void:
 				hero_actor.set_meta("at", _encounter.hero_at)
 				hero_actor.set_meta("pa", _encounter.foe_pa)
 				hero_actor.set_meta("raw_damage", 7.0)
-			_hero_brain = hero_brain
-			# C3: the hero's kill awards XP through the session and drops
-			# loot. This is the B1→C2→C3 wiring point in the PRODUCTION
-			# path (kill_reward_check proves the same wiring in isolation).
-			var foe_cell := Vector2.ZERO
-			var foe_actor := _registry.get_actor(_encounter.foe_id)
-			if foe_actor != null:
-				foe_cell = foe_actor.cell
+			# C3/B2 kill follow-up, in the delegate's scope: XP through the
+			# real Progression formulas, loot at the kill location, quest
+			# OnExit via strike() itself. (kill_reward_check proves the same
+			# wiring in isolation; encounter_check proves strike's finish.)
 			var exp_value: int = _encounter.foe_exp
-			var install_ref := install
 			var session_ref := _session
-			_hero_brain.on_target_killed = func(killed_id: int, killer_id: int) -> void:
-				if session_ref != null:
-					session_ref.award_xp(exp_value)
-				var loc := _registry.get_actor(killed_id)
-				var cell := Vector2i(3236, 2511)
-				if loc != null:
-					cell = Vector2i(int(loc.cell.x), int(loc.cell.y))
-				if session_ref != null:
-					# C2: loot drops at the kill location (same wiring the
-					# kill_reward_check proves in isolation).
-					session_ref.spawn_item_ground(7442, cell)
-				_loot_dirty = true
-				# W2/S1: the brain-kill bypasses strike(), so the quest's
-				# OnExit must run here (encounter_check proves the seam).
-				if _encounter != null:
-					_encounter.finish()
-				print("kill\tid=%d\tkiller=%d\txp=%d\tcell=%d,%d"
-					% [killed_id, killer_id, exp_value, cell.x, cell.y])
+			_hero_brain = hero_brain
+			# B2: the hero's delegated swing goes through Encounter.strike,
+			# which owns to-hit, damage, the kill, the quest's OnExit and
+			# the art bookkeeping — the one retail-shaped combat path. The
+			# brain keeps approach/cooldown pacing.
+			var rng := RandomNumberGenerator.new()
+			var encounter_ref := _encounter
+			hero_brain.attack_delegate = func() -> void:
+				if encounter_ref == null:
+					return
+				var art := 0
+				for a in encounter_ref.hero_arts:
+					if encounter_ref.art_ready(int(a["id"])):
+						art = int(a["id"])
+						break
+				var r: Dictionary = encounter_ref.strike(rng, art)
+				if bool(r.get("killed", false)):
+					if session_ref != null:
+						session_ref.award_xp(exp_value)
+					var foe_actor2 := _registry.get_actor(encounter_ref.foe_id)
+					var kc := Vector2i(3236, 2511)
+					if foe_actor2 != null:
+						kc = Vector2i(int(foe_actor2.cell.x), int(foe_actor2.cell.y))
+					if session_ref != null:
+						# C2: loot at the kill location (stand-in definition
+						# until the E2 ITEM gate lands).
+						session_ref.spawn_item_ground(7442, kc)
+					_loot_dirty = true
+					print("kill\tid=%d\tkiller=%d\txp=%d\tcell=%d,%d\tart=%d"
+						% [encounter_ref.foe_id, _player_id, exp_value, kc.x, kc.y, art])
 	# The hero's first assigned art draws its slot from the art's own element
 	# triple (row 1043 / sub_85E676A) -- NOT from the loose icon texture. The
 	# element names route it to the skill or spell column; an art with no

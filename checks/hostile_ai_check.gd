@@ -103,6 +103,28 @@ func _init() -> void:
 			swings_after_death += 1
 	expect(swings_after_death == 0, "hostile must not attack a dead target")
 
-	print("hostile_ai_check\tOK\tapproach=%f->%f\thp=%d->%d"
-		% [start_dist, approach_dist, hp_before, hp_after])
+	# --- delegated swing: the delegate owns to-hit/damage entirely ---
+	var delegate_swings := [0]
+	var brain2 := HostileBrain.new()
+	brain2.setup(foe_id, hero_id, ATTACK_RANGE, 0.05)
+	brain2.attack_delegate = func() -> void:
+		delegate_swings[0] += 1
+		hero.hp = hero.hp - 1  # the delegate owns the swing's effect
+	hero.flags |= ActorState.FLAG_ALIVE
+	hero.hp = 100
+	foe.flags |= ActorState.FLAG_ALIVE
+	foe.hp = 10
+	for i in 60:
+		sim.advance(sim.tick_dt(), reg, hero.cell)
+		brain2.step(sim, reg, 1.0 / 30.0)
+	# 60 ticks at 0.05 s cooldown: the delegate gates the swings, so the
+	# count must be far below 60 and the brain's own combat must not run
+	# (hero HP exactly 100 - delegate damage, none from the kernel path).
+	expect(delegate_swings[0] > 0 and delegate_swings[0] < 60,
+		"delegate swung %d times in 60 ticks -- pacing or gating broken"
+		% delegate_swings[0])
+	expect(hero.hp < 100, "delegate must own the damage")
+
+	print("hostile_ai_check\tOK\tapproach=%f->%f\thp=%d->%d\tdelegated=%d"
+		% [start_dist, approach_dist, hp_before, hp_after, delegate_swings[0]])
 	finish(1 if fails > 0 else 0)
