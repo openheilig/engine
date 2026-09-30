@@ -36,10 +36,12 @@ func setup(hostile_id: int, target: int, range_cells: float, cooldown_s: float) 
 	attack_count = 0
 
 
-## One sim tick. Moves toward the target if out of range (by setting the
-## hostile's heading — the sim's sweep moves all in-radius actors); attacks
-## if in range and the cooldown has expired. Dead targets are never
-## attacked.
+## One sim tick. Moves toward the target if out of range (walkable-check
+## steering: try the direct heading first, then ±30°, ±60°, ±90° offsets —
+## the first walkable direction wins). Attacks if in range and the cooldown
+## has expired. Dead targets are never attacked.
+## The sim's sweep moves every in-radius actor, so setting the hostile's
+## heading is sufficient for movement.
 func step(sim: Sim, reg: ActorRegistry, dt: float) -> void:
 	var actor := reg.get_actor(actor_id)
 	var target := reg.get_actor(target_id)
@@ -52,12 +54,7 @@ func step(sim: Sim, reg: ActorRegistry, dt: float) -> void:
 
 	var dist := actor.cell.distance_to(target.cell)
 	if dist > attack_range:
-		# Approach: set heading toward the target. The sim's sweep moves
-		# every in-radius actor, not just the focus, so this works for the
-		# hostile without touching the hero's own path window.
-		var dir := target.cell - actor.cell
-		if dir.length_squared() > 0.0001:
-			actor.heading = dir.normalized()
+		_approach(sim, reg, actor, target)
 		cooldown_remaining = maxf(0.0, cooldown_remaining - dt)
 		return
 
@@ -68,6 +65,30 @@ func step(sim: Sim, reg: ActorRegistry, dt: float) -> void:
 		return
 	cooldown_remaining = attack_cooldown
 	_attack(reg, actor, target)
+
+
+## Walkable-check steering: the direct heading to the target is tried
+## first; if the next step would be blocked, ±30° / ±60° / ±90° offsets
+## are tried in order. This is NOT full A* — it's a local avoidance behavior
+## that gets around simple walls and corners. The upgrade path is giving
+## each hostile its own PathWindow (expensive for crowds).
+func _approach(sim: Sim, reg: ActorRegistry, actor: ActorState, target: ActorState) -> void:
+	var dir := target.cell - actor.cell
+	if dir.length_squared() < 0.0001:
+		return
+	var direct_angle := dir.angle()
+	var step_size := Movement.CELLS_PER_TICK if Movement.CELLS_PER_TICK > 0 else 0.05
+	# Try the direct heading, then offset angles.
+	for offset in [0.0, PI / 6.0, -PI / 6.0, PI / 3.0, -PI / 3.0, PI / 2.0, -PI / 2.0]:
+		var angle: float = direct_angle + offset
+		var heading := Vector2.from_angle(angle)
+		var next := actor.cell + heading * step_size
+		if sim.walk != null and sim.walk.is_open(int(next.x), int(next.y)):
+			actor.heading = heading
+			return
+	# All directions blocked: stop (the hostile is wedged — a real A* would
+	# find a path around, but that requires a per-actor PathWindow).
+	actor.heading = Vector2.ZERO
 
 
 ## One attack: the recovered to-hit + damage kernels. The attacker's AT and
