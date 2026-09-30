@@ -107,6 +107,11 @@ var _scenario_freeze_at := NAN          ## manifest freeze_anim: park every rig 
 ## inside a harness flag is not a save.
 var _save_path := ""
 var _load_path := ""
+## S0: the ONE owner of authoritative state (world/game_session.gd).
+## Constructed by the default streaming path; _registry/_quest_log/_sim/
+## _player_id become aliases of its members so pre-session call sites keep
+## working while the cutover proceeds.
+var _session: GameSession = null
 ## The live quest log and cast the new-game hook produced. Null until
 ## _begin_encounter/_build_quest_cast run; the Checkpoint reads whatever the
 ## scenario actually reached.
@@ -853,22 +858,19 @@ func _ready() -> void:
 			push_warning("player: no walkable spawn cell found -- drawing nothing")
 		else:
 			var player_cell: Vector2 = spawn["cell"]
-			# C1: the hero's max HP is DERIVED, not invented. The template's
-			# (STK, REPHY) pair drives the transcribed sub_81F4FFA base
-			# formula -- live-witnessed on two classes (Seraphim 119,
-			# Gladiator 147; checks/hero_hp_check.gd). A bare new hero has
-			# base == live, so the template pair feeds both. The template
-			# file rides beside START_CLASS until a class-selection UI owns
-			# the pairing (same posture as the hero01 headwear read).
-			var hero_hp := 100
-			var hero := Sacred.Hero.new(install.path_join("templates/" + START_TEMPLATE))
-			if hero.found and hero.attributes().size() >= 4:
-				var stk: int = hero.attributes()[0]
-				var rephy: int = hero.attributes()[3]
-				hero_hp = ActorStats.max_hp(stk, rephy, stk, rephy,
-					hero.level if hero.level > 0 else 1)
-			_player_id = _registry.spawn(_first_real_record_id(), player_cell, hero_hp, hero_hp)
-			print("player\thp=%d\tderived=ActorStats.max_hp(%s)" % [hero_hp, START_TEMPLATE])
+			# S0: the session OWNS the authoritative state. The hero's HP is
+			# derived inside new_game() from the template's (STK, REPHY) pair
+			# -- the same derivation the renderless check exercises, so both
+			# paths produce identical state by construction. _registry/
+			# _quest_log/_player_id remain as aliases for the many call sites
+			# that predate the session; they are the same objects.
+			_session = GameSession.new_game(install, player_cell)
+			_registry = _session.registry
+			_quest_log = _session.quest_log
+			_sim = _session.sim
+			_player_id = _session.player_id
+			print("player\thp=%d\tderived=session new_game (%s)" % [
+				_session.player_hp, _session.start_template])
 			_sim.walk = walk
 			_sim.focus_actor_id = _player_id
 			_path_window = PathWindow.new(walk)
@@ -1043,9 +1045,14 @@ func _run_save_or_load() -> void:
 	await _maybe_screenshot()
 
 
-## The authoritative-state dictionary SaveState consumes: the same objects
-## the scenario checkpoint reads, keyed for the snapshot.
+## The authoritative-state dictionary SaveState consumes: the session's own
+## objects when one exists (default streaming path), else the raw members
+## (modes that predate the session -- probe, record/replay, fixed region).
 func _session_dict() -> Dictionary:
+	if _session != null:
+		return {"registry": _session.registry, "quest_log": _session.quest_log,
+			"player_id": _session.player_id, "tick": _session.tick,
+			"tick_hz": _tick_hz}
 	return {"registry": _registry, "quest_log": _quest_log,
 		"player_id": _player_id, "tick": _sim.tick, "tick_hz": _tick_hz}
 
