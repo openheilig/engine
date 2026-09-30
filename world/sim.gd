@@ -171,7 +171,11 @@ func tick_dt() -> float:
 ## ticks run. delta == 0.0 runs zero ticks and mutates nothing. Any whole
 ## ticks still pending after the cap are DROPPED, never silently absorbed --
 ## reported on stdout as "sim\tdropped=<n>\ttick=<tick>".
+var last_registry: ActorRegistry
+
+
 func advance(delta: float, reg: ActorRegistry, focus: Vector2) -> int:
+	last_registry = reg
 	if delta == 0.0:
 		return 0
 	_accum += delta
@@ -281,6 +285,35 @@ func _step_actor(a: ActorState) -> void:
 	if delta.length_squared() > 0.0:
 		a.facing = delta
 	a.cell = Movement.sweep(a.cell, delta, walk)
+	_push_displaced(a, delta)
+
+
+## F1 (row 1370): retail NPCs physically gate creatures — a walking actor
+## whose next cell carries a standing creature DISPLACES that creature
+## along the walker's direction (the quest-1 nun's walk pushes the hero
+## ~1 cell south at new game). Displace at most one cell per contact and
+## only along the mover's dominant axis; dead actors never move.
+func _push_displaced(mover: ActorState, delta: Vector2) -> void:
+	var reg := last_registry
+	if reg == null or delta.length_squared() == 0.0:
+		return
+	var next_cell := Vector2i(int(mover.cell.x), int(mover.cell.y))
+	for aid in reg.ids():
+		var other: ActorState = reg.get_actor(int(aid))
+		if other == null or other.id == mover.id:
+			continue
+		if (other.flags & ActorState.FLAG_ALIVE) == 0:
+			continue
+		if Vector2i(int(other.cell.x), int(other.cell.y)) != next_cell:
+			continue
+		var push := Vector2(signf(delta.x), signf(delta.y))
+		if absf(delta.x) >= absf(delta.y):
+			push.y = 0.0
+		else:
+			push.x = 0.0
+		if push.length_squared() > 0.0:
+			other.cell = Movement.sweep(other.cell, push, walk)
+		break
 
 
 ## One tick's travel toward the next unreached point in path_window's
