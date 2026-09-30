@@ -1,25 +1,28 @@
-class_name SoundNames
+class_name SacredSoundNames
 extends RefCounted
-## A0: the retail sound-id to name table, recovered from the Linux 1.0.02
-## binary's static table at .data 0x879AC80 ({int32 id; char name[64]},
-## 6869 records; entry 0 = SOUND_FX_INVALID). This file transcribes the
-## sector-music subset (ids 6500-6574 and 6700-6717); the full table is
-## mechanical to extend. See tmp/a0-music/notes.md for the proof.
+## A0: the retail sound-id table, read at RUNTIME from the user's own
+## install/sacred -- never shipped. The binary carries a static
+## { int32 id; char name[64] } array, 6869 records, at .data vaddr
+## 0x879AC80 (Linux 1.0.02; entry 0 = SOUND_FX_INVALID; ids are not
+## indexes). Proof and addresses: tmp/a0-music/notes.md.
 ##
-## cMSS::playMusic builds the audio path as: strip "SOUND_FX_", append
-## ".ogg", the pack-aware fopen wrapper lowercases the whole path -- so
-## the file is mp3/<name-without-prefix-lowercase>.ogg relative to the
-## install root.
+## cMSS::playMusic (sub_84E78C0) builds the audio path as: strip the
+## "SOUND_FX_" prefix, append ".ogg"; the pack-aware fopen wrapper
+## (sub_85FE454) lowercases the whole path -- so id N plays
+## mp3/<stem-lowercase>.ogg under the install root.
 
 const PREFIX := "SOUND_FX_"
+const TABLE_VADDR := 0x879AC80
+const RECORD := 68
+const COUNT := 6869
 
-## id -> name-without-prefix (the ogg stem, uppercase as shipped in the
-## binary; lowercase it for the on-disk file).
-const TABLE := {
+## Fallback subset (sector-music ids) transcribed from the same table;
+## used only when the runtime parse fails (e.g. a non-1.0.02 binary whose
+## table address differs -- the X1/X2 compat pass owns that).
+const FALLBACK := {
 	6500: "ATMO_DESERT", 6501: "ATMO_ICE", 6502: "ATMO_VULCANO",
 	6503: "ATMO_WOOD", 6504: "ATMOSPOT_CEMETERY", 6505: "MUSIC_DEATH",
-	6506: "MUSIC_MENU",
-	6507: "ATMO_VILLAGE_SIEGE_MILITARY_SUMMER",
+	6506: "MUSIC_MENU", 6507: "ATMO_VILLAGE_SIEGE_MILITARY_SUMMER",
 	6508: "ATMOSPOT_ARENA_INDOOR", 6509: "ATMOSPOT_ARENA_OUTDOOR",
 	6510: "MUSIC_DESERT01", 6511: "ATMO_DUNGEON",
 	6512: "ATMO_DESERT_NIGHT", 6513: "ATMO_ICE_NIGHT",
@@ -59,11 +62,72 @@ const TABLE := {
 	6716: "MUSIC_DUNGEON_KARIBIK", 6717: "MUSIC_KARIBIK_NETT",
 }
 
+static var _cache: Dictionary = {}
+static var _loaded := false
+
+
+## The full id -> stem table (stem = name minus SOUND_FX_, uppercase as
+## shipped). Reads install/sacred's PT_LOAD segments once; falls back to
+## the transcribed subset if the binary is missing or shaped differently.
+static func table(install: String) -> Dictionary:
+	if _loaded:
+		return _cache
+	_loaded = true
+	var parsed := _parse_binary(install.path_join("sacred"))
+	# Entry 0 (SOUND_FX_INVALID) and any non-positive ids are filtered, so
+	# accept anything close to the full 6869 rather than demanding an exact
+	# filtered count.
+	_cache = parsed if parsed.size() >= COUNT - 16 else FALLBACK.duplicate()
+	return _cache
+
+
+## ELF32: find the PT_LOAD covering TABLE_VADDR, translate to a file
+## offset, read COUNT records of {i32 id; char[64] name}.
+static func _parse_binary(path: String) -> Dictionary:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return {}
+	# Magic + class/data/version bytes; EI_OSABI is 3 (Linux) in this
+	# binary, so bytes 4-7 read 0x03010101, not the textbook 0x00010101.
+	if f.get_32() != 0x464C457F or (f.get_32() & 0x00FFFFFF) != 0x00010101:
+		return {}
+	f.seek(28)
+	var phoff := f.get_32()
+	f.seek(42)
+	var phentsize := f.get_16()
+	var phnum := f.get_16()
+	var file_off := -1
+	for i in phnum:
+		f.seek(phoff + i * phentsize)
+		var p_type := f.get_32()
+		var p_offset := f.get_32()
+		var p_vaddr := f.get_32()
+		f.get_32()  # p_paddr
+		var p_filesz := f.get_32()
+		var p_memsz := f.get_32()
+		if p_type == 1 and p_vaddr <= TABLE_VADDR and TABLE_VADDR < p_vaddr + p_memsz:
+			if TABLE_VADDR - p_vaddr >= p_filesz:
+				return {}  # BSS-only coverage: the table would not be in the file.
+			file_off = p_offset + (TABLE_VADDR - p_vaddr)
+			break
+	if file_off < 0:
+		return {}
+	var out: Dictionary = {}
+	f.seek(file_off)
+	for i in COUNT:
+		var id := f.get_32()  # signed, but ids are positive
+		var raw := f.get_buffer(64)
+		var z := raw.find(0)
+		var name := raw.slice(0, z if z >= 0 else 64).get_string_from_ascii()
+		if id > 0 and not name.is_empty():
+			out[id] = name.trim_prefix(PREFIX)
+	return out
+
 
 ## Retail's path for id: mp3/<stem lowercase>.ogg, or "" for an unknown id
 ## (getSndName returns 0; playMusic then plays nothing rather than failing).
-static func ogg_relpath(id: int) -> String:
-	var stem: String = TABLE.get(id, "")
+static func ogg_relpath(id: int, install: String) -> String:
+	var stem: String = table(install).get(id, "")
 	if stem.is_empty():
 		return ""
 	return "mp3/%s.ogg" % stem.to_lower()
@@ -72,6 +136,6 @@ static func ogg_relpath(id: int) -> String:
 ## True for the ambience families; retail branches on memcmp(name+9,"ATMO",4)
 ## (index 9 skips the SOUND_FX_ prefix), which matches both ATMO_* and
 ## ATMOSPOT_* -- to pick the ambience volume instead of the music volume.
-static func is_atmo(id: int) -> bool:
-	var stem: String = TABLE.get(id, "")
+static func is_atmo(id: int, install: String) -> bool:
+	var stem: String = table(install).get(id, "")
 	return stem.begins_with("ATMO")

@@ -4552,7 +4552,7 @@ func _play_music(id: int) -> void:
 	if _music_noaudio or id == _music_now:
 		return
 	_music_now = id
-	var rel: String = Sacred.SoundNames.ogg_relpath(id)
+	var rel: String = Sacred.SoundNames.ogg_relpath(id, _install_ref)
 	if rel.is_empty():
 		return  # getSndName's miss path: retail plays nothing.
 	if _music_player == null:
@@ -4573,10 +4573,10 @@ func _play_music(id: int) -> void:
 	stream.loop = true
 	_music_player.stream = stream
 	# The one volume branch retail makes: ATMO* on the ambience fader.
-	_music_player.volume_db = -10.0 if Sacred.SoundNames.is_atmo(id) else -6.0
+	_music_player.volume_db = -10.0 if Sacred.SoundNames.is_atmo(id, _install_ref) else -6.0
 	_music_player.play()
 	print("music\tid=%d\tfile=%s\tatmo=%s\tplaying=%s"
-		% [id, rel, Sacred.SoundNames.is_atmo(id), _music_player.playing])
+		% [id, rel, Sacred.SoundNames.is_atmo(id, _install_ref), _music_player.playing])
 
 
 ## Turns the hero to face where it is going.
