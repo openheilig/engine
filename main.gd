@@ -115,6 +115,9 @@ var _session: GameSession = null
 ## B1: the hostile's brain, created when the encounter spawns the hostile.
 ## Stepped in _process after each sim advance.
 var _hostile_brain: HostileBrain = null
+## B1: the hero's auto-attack brain, roles reversed. Created alongside the
+## hostile's brain when the encounter spawns.
+var _hero_brain: HostileBrain = null
 ## The live quest log and cast the new-game hook produced. Null until
 ## _begin_encounter/_build_quest_cast run; the Checkpoint reads whatever the
 ## scenario actually reached.
@@ -1154,11 +1157,13 @@ func _process(delta: float) -> void:
 	# same frame's view sees the item already in inventory.
 	if _session != null:
 		_session.after_tick()
-	# B1: the hostile approaches and attacks through HostileBrain, stepped
-	# after the sim advance so its movement and cooldown advance in lockstep
-	# with the hero's own tick.
-	if _hostile_brain != null and _sim != null and _registry != null:
-		_hostile_brain.step(_sim, _registry, delta)
+	# B1: both brains step after the sim advance so approach, movement and
+	# cooldown advance in lockstep with the hero's own tick.
+	if _sim != null and _registry != null:
+		if _hostile_brain != null:
+			_hostile_brain.step(_sim, _registry, delta)
+		if _hero_brain != null:
+			_hero_brain.step(_sim, _registry, delta)
 	# Plan 04-03 Task 2: --noplayer means no player at all, not just an
 	# invisible one -- the camera must keep behaving exactly as it does today
 	# (Task 2's own reference-capture regression: --sector=50,50 with the
@@ -1593,8 +1598,21 @@ func _begin_encounter(install: String, items) -> void:
 			foe.set_meta("raw_damage", 7.0)
 			_hostile_brain = HostileBrain.new()
 			_hostile_brain.setup(_encounter.foe_id, _player_id, 1.8, 2.0)
+			# The hero's own auto-attack: same brain pattern, roles reversed.
+			# The hero's AT comes from the derived hero_at the encounter
+			# already computes from the template's skill levels.
+			var hero_actor := _registry.get_actor(_player_id)
+			var hero_brain := HostileBrain.new()
+			hero_brain.setup(_player_id, _encounter.foe_id, 1.8, 2.0)
+			if hero_actor != null:
+				hero_actor.set_meta("at", _encounter.hero_at)
+				hero_actor.set_meta("pa", _encounter.foe_pa)
+				hero_actor.set_meta("raw_damage", 7.0)
+			_hero_brain = hero_brain
 			print("ai\thostile=%d\ttarget=%d\tfoe_at=%.1f\thero_pa=%.1f\trange=1.8\tcd=2.0"
 				% [_encounter.foe_id, _player_id, foe_at, hero_pa])
+			print("ai\thero=%d\ttarget=%d\thero_at=%.1f\tfoe_pa=%.1f\trange=1.8\tcd=2.0"
+				% [_player_id, _encounter.foe_id, _encounter.hero_at, _encounter.foe_pa])
 	# The hero's first assigned art draws its slot from the art's own element
 	# triple (row 1043 / sub_85E676A) -- NOT from the loose icon texture. The
 	# element names route it to the skill or spell column; an art with no
