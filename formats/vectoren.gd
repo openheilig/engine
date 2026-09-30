@@ -47,6 +47,7 @@ var _proc: Array[Dictionary] = []
 ## quest id -> {title, hooks PackedInt32Array}
 var _quest: Dictionary[int, Dictionary] = {}
 var _order := PackedInt32Array()
+var _by_name: Dictionary = {}
 
 
 func _init(dir: String) -> void:
@@ -94,6 +95,16 @@ func _init(dir: String) -> void:
 ## Every quest id carrying data, in file order.
 func quest_ids() -> PackedInt32Array:
 	return _order
+
+
+## A section-1 procedure by NAME (S1: the 11,414 Sector/Region Init/Enter/
+## Exit procedures retail runs by name through this table). Empty when the
+## name is absent.
+func procedure(name: String) -> Dictionary:
+	if _by_name.is_empty():
+		for p in _proc:
+			_by_name[p["name"]] = p
+	return _by_name.get(name, {})
 
 
 func has_quest(qid: int) -> bool:

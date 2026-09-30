@@ -378,6 +378,11 @@ var _hero_dead_reported := false
 var _hero_place_reported := false
 ## E2: creature ids whose first-kill unique roll has been consumed.
 var _loot_seen_types := {}
+## S1: the Seraphim vectoren + funkcode for the sector scheduler, and the
+## visited-sector set that decides Init vs Enter.
+var _sector_vec: Sacred.Vectoren
+var _sector_funkcode := PackedByteArray()
+var _sectors_visited: Dictionary[Vector2i, bool] = {}
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
 ## --hideplayer: build the player view and keep the camera following it
 ## exactly like the ordinary case, but never make its mesh visible. A
@@ -4566,6 +4571,7 @@ func _update_sector_env(cell: Vector2) -> void:
 	if int(env["music"]) != 0:
 		_sector_env = env
 		_play_music(int(env["music"]))
+	_run_sector_scripts(s)
 	print("sector-env\t%d,%d\tmusic=%d\tclimate=%d\tregion=%d\tatmo2=%d\tplaying=%d" % [
 		s.x, s.y, int(env["music"]), int(env["climate"]), int(env["region"]),
 		int(env["atmo2"]), int(_sector_env.get("music", 0))])
@@ -4605,6 +4611,39 @@ func _play_music(id: int) -> void:
 	_music_player.play()
 	print("music\tid=%d\tfile=%s\tatmo=%s\tplaying=%s"
 		% [id, rel, Sacred.SoundNames.is_atmo(id, _install_ref), _music_player.playing])
+
+
+## S1: retail runs the sector's own procedure as the player's cell crosses
+## a sector boundary (cInterpretSQW::initSector/enterSector ->
+## WorkFunktion "Sector%02d%03d<Init|Enter>"). Init runs once per session
+## on first entry; Enter on every entry. Placed NPCs become registry
+## actors at their authored cells (rig views for runtime spawns are W2's
+## remainder); CreateObj FX and SpawnValues are VM-level skips (E2 gates).
+func _run_sector_scripts(s: Vector2i) -> void:
+	if _session == null:
+		return
+	if _sector_vec == null:
+		var dir := _install_ref.path_join("bin/%s" % START_CLASS)
+		_sector_vec = Sacred.Vectoren.new(dir)
+		if _sector_vec.found:
+			_sector_funkcode = FileAccess.get_file_as_bytes(
+				dir.path_join("funkcode.bin"))
+	var first: bool = not _sectors_visited.has(s)
+	_sectors_visited[s] = true
+	var vm := ScriptVM.new()
+	var cast := QuestCast.new()
+	var r: Dictionary = Sacred.SectorScheduler.enter_sector(_sector_vec,
+		_sector_funkcode, s.x, s.y, first, cast, vm)
+	if not bool(r.get("ran", false)):
+		return
+	var phase := "Init" if first else "Enter"
+	var n := 0
+	for p in cast.placed():
+		var id := _registry.spawn(int(p["creature"]),
+			Vector2(p["cell"]) + Vector2(0.5, 0.5), 40, 40)
+		if id > 0:
+			n += 1
+	print("sector-script\tsector=%s\tphase=%s\tspawned=%d" % [s, phase, n])
 
 
 ## Turns the hero to face where it is going.

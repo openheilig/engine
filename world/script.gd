@@ -130,15 +130,23 @@ var refused_op := -1            ## the opcode that caused the last refusal
 ## four and QuestCast the rest. Returns false without executing anything when
 ## the span is unreadable or names an opcode this class does not implement --
 ## `refused_op` says which.
-func run(code: PackedByteArray, offset: int, length: int, host: Object) -> bool:
+##
+## `skip_ops`: opcodes to execute as NO-OPS instead of refusing. Retail's
+## dispatcher default skips unhandled opcodes (mov ecx,1; ret), and the E2
+## gates proved 8 (CreateObj), 100 (SpawnValues) and 115 are decoded here
+## and side-effect-free at the VM level, so the sector scheduler passes
+## them; the QUEST hooks keep the strict refusal (the IF argument).
+func run(code: PackedByteArray, offset: int, length: int, host: Object,
+		skip_ops: PackedInt32Array = PackedInt32Array()) -> bool:
 	refused_op = -1
 	var recs := decode(code, offset, length)
 	if recs.is_empty():
 		return length == 0        # an empty hook runs vacuously, and every
 		                          # Trigger in the corpus is exactly that
 	for r: Dictionary in recs:
-		if not IMPLEMENTED.has(r["op"]) \
-				or not host.has_method(HOST_METHOD[r["op"]]):
+		if IMPLEMENTED.has(r["op"]) and host.has_method(HOST_METHOD[r["op"]]):
+			continue
+		if not skip_ops.has(int(r["op"])):
 			refused_op = r["op"]
 			return false
 	for r: Dictionary in recs:
@@ -317,11 +325,18 @@ func _apply(rec: Dictionary, host: Object) -> void:
 			if a.size() >= 2:
 				host.set_script_var(str(a[0][1]), int(a[1][1]))
 		OP_CREATE_NPC:
-			# (string handle, i32 creature, string name, string task, i16, string art)
-			# and NO POSITION -- the cell arrives from a later NPC_Goto against
-			# the handle. Retail's own sector scripts use a different argument
-			# shape carrying a cell inline, so a caller must not assume either.
-			if a.size() >= 3:
+			# QUEST shape: (string handle, i32 creature, string name, string
+			# task, i16, string art), NO POSITION -- the cell arrives from a
+			# later NPC_Goto against the handle.
+			# SECTOR shape (Sector50039Enter et al): (string handle -- the
+			# placeholder "NON_UNIQUE", i32 creature, VARIANT cell as an
+			# (x, y, 0) triple, i32 seed) -- the cell is INLINE and there is
+			# no name/task/art.
+			if a.size() >= 3 and a[2][1] is Vector3i:
+				var sc: Vector3i = a[2][1]
+				host.create_npc(str(a[0][1]), int(a[1][1]), "", "",
+					"", Vector2i(sc.x, sc.y))
+			elif a.size() >= 3:
 				host.create_npc(str(a[0][1]), int(a[1][1]), str(a[2][1]),
 					str(a[3][1]) if a.size() >= 4 else "",
 					str(a[5][1]) if a.size() >= 6 else "")

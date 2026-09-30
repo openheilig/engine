@@ -62,16 +62,24 @@ func set_script_var(name: String, value: int) -> void:
 
 
 func create_npc(handle: String, creature: int, name: String, task: String,
-		art: String) -> void:
+		art: String, cell: Vector2i = NO_CELL) -> void:
 	var key := handle.to_lower()
 	if _by_handle.has(key):
-		# Retail may well allow it; nothing in the corpus read so far does it,
-		# so this reports rather than guessing which one wins.
-		push_warning("QuestCast: handle '%s' created twice" % handle)
-		return
+		# Retail's sector scripts create every NPC under the placeholder
+		# handle "NON_UNIQUE" (the runtime renumbers them); uniquify that
+		# shape instead of dropping the placement. Any other duplicate
+		# reports rather than guessing which one wins.
+		if key != "non_unique":
+			push_warning("QuestCast: handle '%s' created twice" % handle)
+			return
+		var n := 2
+		while _by_handle.has("%s#%d" % [key, n]):
+			n += 1
+		key = "%s#%d" % [key, n]
+		handle = "%s#%d" % [handle, n]
 	_by_handle[key] = cast.size()
 	cast.append({"handle": handle, "creature": creature, "name": name,
-		"task": task, "art": art, "cell": NO_CELL, "compass": false})
+		"task": task, "art": art, "cell": cell, "compass": false})
 
 
 ## Places an already-created NPC. A handle nothing created is a warning and no
