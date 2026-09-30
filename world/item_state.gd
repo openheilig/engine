@@ -111,6 +111,11 @@ func count() -> int:
 	return _by_id.size()
 
 
+## Every live instance (any location), id order. Read-only use.
+func all_instances() -> Array:
+	return _by_id.values()
+
+
 func next_id() -> int:
 	return _next_id
 

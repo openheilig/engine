@@ -362,6 +362,15 @@ var _creature_cells: Array[Vector2] = []
 ## _build_quest_cast; _process follows these actors every frame exactly like
 ## the hero, so a scripted NPC_Goto becomes real movement.
 var _scripted_views: Dictionary[int, PlayerView] = {}
+## C2: one view per GROUND item instance; rebuilt whenever `_loot_dirty`.
+var _loot_views: Dictionary[int, PlayerView] = {}
+var _loot_dirty := false
+## Held from _ready for loot-view construction (sector views own their own
+## copies; loot views are world-space and outlive sectors).
+var _tex_pak_ref: Sacred.Pak
+## Held from _ready; lets the loot path build models.pak lazily when no
+## scripted-object job has done it yet.
+var _install_ref := ""
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
 ## --hideplayer: build the player view and keep the camera following it
 ## exactly like the ordinary case, but never make its mesh visible. A
@@ -442,6 +451,8 @@ func _ready() -> void:
 
 	var tiles_path := install.path_join("pak/tiles.pak")
 	var tex_pak := Sacred.Pak.new(install.path_join("pak/texture.pak"))
+	_tex_pak_ref = tex_pak
+	_install_ref = install
 	_world = Sacred.World.new(install.path_join("world"))
 	var world := _world
 	if not (FileAccess.file_exists(tiles_path) and tex_pak.is_open() and world.is_open()):
@@ -1156,7 +1167,10 @@ func _process(delta: float) -> void:
 	# Arrival pickups consume after the tick that moved the hero, so the
 	# same frame's view sees the item already in inventory.
 	if _session != null:
+		var had_pending := _session.pending_pickup_id != GameSession.NO_PICKUP
 		_session.after_tick()
+		if had_pending:
+			_loot_dirty = true
 	# B1: both brains step after the sim advance so approach, movement and
 	# cooldown advance in lockstep with the hero's own tick.
 	if _sim != null and _registry != null:
@@ -1167,6 +1181,9 @@ func _process(delta: float) -> void:
 	# C3: after combat resolves, check whether the hero died.
 	if _session != null:
 		_session.check_hero_death()
+	# C2: rebuild loot views after a kill drop or a pickup consumption.
+	if _loot_dirty:
+		_sync_loot_views()
 	# Plan 04-03 Task 2: --noplayer means no player at all, not just an
 	# invisible one -- the camera must keep behaving exactly as it does today
 	# (Task 2's own reference-capture regression: --sector=50,50 with the
@@ -1565,6 +1582,52 @@ func _hide_worn_slot(items: Sacred.Items, rec: int) -> void:
 		_player_view.hide_base_surfaces(PackedStringArray(tokens))
 
 
+## C2: one view per GROUND item instance. `place_object` places in world
+## space (IsoCamera.cell_to_world), so the views attach to the scene root
+## beside the player view and survive sector streaming. Non-GROUND or
+## despawned instances free their view. Cheap: only runs when a kill or a
+## pickup arrival set `_loot_dirty`.
+func _sync_loot_views() -> void:
+	if _session == null:
+		return
+	var seen := {}
+	for inst in _session.items.all_instances():
+		if inst.location != ItemInstances.Location.GROUND:
+			continue
+		seen[inst.instance_id] = true
+		if _loot_views.has(inst.instance_id):
+			continue
+		if _shadow_items == null or _tex_pak_ref == null:
+			continue
+		if _scripted_models == null:
+			var mpak := Sacred.Pak.new(_install_ref.path_join("pak/models.pak"))
+			if not mpak.is_open():
+				continue
+			_scripted_models = Sacred.Models.new(mpak)
+		var name := _shadow_items.name_of(inst.definition_id)
+		if name.is_empty():
+			push_warning("loot view: unresolved model for type %d" % inst.definition_id)
+			continue
+		var object := PlayerView.new(_scripted_models, name, _tex_pak_ref,
+			PackedStringArray(), _shadow_items.texture_of(inst.definition_id))
+		if object.node == null or not object.place_object(
+				Vector2(inst.cell) + Vector2(0.5, 0.5), Vector2.RIGHT, 0.0,
+				_shadow_items.category_of(inst.definition_id)):
+			if object.node != null:
+				object.node.free()
+			continue
+		object.node.name = "Loot_%d" % inst.instance_id
+		add_child(object.node)
+		_loot_views[inst.instance_id] = object
+	for id in _loot_views.keys():
+		if not seen.has(id):
+			var v: PlayerView = _loot_views[id]
+			if v.node != null:
+				v.node.queue_free()
+			_loot_views.erase(id)
+	_loot_dirty = false
+
+
 func _begin_encounter(install: String, items) -> void:
 	if _registry == null:
 		return
@@ -1629,6 +1692,11 @@ func _begin_encounter(install: String, items) -> void:
 				var cell := Vector2i(3236, 2511)
 				if loc != null:
 					cell = Vector2i(int(loc.cell.x), int(loc.cell.y))
+				if session_ref != null:
+					# C2: loot drops at the kill location (same wiring the
+					# kill_reward_check proves in isolation).
+					session_ref.spawn_item_ground(7442, cell)
+				_loot_dirty = true
 				print("kill\tid=%d\tkiller=%d\txp=%d\tcell=%d,%d"
 					% [killed_id, killer_id, exp_value, cell.x, cell.y])
 	# The hero's first assigned art draws its slot from the art's own element
