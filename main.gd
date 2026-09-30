@@ -1609,10 +1609,25 @@ func _begin_encounter(install: String, items) -> void:
 				hero_actor.set_meta("pa", _encounter.foe_pa)
 				hero_actor.set_meta("raw_damage", 7.0)
 			_hero_brain = hero_brain
-			print("ai\thostile=%d\ttarget=%d\tfoe_at=%.1f\thero_pa=%.1f\trange=1.8\tcd=2.0"
-				% [_encounter.foe_id, _player_id, foe_at, hero_pa])
-			print("ai\thero=%d\ttarget=%d\thero_at=%.1f\tfoe_pa=%.1f\trange=1.8\tcd=2.0"
-				% [_player_id, _encounter.foe_id, _encounter.hero_at, _encounter.foe_pa])
+			# C3: the hero's kill awards XP through the session and drops
+			# loot. This is the B1→C2→C3 wiring point in the PRODUCTION
+			# path (kill_reward_check proves the same wiring in isolation).
+			var foe_cell := Vector2.ZERO
+			var foe_actor := _registry.get_actor(_encounter.foe_id)
+			if foe_actor != null:
+				foe_cell = foe_actor.cell
+			var exp_value: int = _encounter.foe_exp
+			var install_ref := install
+			var session_ref := _session
+			_hero_brain.on_target_killed = func(killed_id: int, killer_id: int) -> void:
+				if session_ref != null:
+					session_ref.award_xp(exp_value)
+				var loc := _registry.get_actor(killed_id)
+				var cell := Vector2i(3236, 2511)
+				if loc != null:
+					cell = Vector2i(int(loc.cell.x), int(loc.cell.y))
+				print("kill\tid=%d\tkiller=%d\txp=%d\tcell=%d,%d"
+					% [killed_id, killer_id, exp_value, cell.x, cell.y])
 	# The hero's first assigned art draws its slot from the art's own element
 	# triple (row 1043 / sub_85E676A) -- NOT from the loose icon texture. The
 	# element names route it to the skill or spell column; an art with no
