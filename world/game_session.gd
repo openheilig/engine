@@ -47,6 +47,10 @@ var player_id: int = ActorRegistry.INVALID_ID
 var player_cell := Vector2.ZERO
 var player_hp := 0
 var player_hp_max := 0
+var hero_level: int = 1
+var hero_xp: int = 0
+var hero_base_stk: int = 0
+var hero_base_rephy: int = 0
 var tick := 0
 var tick_hz: int = Sim.TICK_HZ
 
@@ -72,6 +76,8 @@ static func new_game(install_path: String, spawn_cell: Vector2) -> GameSession:
 	if hero.found and hero.attributes().size() >= 4:
 		var stk: int = hero.attributes()[0]
 		var rephy: int = hero.attributes()[3]
+		s.hero_base_stk = stk
+		s.hero_base_rephy = rephy
 		hero_hp = ActorStats.max_hp(stk, rephy, stk, rephy,
 			hero.level if hero.level > 0 else 1)
 	s.player_hp = hero_hp
@@ -81,12 +87,36 @@ static func new_game(install_path: String, spawn_cell: Vector2) -> GameSession:
 	return s
 
 
-## Commands enter here -- the one path. v1 carries movement; combat/art
-## commands arrive with B1/B2 through the same door.
+## Commands enter here -- the one path. v1 carries movement, item
+## pickup/drop. Combat/art commands arrive with B1/B2 through the same door.
 func move_command(goal: Vector2i) -> void:
 	sim.pending_goal_actor_id = player_id
 	sim.pending_goal = goal
 	sim.pending_goal_tick = -1
+
+
+## C3: awards XP and checks for level-up. When the accumulated XP crosses
+## the Progression threshold for the current level, the hero levels up:
+## level++, max HP recalculated from the template's (STK, REPHY) pair at
+## the new level. The HP fraction is preserved (retail's own behaviour,
+## observed at 0x8188FB3).
+func award_xp(amount: int) -> void:
+	hero_xp += amount
+	var new_level := hero_level
+	while hero_xp >= Progression.xp_threshold(new_level):
+		new_level += 1
+	if new_level > hero_level:
+		var old_fraction := 1.0 if player_hp_max <= 0 \
+			else float(player_hp) / float(player_hp_max)
+		hero_level = new_level
+		player_hp_max = ActorStats.max_hp(
+			hero_base_stk, hero_base_rephy, hero_base_stk, hero_base_rephy,
+			hero_level)
+		player_hp = maxi(1, int(player_hp_max * old_fraction))
+		var p := registry.get_actor(player_id)
+		if p != null:
+			p.hp = player_hp
+			p.hp_max = player_hp_max
 
 
 ## Spawns a fresh item instance on the ground at `cell`. Returns the
