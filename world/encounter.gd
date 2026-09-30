@@ -330,6 +330,13 @@ func strike(rng: RandomNumberGenerator, art_id := 0) -> Dictionary:
 
 
 ## Runs the quest's own OnExit. Called only from strike(), on the killing blow.
+## Public for the production brain-kill path: HostileBrain._attack zeroes hp
+## itself, so the killing blow there bypasses strike() and must finish the
+## quest explicitly.
+func finish() -> void:
+	_finish()
+
+
 func _finish() -> void:
 	var h: Dictionary = _vec.hook(QUEST, Sacred.Vectoren.H_ON_EXIT)
 	if h.is_empty() or not _vm.run(_code, h["offset"], h["length"], log):

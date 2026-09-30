@@ -1697,6 +1697,10 @@ func _begin_encounter(install: String, items) -> void:
 					# kill_reward_check proves in isolation).
 					session_ref.spawn_item_ground(7442, cell)
 				_loot_dirty = true
+				# W2/S1: the brain-kill bypasses strike(), so the quest's
+				# OnExit must run here (encounter_check proves the seam).
+				if _encounter != null:
+					_encounter.finish()
 				print("kill\tid=%d\tkiller=%d\txp=%d\tcell=%d,%d"
 					% [killed_id, killer_id, exp_value, cell.x, cell.y])
 	# The hero's first assigned art draws its slot from the art's own element

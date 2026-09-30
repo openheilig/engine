@@ -52,7 +52,7 @@ func _init() -> void:
 	_placement(enc)
 	_hostility(enc)
 	_quest_opens(enc)
-	_fight(enc, registry)
+	_fight(enc, registry, install, items, creatures, factions)
 
 	print("encounter_check OK %s" % enc.status_line())
 	finish(0)
@@ -94,7 +94,7 @@ func _quest_opens(enc) -> void:
 
 
 ## The fight itself, with the accounting that makes a pass mean something.
-func _fight(enc, registry) -> void:
+func _fight(enc, registry, install: String, items, creatures, factions) -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = SEED
 	var hp0: int = enc.foe_hp()
@@ -144,3 +144,25 @@ func _fight(enc, registry) -> void:
 	var before: int = enc.log.lines.size()
 	enc.strike(rng)
 	expect(enc.log.lines.size() == before, "striking a dead hostile ran the quest's OnExit again")
+
+	# The production brain-kill path: HostileBrain._attack zeroes hp itself
+	# and never calls strike(), so the quest must be finished explicitly via
+	# the public finish(). A second encounter proves OnExit runs exactly once
+	# through that route.
+	var registry2 := ActorRegistry.new()
+	var enc2 := Encounter.new(install, registry2, items, creatures, factions)
+	expect(enc2.found and enc2.foe_id != 0, "second encounter did not spawn")
+	enc2.begin()
+	expect(not enc2.is_complete(), "quest must start not-done")
+	var foe2: ActorState = registry2.get_actor(enc2.foe_id)
+	# The brain's kill, verbatim: hp to zero, flag cleared, no strike().
+	foe2.hp = 0
+	foe2.flags &= ~ActorState.FLAG_ALIVE
+	enc2.finish()
+	expect(enc2.is_complete(), "brain-kill + finish() must complete the quest")
+	expect(enc2.log.is_done(Encounter.QUEST),
+		"brain-kill quest state is %d, expected %d" % [
+			enc2.log.state_of(Encounter.QUEST), QuestLog.STATE_DONE])
+	expect(enc2.log.lines.size() == WANT_LINES_DONE,
+		"brain-kill finished quest has %d book lines, expected %d" % [
+			enc2.log.lines.size(), WANT_LINES_DONE])
