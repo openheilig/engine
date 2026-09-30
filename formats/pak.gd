@@ -20,8 +20,11 @@ var sizes := PackedInt64Array()
 ## shape, so nothing before Sacred.Models needed this field kept.
 var kinds := PackedInt32Array()
 var _f: FileAccess
+## The archive path as opened -- cache keys and diagnostics.
+var path := ""
 
-func _init(path: String) -> void:
+func _init(archive_path: String) -> void:
+	path = archive_path
 	_f = FileAccess.open(path, FileAccess.READ)
 	if _f == null:
 		push_error("Pak: cannot open %s (%s)" % [path, error_string(FileAccess.get_open_error())])

@@ -97,6 +97,7 @@ var _liquid: RefCounted
 var _tiles: Sacred.Tiles
 var _world: Sacred.World
 var _floor: Sacred.Pak                    ## world/floor.pak, the overlay-tile layer; null = don't draw it
+var _tex_pak_path := ""                   ## Q1: key for the decoded-texture disk cache
 var _floor_view := FloorViewScript.new()
 ## Typed collections (Godot 4.4+): the key/value contracts here are the whole
 ## reason the streamer is readable, so they are worth stating.
@@ -184,6 +185,7 @@ func setup(cam: IsoCamera, tex_pak: Sacred.Pak, tiles: Sacred.Tiles, world: Sacr
 			push_error("SectorView: native SHADOW_TREE00 texture is unavailable")
 	_floor_view.configure(cam, shadow_texture)
 	_tex_pak = tex_pak
+	_tex_pak_path = tex_pak.path
 	_liquid = LiquidScript.new(tex_pak)
 	_tiles = tiles
 	_world = world
@@ -427,11 +429,12 @@ func _add_sector(key: int) -> void:
 		return
 	job["cpu_usec"] += Time.get_ticks_usec() - job["slice_start"]
 	if _stats:
-		print("sector\t%d,%d\t%d quads\t%d tex\t%.1f ms\tcache=%d" % [
+		print("sector\t%d,%d\t%d quads\t%d tex\t%.1f ms\tcache=%d\tdecode=%d ms/%d imgs" % [
 			key % 100, key / 100,
 			0 if node == null else int(node.get_meta("quads")),
 			0 if node == null else int(node.get_meta("layers")),
-			job["cpu_usec"] / 1000.0, _images.size()])
+			job["cpu_usec"] / 1000.0, _images.size(),
+			_decode_us / 1000, _decode_count])
 	# Commit is synchronous. No reader, signal consumer, or FloorView sees
 	# a half-built sector or admissions sampled across different revisions.
 	var terrain: Dictionary = job["terrain"]
@@ -1472,12 +1475,54 @@ func _h(cells: PackedByteArray, cell: int, corner: int) -> float:
 	return float(b - 256 if b > 127 else b) * height_scale
 
 
+var _decode_us := 0
+var _decode_count := 0
+
+var _tex_cache_dir := ""
+
+## Q1: decoded textures are pure functions of (install, texid) -- cache them
+## on disk under user:// so later sessions skip the zlib+4444 conversion
+## entirely (the measured ~40-50% of a cold sector build). PNG load is
+## C-speed. Nothing derived ships; user:// is the sanctioned cache location.
 func _image(texid: int) -> Image:
 	if _images.has(texid):
 		return _images[texid]
 	if texid >= _tex_pak.count():
 		return null
-	var img := Sacred.decode_texture(_tex_pak, texid, true)
+	var t0 := Time.get_ticks_usec()
+	var img: Image = null
+	if _tex_cache_dir == "" and _tex_pak_path != "":
+		_tex_cache_dir = "user://tex-cache/%s" % _tex_pak_path.md5_text()
+		DirAccess.make_dir_recursive_absolute(_tex_cache_dir)
+	if _tex_cache_dir != "":
+		# Raw RGBA8 + a 2-int header: PNG's compression costs ~19 ms/tile,
+		# 30x the decode it was meant to save. Raw write is a memcpy.
+		var p := "%s/%d.itx" % [_tex_cache_dir, texid]
+		if FileAccess.file_exists(p):
+			var f := FileAccess.open(p, FileAccess.READ)
+			if f != null and f.get_32() == 0x49545831:  # "TXI1"
+				var w := f.get_32()
+				var h := f.get_32()
+				var data := f.get_buffer(w * h * 4)
+				if data.size() == w * h * 4:
+					img = Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
+		if img != null:
+			_decode_us += Time.get_ticks_usec() - t0
+			_decode_count += 1
+			_images[texid] = img
+			return img
+	if img == null:
+		img = Sacred.decode_texture(_tex_pak, texid, true)
+		if _tex_cache_dir != "" and img != null:
+			var fo := FileAccess.open("%s/%d.itx" % [_tex_cache_dir, texid],
+				FileAccess.WRITE)
+			if fo != null:
+				fo.store_32(0x49545831)
+				fo.store_32(img.get_width())
+				fo.store_32(img.get_height())
+				fo.store_buffer(img.get_data())
+	_decode_us += Time.get_ticks_usec() - t0
+	_decode_count += 1
 	if img == null or img.get_width() != Sacred.TILE or img.get_height() != Sacred.TILE:
 		return null
 	_evict(_images)
