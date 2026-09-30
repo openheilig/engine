@@ -389,6 +389,8 @@ var _start_template := START_TEMPLATE
 var _inventory_panel: Sacred.InventoryPanel
 ## M1: UI text scale (--ui-scale, 0.5..3.0).
 var _ui_scale := 1.0
+## F1: --opening-walk=<dx,dy> scripts the hero's entry walk (0,0 = off).
+var _opening_walk := Vector2i.ZERO
 ## S1: the Seraphim vectoren + funkcode for the sector scheduler, and the
 ## visited-sector set that decides Init vs Enter.
 var _sector_vec: Sacred.Vectoren
@@ -961,6 +963,12 @@ func _ready() -> void:
 			# that predate the session; they are the same objects.
 			_session = GameSession.new_game(install, player_cell, _hero_path,
 				_start_template)
+			# F1: retail's Seraphim WALKS on entry (the tutorial's opening
+			# walk; the gate's 4 s retail frame is from a followed camera ~1
+			# cell south). --opening-walk=<dx,dy> scripts the same walk so
+			# both frames come from the same walked state. Default off.
+			if _opening_walk != Vector2i.ZERO:
+				_session.move_command(Vector2i(int(player_cell.x), int(player_cell.y)) + _opening_walk)
 			_registry = _session.registry
 			_quest_log = _session.quest_log
 			# The session owns its own Sim, which knows nothing about the
