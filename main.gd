@@ -112,6 +112,9 @@ var _load_path := ""
 ## _player_id become aliases of its members so pre-session call sites keep
 ## working while the cutover proceeds.
 var _session: GameSession = null
+## B1: the hostile's brain, created when the encounter spawns the hostile.
+## Stepped in _process after each sim advance.
+var _hostile_brain: HostileBrain = null
 ## The live quest log and cast the new-game hook produced. Null until
 ## _begin_encounter/_build_quest_cast run; the Checkpoint reads whatever the
 ## scenario actually reached.
@@ -1151,6 +1154,11 @@ func _process(delta: float) -> void:
 	# same frame's view sees the item already in inventory.
 	if _session != null:
 		_session.after_tick()
+	# B1: the hostile approaches and attacks through HostileBrain, stepped
+	# after the sim advance so its movement and cooldown advance in lockstep
+	# with the hero's own tick.
+	if _hostile_brain != null and _sim != null and _registry != null:
+		_hostile_brain.step(_sim, _registry, delta)
 	# Plan 04-03 Task 2: --noplayer means no player at all, not just an
 	# invisible one -- the camera must keep behaving exactly as it does today
 	# (Task 2's own reference-capture regression: --sector=50,50 with the
@@ -1565,6 +1573,28 @@ func _begin_encounter(install: String, items) -> void:
 	# here, so ScenarioCheckpoint.capture reads the same object the VM wrote
 	# rather than a copy.
 	_quest_log = _encounter.log
+	# B1: the hostile is a LIVE actor with a brain. Wire approach + attack
+	# through HostileBrain using the creature's own derived AT/PA/damage —
+	# no longer just a static body. The brain is stepped in _process
+	# after _advance_sim. The hostile's AT is derived from its creature
+	# base attributes the same way the encounter derives the hero's —
+	# NOT the hero's own AT.
+	if _encounter.foe_id != 0:
+		var foe := _registry.get_actor(_encounter.foe_id)
+		if foe != null:
+			var foe_at: float = Combat.rating(
+				Combat.base_attack(_encounter.foe_base[0], _encounter.foe_base[2]),
+				Encounter.FOE_MULT, _encounter.proz_aw)
+			var hero_pa: float = Combat.rating(
+				Combat.base_defence(_encounter.hero_attrs[0], _encounter.hero_attrs[2]),
+				1.0, 1.0)
+			foe.set_meta("at", foe_at)
+			foe.set_meta("pa", hero_pa)
+			foe.set_meta("raw_damage", 7.0)
+			_hostile_brain = HostileBrain.new()
+			_hostile_brain.setup(_encounter.foe_id, _player_id, 1.8, 2.0)
+			print("ai\thostile=%d\ttarget=%d\tfoe_at=%.1f\thero_pa=%.1f\trange=1.8\tcd=2.0"
+				% [_encounter.foe_id, _player_id, foe_at, hero_pa])
 	# The hero's first assigned art draws its slot from the art's own element
 	# triple (row 1043 / sub_85E676A) -- NOT from the loose icon texture. The
 	# element names route it to the skill or spell column; an art with no
