@@ -125,6 +125,27 @@ func _init() -> void:
 		% delegate_swings[0])
 	expect(hero.hp < 100, "delegate must own the damage")
 
+	# --- U0 retarget: mid-fight the brain switches to a second target ---
+	var foe2_id := reg.spawn(107, Vector2(3242, 2511), 134, 134)
+	var foe2 := reg.get_actor(foe2_id)
+	foe2.set_meta("at", 20.0)
+	foe2.set_meta("pa", 20.0)
+	foe2.set_meta("raw_damage", 3.0)
+	var brain3 := HostileBrain.new()
+	brain3.setup(foe_id, hero_id, ATTACK_RANGE, 0.05)
+	hero.flags |= ActorState.FLAG_ALIVE
+	hero.hp = 100
+	brain3.retarget(foe2_id)
+	var foe2_hit := false
+	for i in 600:
+		sim.advance(sim.tick_dt(), reg, hero.cell)
+		brain3.step(sim, reg, 1.0 / 30.0)
+		if foe2.hp < 134:
+			foe2_hit = true
+			break
+	expect(foe2_hit, "retargeted brain must attack the NEW target")
+	expect(hero.hp == 100, "retargeted brain must not attack the OLD target")
+
 	print("hostile_ai_check\tOK\tapproach=%f->%f\thp=%d->%d\tdelegated=%d"
 		% [start_dist, approach_dist, hp_before, hp_after, delegate_swings[0]])
 	finish(1 if fails > 0 else 0)

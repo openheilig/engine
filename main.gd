@@ -1358,6 +1358,17 @@ func _on_move_click(goal: Vector2i) -> void:
 		return
 	if _door_transition(goal):
 		return
+	# U0: a click on a living hostile retargets the hero's brain and walks
+	# into attack range -- the delegate from _begin_encounter closes over
+	# the old foe, so retarget drops it (the plain kernel path takes over).
+	if _hero_brain != null and _registry != null:
+		for aid in _registry.ids():
+			var other: ActorState = _registry.get_actor(int(aid))
+			if other == null or other.id == _player_id 					or (other.flags & ActorState.FLAG_ALIVE) == 0:
+				continue
+			if Vector2i(int(other.cell.x), int(other.cell.y)) == goal 					or other.cell.distance_to(Vector2(goal) + Vector2(0.5, 0.5)) <= 1.0:
+				_hero_brain.retarget(other.id)
+				break
 	# S0: commands enter through the session. When no session exists (probe/
 	# record-replay/fixed-region modes), the direct sim write remains -- those
 	# modes are self-contained harnesses, not the production path.

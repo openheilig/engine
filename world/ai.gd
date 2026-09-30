@@ -41,6 +41,16 @@ func setup(hostile_id: int, target: int, range_cells: float, cooldown_s: float) 
 	attack_count = 0
 
 
+## U0: click-to-attack retargeting. Keeps the swing cooldown (a retarget
+## does not reset the clock) and drops any delegated swing -- the delegate
+## closed over the old target's encounter context.
+func retarget(new_target: int) -> void:
+	if new_target == target_id:
+		return
+	target_id = new_target
+	attack_delegate = Callable()
+
+
 ## One sim tick. Moves toward the target if out of range (walkable-check
 ## steering: try the direct heading first, then ±30°, ±60°, ±90° offsets —
 ## the first walkable direction wins). Attacks if in range and the cooldown
