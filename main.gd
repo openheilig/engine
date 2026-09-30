@@ -1376,6 +1376,17 @@ func _advance_sim(dt: float, focus: Vector2) -> int:
 	return ran
 
 
+func _unhandled_key_input(event: InputEvent) -> void:
+	var k := event as InputEventKey
+	if k == null or not k.pressed or k.echo:
+		return
+	if k.keycode == KEY_F11:
+		var mode := DisplayServer.window_get_mode()
+		DisplayServer.window_set_mode(
+			DisplayServer.WINDOW_MODE_WINDOWED if mode == DisplayServer.WINDOW_MODE_FULLSCREEN
+			else DisplayServer.WINDOW_MODE_FULLSCREEN)
+
+
 func _on_move_click(goal: Vector2i) -> void:
 	if _player_id == ActorRegistry.INVALID_ID or _sim == null or _sim.path_window == null:
 		return
@@ -4584,6 +4595,9 @@ func _build_hud(tex_pak) -> void:
 	print("hud\tpieces=%d\tmissing=%s" % [_hud.drawn, _hud.missing])
 	_inventory_panel = Sacred.InventoryPanel.new()
 	add_child(_inventory_panel)
+	# M1: F11 toggles windowed fullscreen; the view is orthographic at a
+	# fixed zoom, so a mode switch needs no re-layout.
+
 
 
 ## Opens world/sectors.keyx once, for the sector-change path. Non-fatal: a run
