@@ -1270,9 +1270,15 @@ func _on_move_click(goal: Vector2i) -> void:
 		return
 	if _door_transition(goal):
 		return
-	_sim.pending_goal_actor_id = _player_id
-	_sim.pending_goal = goal
-	_sim.pending_goal_tick = -1
+	# S0: commands enter through the session. When no session exists (probe/
+	# record-replay/fixed-region modes), the direct sim write remains -- those
+	# modes are self-contained harnesses, not the production path.
+	if _session != null:
+		_session.move_command(goal)
+	else:
+		_sim.pending_goal_actor_id = _player_id
+		_sim.pending_goal = goal
+		_sim.pending_goal_tick = -1
 	print("click_goal\tcell=%d,%d\tactor=%d" % [goal.x, goal.y, _player_id])
 
 
