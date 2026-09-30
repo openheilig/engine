@@ -375,6 +375,7 @@ var _install_ref := ""
 var _spawn_loot_def := 0
 ## C3: the death fact line fires once per death (reset by respawn).
 var _hero_dead_reported := false
+var _hero_place_reported := false
 ## E2: creature ids whose first-kill unique roll has been consumed.
 var _loot_seen_types := {}
 var _show_player := true   ## --noplayer: suppress building the player view entirely (Task 3's Gate 1 needs the camera following the player with the player itself not drawn), in the style of --noobjects.
@@ -4634,6 +4635,12 @@ func _face_player(p: ActorState) -> void:
 		_player_shadow_last_facing = p.facing
 	if _sim.interior != null:
 		_update_native_actor(_player_view, p.cell, _player_shadow_heading, _sim.interior.support_ref())
+		if not _hero_place_reported:
+			_hero_place_reported = true
+			var data := _sim.interior.cell_data(Vector2i(floori(p.cell.x), floori(p.cell.y)), _sim.interior.support_ref())
+			var h := PlayerView.NativeActorShadow.support_height(p.cell, data, 0, 0.0)
+			print("hero-place\tcell=%s\tsupport=%d\theight=%.1f"
+				% [p.cell, _sim.interior.support_ref(), h])
 
 
 ## A class's HERO entry, joined through the authored item model name. Requiring
