@@ -380,6 +380,8 @@ var _hero_place_reported := false
 var _loot_seen_types := {}
 ## P2: --hero=<path> imports a retail hero save instead of the template.
 var _hero_path := ""
+## U0: the inventory panel (I toggles it).
+var _inventory_panel: Sacred.InventoryPanel
 ## S1: the Seraphim vectoren + funkcode for the sector scheduler, and the
 ## visited-sector set that decides Init vs Enter.
 var _sector_vec: Sacred.Vectoren
@@ -1235,6 +1237,9 @@ func _process(delta: float) -> void:
 	# C2: rebuild loot views after a kill drop or a pickup consumption.
 	if _loot_dirty:
 		_sync_loot_views()
+	# U0: keep the inventory panel current after any loot change.
+	if _inventory_panel != null and _inventory_panel.visible and _session != null:
+		_inventory_panel.refresh(_session.items.all_instances(), _shadow_items)
 	# Plan 04-03 Task 2: --noplayer means no player at all, not just an
 	# invisible one -- the camera must keep behaving exactly as it does today
 	# (Task 2's own reference-capture regression: --sector=50,50 with the
@@ -4548,6 +4553,8 @@ func _build_hud(tex_pak) -> void:
 				_hud.show_line(String(l["text"]))
 				break
 	print("hud\tpieces=%d\tmissing=%s" % [_hud.drawn, _hud.missing])
+	_inventory_panel = Sacred.InventoryPanel.new()
+	add_child(_inventory_panel)
 
 
 ## Opens world/sectors.keyx once, for the sector-change path. Non-fatal: a run
