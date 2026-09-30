@@ -50,6 +50,7 @@ var player_hp_max := 0
 var hero_level: int = 1
 var hero_xp: int = 0
 var hero_skill_points: int = 0
+var hero_gold: int = 0
 var hero_base_stk: int = 0
 var hero_base_rephy: int = 0
 var tick := 0
@@ -61,7 +62,8 @@ var tick_hz: int = Sim.TICK_HZ
 ## because the composition root already resolved the cell against it --
 ## re-checking with a second Walkable would make the state depend on which
 ## caller remembered to bind one.
-static func new_game(install_path: String, spawn_cell: Vector2) -> GameSession:
+static func new_game(install_path: String, spawn_cell: Vector2,
+		hero_path: String = "") -> GameSession:
 	var s := GameSession.new()
 	s.install = install_path
 	s.registry = ActorRegistry.new()
@@ -69,18 +71,35 @@ static func new_game(install_path: String, spawn_cell: Vector2) -> GameSession:
 	s.sim = Sim.new(s.tick_hz)
 	s.items = ItemInstances.new()
 
+	# P2: an explicit hero path imports a RETAIL hero save (a .pax -- the
+	# templates are the same format). Level, XP and skill points come with
+	# the file instead of the new-game defaults. Falls back to the start
+	# template when absent/unreadable.
 	# Hero max HP: the transcribed sub_81F4FFA base over the template's
 	# (STK, REPHY) pair -- live-witnessed on two classes (119, 147;
 	# checks/hero_hp_check.gd re-derives the join from the templates).
 	var hero_hp := 100
-	var hero := Sacred.Hero.new(install_path.path_join("templates/" + s.start_template))
+	var hero_path_final := hero_path
+	if hero_path_final == "":
+		hero_path_final = install_path.path_join("templates/" + s.start_template)
+	var hero := Sacred.Hero.new(hero_path_final)
 	if hero.found and hero.attributes().size() >= 4:
 		var stk: int = hero.attributes()[0]
 		var rephy: int = hero.attributes()[3]
 		s.hero_base_stk = stk
 		s.hero_base_rephy = rephy
-		hero_hp = ActorStats.max_hp(stk, rephy, stk, rephy,
-			hero.level if hero.level > 0 else 1)
+		var lvl: int = hero.level if hero.level > 0 else 1
+		hero_hp = ActorStats.max_hp(stk, rephy, stk, rephy, lvl)
+		# P2: the imported hero's own progression.
+		if hero_path != "":
+			s.hero_level = lvl
+			s.hero_xp = maxi(0, hero.experience)
+			# One skill point per attained level beyond the first -- the same
+			# port decision award_xp makes (retail's curve is un-decoded).
+			s.hero_skill_points = lvl - 1
+			# Purse: the imported hero carries her own gold (C2's future
+			# inventory keeps the count; nothing spends it yet).
+			s.hero_gold = maxi(0, hero.gold)
 	s.player_hp = hero_hp
 	s.player_hp_max = hero_hp
 	s.player_cell = spawn_cell
@@ -244,6 +263,7 @@ func snapshot() -> Dictionary:
 	snap["hero_level"] = hero_level
 	snap["hero_xp"] = hero_xp
 	snap["hero_skill_points"] = hero_skill_points
+	snap["hero_gold"] = hero_gold
 	snap["hero_base_stk"] = hero_base_stk
 	snap["hero_base_rephy"] = hero_base_rephy
 	# W2: trigger states persist -- opened doors and selected storeys
@@ -273,6 +293,7 @@ func restore(snap: Dictionary) -> String:
 	hero_level = maxi(1, int(snap.get("hero_level", 1)))
 	hero_xp = maxi(0, int(snap.get("hero_xp", 0)))
 	hero_skill_points = maxi(0, int(snap.get("hero_skill_points", 0)))
+	hero_gold = maxi(0, int(snap.get("hero_gold", 0)))
 	hero_base_stk = int(snap.get("hero_base_stk", hero_base_stk))
 	hero_base_rephy = int(snap.get("hero_base_rephy", hero_base_rephy))
 	if sim != null and sim.interior != null \

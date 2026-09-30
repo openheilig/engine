@@ -378,6 +378,8 @@ var _hero_dead_reported := false
 var _hero_place_reported := false
 ## E2: creature ids whose first-kill unique roll has been consumed.
 var _loot_seen_types := {}
+## P2: --hero=<path> imports a retail hero save instead of the template.
+var _hero_path := ""
 ## S1: the Seraphim vectoren + funkcode for the sector scheduler, and the
 ## visited-sector set that decides Init vs Enter.
 var _sector_vec: Sacred.Vectoren
@@ -715,6 +717,10 @@ func _ready() -> void:
 			_save_path = a.trim_prefix("--save=")
 		elif a.begins_with("--load="):
 			_load_path = a.trim_prefix("--load=")
+		elif a.begins_with("--hero="):
+			# P2: import a retail hero save (.pax) instead of the start
+			# template -- level, XP, gold and skill points come with the file.
+			_hero_path = a.trim_prefix("--hero=")
 		elif a.begins_with("--crowd="):
 			_has_crowd = true
 			_crowd_arg = a.trim_prefix("--crowd=")
@@ -905,7 +911,7 @@ func _ready() -> void:
 			# paths produce identical state by construction. _registry/
 			# _quest_log/_player_id remain as aliases for the many call sites
 			# that predate the session; they are the same objects.
-			_session = GameSession.new_game(install, player_cell)
+			_session = GameSession.new_game(install, player_cell, _hero_path)
 			_registry = _session.registry
 			_quest_log = _session.quest_log
 			# The session owns its own Sim, which knows nothing about the
