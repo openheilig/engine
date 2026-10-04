@@ -135,7 +135,7 @@ func _init(pak: Pak) -> void:
 		definitions[i] = pak.blob(i)
 	# Retail fills generated weapon types before consumers resolve their art.
 	# A single ordered pass is significant for chained and forward parents.
-	var weapons := Weapons.new(pak.source_path().get_base_dir().path_join("weapon.pak"))
+	var weapons := Weapons.new(pak.requested_path.get_base_dir().path_join("weapon.pak"))
 	weapons.apply_to(definitions)
 	# Level-AND form (_0U1_) or single-level form (_1_), then a part number
 	# that may carry a letter suffix (_00A) or a part-range (_11U21). The

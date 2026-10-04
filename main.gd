@@ -489,6 +489,14 @@ func _ready() -> void:
 			+ "or write install_path into user://openheilig.cfg.")
 		return
 
+	var argv := OS.get_cmdline_user_args() + OS.get_cmdline_args()
+	# Archive overrides must exist before texture/items/world archives open.
+	Sacred.Pak.install_root = install
+	Sacred.Pak.mod_root = ""
+	for arg in argv:
+		if arg.begins_with("--mod="):
+			Sacred.Pak.mod_root = arg.trim_prefix("--mod=")
+
 	var tiles_path := install.path_join("pak/tiles.pak")
 	var tex_pak := Sacred.Pak.new(install.path_join("pak/texture.pak"))
 	_tex_pak_ref = tex_pak
@@ -529,7 +537,6 @@ func _ready() -> void:
 	var footprints: Sacred.Footprints = null
 	if statics != null and items != null:
 		footprints = Sacred.Footprints.new(statics, items)
-	var argv := OS.get_cmdline_user_args() + OS.get_cmdline_args()
 	var stats := "--stats" in argv
 	var markers := "--markers" in argv
 	var objects := not ("--noobjects" in argv)
@@ -753,11 +760,6 @@ func _ready() -> void:
 		elif a.begins_with("--ui-scale="):
 			# M1: scale the text surfaces (inventory panel) for readability.
 			_ui_scale = clampf(float(a.trim_prefix("--ui-scale=")), 0.5, 3.0)
-		elif a.begins_with("--mod="):
-			# D1: a data mod is a directory of replaced pak files overlaid on
-			# the install by relative path. Set before any reader opens.
-			Sacred.Pak.mod_root = a.trim_prefix("--mod=")
-			Sacred.Pak.install_root = install
 		elif a.begins_with("--campaign="):
 			# G2: the Underworld campaign's class data lives under
 			# bin/addon/<class> (its own startcode/vectoren); its start

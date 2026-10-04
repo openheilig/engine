@@ -7,6 +7,7 @@ const MAX_TYPE := 32351
 const HEADER_SIZE := 256
 const RECORD_SIZE := 258
 const EXTRA_SIZE := 64
+const Pak := preload("res://formats/pak.gd")
 
 var found := false
 var _types := PackedInt32Array()
@@ -16,6 +17,7 @@ var _level := PackedInt32Array()
 var _row_of_type: Dictionary = {}
 
 func _init(path: String) -> void:
+	path = Pak.resolve(path)
 	var file := FileAccess.open(path, FileAccess.READ)
 	if file == null:
 		push_error("Weapons: cannot open %s" % path)

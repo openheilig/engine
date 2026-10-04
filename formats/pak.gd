@@ -22,6 +22,8 @@ var kinds := PackedInt32Array()
 var _f: FileAccess
 ## The archive path as opened -- cache keys and diagnostics.
 var path := ""
+## Logical install path, retained for dependent archives that may fall through.
+var requested_path := ""
 ## True when this archive was served from the mod overlay, not the install.
 var from_mod := false
 
@@ -34,9 +36,11 @@ static var mod_root := ""
 static var install_root := ""
 
 static func resolve(archive_path: String) -> String:
-	if mod_root != "" and install_root != "" and archive_path.begins_with(install_root):
-		var suffix := archive_path.substr(install_root.length())
-		var candidate := mod_root + suffix
+	var root := install_root.simplify_path().trim_suffix("/")
+	var requested := archive_path.simplify_path()
+	if mod_root != "" and root != "" and requested.begins_with(root + "/"):
+		var suffix := requested.substr(root.length() + 1)
+		var candidate := mod_root.simplify_path().path_join(suffix)
 		if FileAccess.file_exists(candidate):
 			return candidate
 	return archive_path
@@ -47,6 +51,7 @@ func is_mod() -> bool:
 
 
 func _init(archive_path: String) -> void:
+	requested_path = archive_path
 	var open_path := resolve(archive_path)
 	from_mod = open_path != archive_path
 	path = open_path

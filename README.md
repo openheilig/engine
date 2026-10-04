@@ -111,6 +111,13 @@ a class mismatch is refused before live state is replaced. Older fragment
 saves or snapshots without class identity are refused rather than guessed.
 For example, use `--class=type_npc_zwerg` for both saving and loading a Dwarf.
 
+`--mod=<directory>` supplies whole-archive overrides at the same relative
+paths as the install, for example `<directory>/pak/items.pak`. Overrides are
+configured before startup archives open. An items-only mod can retain the
+base install's `weapon.pak`; sibling dependencies resolve independently.
+Paths outside the install directory are not redirected. Record-level merging,
+general loose-file overrides, and code mods are not implemented by this option.
+
 
 To inspect an authored native motion rather than choose a clip by name:
 

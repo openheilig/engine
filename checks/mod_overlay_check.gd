@@ -23,6 +23,7 @@ func _init() -> void:
 	co.store_buffer(ci.get_buffer(ci.get_length()))
 	co.close()
 	ci.close()
+	var base_items := Sacred.Items.new(Sacred.Pak.new(src))
 
 	# The overlay serves the mod copy for install-suffixed paths.
 	Sacred.Pak.install_root = install
@@ -37,6 +38,20 @@ func _init() -> void:
 
 	# A path outside the install root never overlays.
 	expect(Sacred.Pak.resolve("/etc/hostname") == "/etc/hostname", "foreign paths untouched")
+	# An install-like prefix is not a directory boundary.
+	var sibling_path := install + "-backup/pak/items.pak"
+	var misleading_mod := mod_root + "-backup/pak/items.pak"
+	DirAccess.make_dir_recursive_absolute(misleading_mod.get_base_dir())
+	var marker := FileAccess.open(misleading_mod, FileAccess.WRITE)
+	marker.store_string("synthetic sibling marker")
+	marker.close()
+	expect(Sacred.Pak.resolve(sibling_path) == sibling_path,
+		"an install-prefix sibling must not be redirected into the mod")
+
+	Sacred.Pak.install_root = install + "/"
+	expect(Sacred.Pak.resolve(src) == dst,
+		"a trailing slash on the install root must not disable the overlay")
+	Sacred.Pak.install_root = install
 
 	# The reader reports provenance: open via the INSTALL path with the
 	# overlay active and the mod serves it.
@@ -45,12 +60,19 @@ func _init() -> void:
 	expect(pk.path == dst, "the overlaid pak opens the mod copy")
 	var base := Sacred.Pak.new(install.path_join("pak/sound.pak"))
 	expect(base.is_open() and not base.from_mod, "the base pak reports not-from-mod")
+	# Replacing items.pak alone must retain weapon-generated definitions:
+	# weapon.pak is a logical sibling and may still live in the base install.
+	var mod_items := Sacred.Items.new(pk)
+	var changed_definitions := 0
+	for type in base_items.record_count():
+		if base_items.category_of(type) != mod_items.category_of(type) \
+				or base_items.name_of(type) != mod_items.name_of(type) \
+				or base_items.texture_of(type) != mod_items.texture_of(type):
+			changed_definitions += 1
+	expect(changed_definitions == 0,
+		"items-only overlay must preserve base weapon inheritance (%d definitions changed)"
+			% changed_definitions)
 
-	# Same bytes through the overlay: the mod copy is a copy.
-	var a := pk.blob(1)
-	var orig := Sacred.Pak.new(src)
-	var b := orig.blob(1)
-	expect(a == b, "overlay bytes must equal the copied source bytes")
 
 	Sacred.Pak.mod_root = ""
 	Sacred.Pak.install_root = ""
