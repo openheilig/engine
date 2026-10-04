@@ -94,6 +94,24 @@ runs need no flag. `main.gd` is the composition root: it resolves the install,
 builds the readers, and dispatches on the CLI flags (`--grn=NAME` renders a
 single model, and so on).
 
+Class selection uses `--class=type_npc_zwerg` (Dwarf), or another supported
+`type_npc_*` class directory. The selected class must have a matching retail
+template, a mapped body model, and an authored `StartPosition`; startup exits
+with an error instead of silently substituting another class. Vampire body
+rendering is not supported by the current class-model map, even though its
+template and script data can be read.
+Encounter statistics and combat arts use that same selected template (or
+`--hero=<pax>` import), and encounter scripts use the selected campaign tree.
+The fixed demonstration quest is still not a complete campaign quest scheduler.
+
+`--save=<file.json>` and `--load=<file.json>` use engine-owned session saves,
+not retail `gameNN.pak` files. Saves carry the hero class, progression, items,
+and world trigger states. Launch with the matching `--class` when loading;
+a class mismatch is refused before live state is replaced. Older fragment
+saves or snapshots without class identity are refused rather than guessed.
+For example, use `--class=type_npc_zwerg` for both saving and loading a Dwarf.
+
+
 To inspect an authored native motion rather than choose a clip by name:
 
 ```

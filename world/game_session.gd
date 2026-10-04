@@ -85,6 +85,7 @@ static func new_game(install_path: String, spawn_cell: Vector2,
 		hero_path_final = install_path.path_join("templates/" + s.start_template)
 	var hero := Sacred.Hero.new(hero_path_final)
 	if hero.found and hero.attributes().size() >= 4:
+		s.start_class = hero.class_dir()
 		var stk: int = hero.attributes()[0]
 		var rephy: int = hero.attributes()[3]
 		s.hero_base_stk = stk
@@ -261,6 +262,7 @@ func _as_session_dict() -> Dictionary:
 func snapshot() -> Dictionary:
 	var snap := SaveState.snapshot(_as_session_dict())
 	snap[SCHEMA_KEY_ITEMS] = items.snapshot()
+	snap["start_class"] = start_class
 	snap["hero_level"] = hero_level
 	snap["hero_xp"] = hero_xp
 	snap["hero_skill_points"] = hero_skill_points
@@ -278,6 +280,26 @@ func snapshot() -> Dictionary:
 func restore(snap: Dictionary) -> String:
 	if int(snap.get("schema", -1)) < SCHEMA:
 		return "schema %s is older than %d" % [str(snap.get("schema")), SCHEMA]
+	var saved_class := String(snap.get("start_class", ""))
+	if saved_class.is_empty():
+		return "save does not identify its hero class"
+	if saved_class != start_class:
+		return "save class %s does not match session class %s" % [saved_class, start_class]
+	var trigger_states := PackedInt32Array()
+	if sim != null and sim.interior != null and snap.has("trigger_states"):
+		var raw_states: Variant = snap["trigger_states"]
+		if not (raw_states is Array or raw_states is PackedInt32Array):
+			return "trigger_states is not an array"
+		if raw_states.size() != sim.interior.triggers.count():
+			return "trigger state count does not match the retail world"
+		trigger_states.resize(raw_states.size())
+		for i in raw_states.size():
+			var value: Variant = raw_states[i]
+			if not (value is int or value is float):
+				return "trigger state %d is not numeric" % i
+			if value < 0 or value > 0xffff or value != int(value):
+				return "trigger state %d is not a u16 value" % i
+			trigger_states[i] = int(value)
 	# SaveState validates its own v1 fragment contract; the session owns the
 	# composite version. Normalize the copy handed down so the fragment
 	# validator sees its own version, never the composite's.
@@ -297,9 +319,8 @@ func restore(snap: Dictionary) -> String:
 	hero_gold = maxi(0, int(snap.get("hero_gold", 0)))
 	hero_base_stk = int(snap.get("hero_base_stk", hero_base_stk))
 	hero_base_rephy = int(snap.get("hero_base_rephy", hero_base_rephy))
-	if sim != null and sim.interior != null \
-			and snap.get("trigger_states") is PackedInt32Array:
-		sim.interior.triggers.restore_states(snap["trigger_states"])
+	if not trigger_states.is_empty():
+		sim.interior.triggers.restore_states(trigger_states)
 	var p := registry.get_actor(player_id)
 	if p != null:
 		player_cell = p.cell

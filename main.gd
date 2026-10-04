@@ -843,7 +843,9 @@ func _ready() -> void:
 	for a in argv:
 		if a.begins_with("--fight="):
 			_fight_swings = maxi(0, a.trim_prefix("--fight=").to_int())
-	_apply_retail_start(install)
+	if not _apply_retail_start(install):
+		get_tree().quit(1)
+		return
 	_player_type = _resolve_player_type()
 
 	if figure_name != "":
@@ -1129,14 +1131,12 @@ func _load_scenario_manifest(path: String) -> Dictionary:
 ## over the fresh new-game world before the first capture, so a restart
 ## continues the saved state. Both refuse loudly rather than pretending.
 func _run_save_or_load() -> void:
-	if _player_id == ActorRegistry.INVALID_ID or _quest_log == null:
-		push_error("save/load: no new-game state (player_id=%d, quest_log=%s)"
-			% [_player_id, _quest_log != null])
+	if _session == null or _player_id == ActorRegistry.INVALID_ID or _quest_log == null:
+		push_error("save/load: no authoritative game session")
 		get_tree().quit(1)
 		return
 	if _save_path != "":
-		var session := _session_dict()
-		var snap := SaveState.snapshot(session)
+		var snap := _session.snapshot()
 		var err: String = SaveStore.save(_save_path, snap)
 		if err != "":
 			push_error("save: %s" % err)
@@ -1148,12 +1148,12 @@ func _run_save_or_load() -> void:
 		await _maybe_screenshot()
 		return
 	# LOAD: restore over the fresh world, then report the restored hero.
-	var snap := SaveStore.load(_load_path)
+	var snap := SaveStore.load(_load_path, GameSession.SCHEMA)
 	if snap.is_empty():
 		push_error("load: %s has no usable save" % _load_path)
 		get_tree().quit(1)
 		return
-	var err: String = SaveState.restore(snap, _session_dict())
+	var err: String = _session.restore(snap)
 	if err != "":
 		push_error("load: %s" % err)
 		get_tree().quit(1)
@@ -1769,7 +1769,11 @@ func _begin_encounter(install: String, items) -> void:
 		return
 	var creatures := Sacred.Creatures.new(install.path_join("pak"))
 	var factions := Sacred.Factions.new(install)
-	_encounter = Encounter.new(install, _registry, items, creatures, factions)
+	var script_base := "bin/addon" if _campaign != "" else "bin"
+	var hero_source := _hero_path if not _hero_path.is_empty() else \
+		install.path_join("templates").path_join(_start_template)
+	_encounter = Encounter.new(install, _registry, items, creatures, factions,
+		script_base.path_join(_start_class), hero_source)
 	if not _encounter.found:
 		push_warning("encounter: '%s' is not in this tree -- no hostile spawned" % Encounter.FOE_PLACE)
 		_encounter = null
@@ -1945,22 +1949,30 @@ func _anim_clip_state() -> Dictionary:
 	return {"name": _player_view.action, "time": mv.anim_time()}
 
 
-func _apply_retail_start(install: String) -> void:
-	# G1: resolve the class's own template by CharacterType -- the shipped
-	# heroNN.ptx are one per class (Sacred.Hero reads the type), so matching
-	# beats hard-coding an index that only the Seraphim gets right.
+func _apply_retail_start(install: String) -> bool:
+	if not Sacred.Hero.TYPE_DIR.values().has(_start_class):
+		printerr("start: unknown class %s" % _start_class)
+		return false
+	if not CLASS_MODEL.has(_start_class):
+		printerr("start: %s has no supported body model; refusing class substitution" % _start_class)
+		return false
+	var selected_template := ""
 	var tdir := install.path_join("templates")
 	for f in _list_ptx(tdir):
 		var h := Sacred.Hero.new(tdir.path_join(f))
 		if h.found and h.class_dir() == _start_class:
-			_start_template = f
+			selected_template = f
 			break
-	if CLASS_MODEL.has(_start_class):
-		_player_model = CLASS_MODEL[_start_class]
-	else:
-		push_warning("start: no body mesh mapped for %s -- drawing %s" % [_start_class, _player_model])
+	if selected_template.is_empty():
+		printerr("start: no matching retail template for %s" % _start_class)
+		return false
 	var base := "bin/addon" if _campaign != "" else "bin"
 	var sc := Sacred.Startcode.new(install.path_join(base).path_join(_start_class))
+	if sc.start_cell == Sacred.Startcode.NO_CELL:
+		printerr("start: %s declares no StartPosition" % _start_class)
+		return false
+	_start_template = selected_template
+	_player_model = CLASS_MODEL[_start_class]
 	_scripted_objects_by_sector.clear()
 	for object: Dictionary in sc.objects:
 		var cell: Vector2i = object["cell"]
@@ -1970,15 +1982,13 @@ func _apply_retail_start(install: String) -> void:
 		if not _scripted_objects_by_sector.has(key):
 			_scripted_objects_by_sector[key] = []
 		_scripted_objects_by_sector[key].append(object)
-	if sc.start_cell == Sacred.Startcode.NO_CELL:
-		push_warning("start: %s declares no StartPosition -- keeping %s" % [START_CLASS, start_cell])
-		return
 	start_cell = Vector2(sc.start_cell)
 	_retail_start = sc.start_cell
 	_retail_start_layer = sc.start_layer
 	print("start\tclass=%s\tmodel=%s\tcell=%d,%d\tlayer=%d\tsector=%d,%d" % [
 		_start_class, _player_model, sc.start_cell.x, sc.start_cell.y, sc.start_layer,
 		sc.start_cell.x / SECT, sc.start_cell.y / SECT])
+	return true
 
 
 ## Opcode-8 authored objects are not the static.pak sprite list. Their model

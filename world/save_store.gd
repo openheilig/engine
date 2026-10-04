@@ -34,7 +34,9 @@ static func save(path: String, snap: Dictionary) -> String:
 ## Read + validate. Returns the snapshot Dictionary, or {} on ANY failure
 ## (missing, corrupt, wrong schema) with push_error naming the reason.
 ## Empty is "no usable save" — the caller must not silently start fresh.
-static func load(path: String) -> Dictionary:
+## The caller supplies its snapshot contract: GameSession uses its composite
+## schema, while fragment checks use SaveState.SCHEMA.
+static func load(path: String, expected_schema: int = SaveState.SCHEMA) -> Dictionary:
 	if not FileAccess.file_exists(path):
 		push_error("SaveStore: no save at %s" % path)
 		return {}
@@ -48,9 +50,9 @@ static func load(path: String) -> Dictionary:
 	if typeof(parsed) != TYPE_DICTIONARY:
 		push_error("SaveStore: %s is not a JSON object" % path)
 		return {}
-	if int(parsed.get(SCHEMA_KEY, -1)) != SaveState.SCHEMA:
+	if int(parsed.get(SCHEMA_KEY, -1)) != expected_schema:
 		push_error("SaveStore: %s has schema %s, engine speaks %d -- refusing"
-			% [path, str(parsed.get(SCHEMA_KEY)), SaveState.SCHEMA])
+			% [path, str(parsed.get(SCHEMA_KEY)), expected_schema])
 		return {}
 	return parsed
 

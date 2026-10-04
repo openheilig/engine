@@ -136,16 +136,21 @@ var _vec = null
 var _registry: ActorRegistry = null
 var _attacks := 0
 var _hits := 0
+var _script_tree := TREE
+var _hero_path := ""
 
 
 ## `registry` may be null, in which case no actor is spawned and the encounter
 ## is data-only -- which is what a gate wants when it is checking the quest
 ## rather than the world.
-func _init(install: String, registry: ActorRegistry, items, creatures, factions) -> void:
-	var dir := install.path_join(TREE)
+func _init(install: String, registry: ActorRegistry, items, creatures, factions,
+		script_tree: String = TREE, hero_path: String = "") -> void:
+	_script_tree = script_tree
+	_hero_path = hero_path
+	var dir := install.path_join(_script_tree)
 	_vec = Sacred.Vectoren.new(dir)
 	if not _vec.found or not _vec.has_quest(QUEST):
-		push_warning("Encounter: quest %d is not in %s" % [QUEST, TREE])
+		push_warning("Encounter: quest %d is not in %s" % [QUEST, _script_tree])
 		return
 	_code = FileAccess.get_file_as_bytes(dir.path_join("funkcode.bin"))
 	if _code.is_empty():
@@ -190,17 +195,20 @@ func _init(install: String, registry: ActorRegistry, items, creatures, factions)
 	found = foe_cell.x >= 0
 
 
-## The hero retail would hand a new game. The eight templates are scanned for
-## the one whose CharacterType is HERO_TYPE rather than a filename being
-## assumed: `hero01.ptx` happens to be the Seraphim, but the file ORDER and the
-## type enum are two different things and only the enum is documented.
+## Explicit production hero input uses the selected template/import. The
+## standalone Seraphim encounter checks retain their default type-1 lookup.
 func _read_hero(install: String) -> void:
-	for i in TEMPLATES:
-		var path := install.path_join("templates/hero%02d.ptx" % i)
+	var paths := PackedStringArray()
+	if not _hero_path.is_empty():
+		paths.append(_hero_path)
+	else:
+		for i in TEMPLATES:
+			paths.append(install.path_join("templates/hero%02d.ptx" % i))
+	for path in paths:
 		if not FileAccess.file_exists(path):
 			continue
 		var h = Sacred.Hero.new(path)
-		if not h.found or h.character_type != HERO_TYPE:
+		if not h.found or (_hero_path.is_empty() and h.character_type != HERO_TYPE):
 			continue
 		hero_level = h.level
 		hero_skills = h.skills()
@@ -225,7 +233,7 @@ func _read_hero(install: String) -> void:
 		var res = Sacred.Resources.new(install.path_join("scripts/us/global.res"))
 		hero_class = res.slot(h.class_slot())
 		return
-	push_warning("Encounter: no template carries CharacterType %d" % HERO_TYPE)
+	push_warning("Encounter: no readable hero for %s" % _script_tree)
 
 
 ## The hostile's level, which retail derives from the HERO's level clamped into
@@ -238,7 +246,7 @@ func _read_level(install: String, sc) -> void:
 	var cell: Vector2i = sc.start_cell
 	if cell.x < 0:
 		return
-	var sl = Sacred.SpawnLevels.new(install.path_join(TREE))
+	var sl = Sacred.SpawnLevels.new(install.path_join(_script_tree))
 	if not sl.found:
 		return
 	band = sl.band_at_cell(cell)
