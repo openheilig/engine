@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## world/triggers.pak -- the world's 16-byte-record collision TYPE TABLE.
 ##
 ## Layout, measured 2026-08-13 and re-pinned by row 1156 (Armalion
@@ -25,7 +26,7 @@ var _f: FileAccess
 var count: int = 0
 
 func _init(path: String) -> void:
-	_f = FileAccess.open(path, FileAccess.READ)
+	_f = FileAccess.open(Pak.resolve(path), FileAccess.READ)
 	if _f == null:
 		push_error("TriggerType: cannot open %s" % path)
 		return

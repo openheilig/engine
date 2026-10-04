@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## bin/sets.bin -- the ITEM SET table: 65 named equipment suites and the
 ## items.pak records that belong to each. Compiled by retail from
 ## scripts/sets.txt, which retail does not ship (autoresearch rows 923, 924).
@@ -56,7 +57,7 @@ var _set_of: Dictionary[int, int] = {}                 ## items.pak record -> se
 
 
 func _init(install: String) -> void:
-	var raw := FileAccess.get_file_as_bytes(install.path_join("bin/sets.bin"))
+	var raw := FileAccess.get_file_as_bytes(Pak.resolve(install.path_join("bin/sets.bin")))
 	if raw.size() < 4:
 		push_warning("Sets: bin/sets.bin missing under %s" % install)
 		return

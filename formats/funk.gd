@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## bin/TYPE_NPC_*/funkcode.bin -- the script bytecode's SPAWN TABLES.
 ##
 ## Framing (autoresearch row 711, confirmed against the interpreter's own
@@ -86,7 +87,7 @@ var _sector := Vector2i(-1, -1)
 ## vectoren.bin that indexes it.
 func _init(dir: String) -> void:
 	_read_procs(dir.path_join("vectoren.bin"))
-	var b := FileAccess.get_file_as_bytes(dir.path_join("funkcode.bin"))
+	var b := FileAccess.get_file_as_bytes(Pak.resolve(dir.path_join("funkcode.bin")))
 	if b.is_empty():
 		push_error("Funk: cannot read funkcode.bin in %s" % dir)
 		return
@@ -133,7 +134,7 @@ func _init(dir: String) -> void:
 ## comment exists to prevent: it invents sector (0, 84) or (84, 84)
 ## depending on which end you pad.
 func _read_procs(path: String) -> void:
-	var v := FileAccess.get_file_as_bytes(path)
+	var v := FileAccess.get_file_as_bytes(Pak.resolve(path))
 	if v.size() < VEC_HDR:
 		push_error("Funk: cannot read %s" % path)
 		return

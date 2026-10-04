@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## The PER-SECTOR LEVEL BAND: where a spawned creature's level comes from
 ## (autoresearch row 953).
 ##
@@ -98,7 +99,7 @@ func _init(dir: String) -> void:
 	if not vec.found:
 		push_warning("SpawnLevels: vectoren.bin did not decode in %s" % dir)
 		return
-	var code := FileAccess.get_file_as_bytes(dir.path_join("funkcode.bin"))
+	var code := FileAccess.get_file_as_bytes(Pak.resolve(dir.path_join("funkcode.bin")))
 	if code.is_empty():
 		push_warning("SpawnLevels: funkcode.bin is unreadable in %s" % dir)
 		return

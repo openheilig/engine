@@ -6,7 +6,7 @@ extends RefCounted
 ## committed state through it; nothing presentation-side writes back.
 ##
 ## WHAT IT OWNS TODAY (v1, grows with each state owner per the plan):
-##   install/start_template/start_class  content identity
+##   resolved content_identity + install/start_template/start_class
 ##   registry + player_id + player_cell/hp/hp_max  the hero, derived
 ##   quest_log  quest state, entered ids, cast handles
 ##   sim        the fixed-tick accumulator this session advances
@@ -30,13 +30,15 @@ const START_CLASS := "type_npc_seraphim"
 const START_TEMPLATE := "hero01.ptx"
 ## bin/ tree for the class's script bytecode and start position.
 const START_SET := 6
-## SaveState schema v2: v1's state plus the item instances. SaveState.SCHEMA
-## stays at 1 (its own actor/quest contract); the session carries the
-## version because it composes the fragments.
-const SCHEMA := 2
+## Composite schema v3 adds exact resolved content identity. Earlier saves
+## cannot be proven to refer to the same numbered items, so are refused;
+## no implicit migration attaches current definitions to old numeric IDs.
+const SCHEMA := 3
+const ContentProfile := preload("res://formats/mod_manifest.gd")
 const SCHEMA_KEY_ITEMS := "items"
 
 var install := ""
+var _content_identity: Dictionary = {}
 var start_class := START_CLASS
 var start_template := START_TEMPLATE
 var registry: ActorRegistry
@@ -57,6 +59,22 @@ var tick := 0
 var tick_hz: int = Sim.TICK_HZ
 
 
+## Bind the fully composed early-boot profile before snapshot/restore. A live
+## session cannot change definition identity; switching mods creates a session.
+func bind_content_profile(profile: RefCounted) -> String:
+	if profile == null or not profile.ok():
+		return "session requires a valid resolved content profile"
+	if not install.is_empty() and not profile.matches_install(install):
+		return "resolved profile belongs to another install root"
+	var resolved: Dictionary = profile.identity()
+	if not _content_identity.is_empty() and not ContentProfile.same_identity(resolved, _content_identity):
+		return "session is already bound to another content profile"
+	_content_identity = resolved
+	return ""
+
+func content_identity() -> Dictionary:
+	return _content_identity.duplicate(true)
+
 ## Derives the new-game state at `spawn_cell`. `walk` may be null in
 ## renderless construction; the hero's own admission is not re-checked here
 ## because the composition root already resolved the cell against it --
@@ -66,6 +84,8 @@ static func new_game(install_path: String, spawn_cell: Vector2,
 		hero_path: String = "", template: String = "") -> GameSession:
 	var s := GameSession.new()
 	s.install = install_path
+	# The boot path mounts before derivation opens hero/item archives.
+	s._content_identity = Sacred.Pak.content_identity(install_path)
 	s.registry = ActorRegistry.new()
 	s.quest_log = QuestCast.new()
 	s.sim = Sim.new(s.tick_hz)
@@ -260,7 +280,11 @@ func _as_session_dict() -> Dictionary:
 
 
 func snapshot() -> Dictionary:
+	if _content_identity.is_empty():
+		push_error("GameSession: cannot snapshot without a resolved content profile")
+		return {}
 	var snap := SaveState.snapshot(_as_session_dict())
+	snap["content_identity"] = content_identity()
 	snap[SCHEMA_KEY_ITEMS] = items.snapshot()
 	snap["start_class"] = start_class
 	snap["hero_level"] = hero_level
@@ -278,8 +302,14 @@ func snapshot() -> Dictionary:
 
 
 func restore(snap: Dictionary) -> String:
-	if int(snap.get("schema", -1)) < SCHEMA:
-		return "schema %s is older than %d" % [str(snap.get("schema")), SCHEMA]
+	if snap.get("schema", -1) != SCHEMA:
+		return "session schema %s is not %d; unidentified older content cannot be migrated safely" \
+			% [str(snap.get("schema")), SCHEMA]
+	if _content_identity.is_empty():
+		return "session has no resolved content profile; bind it before restoring"
+	if not ContentProfile.same_identity(snap.get("content_identity"), _content_identity):
+		return "save content/profile identity differs; required=%s active=%s; restore the exact packages/versions and bytes" \
+			% [JSON.stringify(snap.get("content_identity")), JSON.stringify(_content_identity)]
 	var saved_class := String(snap.get("start_class", ""))
 	if saved_class.is_empty():
 		return "save does not identify its hero class"
@@ -308,10 +338,7 @@ func restore(snap: Dictionary) -> String:
 	var err := SaveState.restore(fragment, _as_session_dict())
 	if err != "":
 		return err
-	# A v1 snapshot has no items array -- nothing to restore, nothing lost:
-	# v1 saves predate item instances entirely. v2+ carries them.
-	if int(snap.get("schema", 1)) >= SCHEMA:
-		items = ItemInstances.from_snapshot(snap.get(SCHEMA_KEY_ITEMS, []))
+	items = ItemInstances.from_snapshot(snap.get(SCHEMA_KEY_ITEMS, []))
 	# C3: hero progression persists with the session.
 	hero_level = maxi(1, int(snap.get("hero_level", 1)))
 	hero_xp = maxi(0, int(snap.get("hero_xp", 0)))

@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## bin/TYPE_NPC_*/startcode.bin -- the per-class WORLD BOOTSTRAP script: every
 ## fixed NPC and object the world starts with, and where it stands.
 ##
@@ -132,7 +133,7 @@ var _unresolved := 0
 
 ## `dir` is one bin/TYPE_NPC_* directory.
 func _init(dir: String) -> void:
-	var b := FileAccess.get_file_as_bytes(dir.path_join("startcode.bin"))
+	var b := FileAccess.get_file_as_bytes(Pak.resolve(dir.path_join("startcode.bin")))
 	if b.is_empty():
 		push_error("Startcode: cannot read startcode.bin in %s" % dir)
 		return

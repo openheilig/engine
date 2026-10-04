@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## Hero savegames (`*.pax` under `~/.lgp/sacred/`). A PAX file is a fixed
 ## 256-byte header, a section table at 0x0100, and a body per used section.
 ## Written from the bytes of eight retail heroes (TSV rows 530-531); the
@@ -31,7 +32,7 @@ var _by_type: Dictionary[int, int] = {}
 var _f: FileAccess
 
 func _init(path: String) -> void:
-	_f = FileAccess.open(path, FileAccess.READ)
+	_f = FileAccess.open(Pak.resolve(path), FileAccess.READ)
 	if _f == null:
 		push_error("Pax: cannot open %s (%s)" % [path, error_string(FileAccess.get_open_error())])
 		return

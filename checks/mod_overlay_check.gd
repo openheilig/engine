@@ -1,7 +1,7 @@
 extends "res://checks/check.gd"
-## mod_overlay_check.gd -- D1: a data mod is a directory of replaced pak
-## files overlaid by relative path. resolve() serves the mod copy for
-## install-suffixed paths that exist there, and Pak.from_mod reports it.
+## D1: a bare --mod directory becomes one explicit content-addressed package.
+## Items-only whole-file replacement preserves logical weapon sibling fallback.
+const ModManifest := preload("res://formats/mod_manifest.gd")
 
 func _init() -> void:
 	super()
@@ -11,12 +11,10 @@ func _init() -> void:
 
 	# Build a mod dir with ONE replaced file: a copy of items.pak under a
 	# temp mod root (user:// -- nothing derived ships).
-	var mod_root := "user://_mod_overlay_test/mod"
+	var mod_root := ProjectSettings.globalize_path("user://_mod_overlay_%d/mod" % Time.get_ticks_usec())
 	DirAccess.make_dir_recursive_absolute(mod_root.path_join("pak"))
 	var src := install.path_join("pak/items.pak")
 	var dst := mod_root.path_join("pak/items.pak")
-	if FileAccess.file_exists(dst):
-		DirAccess.remove_absolute(dst)
 	var co := FileAccess.open(dst, FileAccess.WRITE)
 	var ci := FileAccess.open(src, FileAccess.READ)
 	assert(co != null and ci != null)
@@ -25,9 +23,15 @@ func _init() -> void:
 	ci.close()
 	var base_items := Sacred.Items.new(Sacred.Pak.new(src))
 
-	# The overlay serves the mod copy for install-suffixed paths.
-	Sacred.Pak.install_root = install
-	Sacred.Pak.mod_root = mod_root
+	# Early boot composes/mounts the package before archives open. A trailing
+	# slash on the install root must not disable the overlay.
+	var profile := ModManifest.new(install + "/", [mod_root])
+	if not expect(Sacred.Pak.configure_profile(profile) == "", profile.error_text()):
+		_cleanup(mod_root)
+		finish(1)
+		return
+	expect(profile.package_order().size() == 1,
+		"bare directory must be observable as one enabled package")
 	var resolved: String = Sacred.Pak.resolve(install.path_join("pak/items.pak"))
 	expect(resolved == dst, "resolve must serve the mod copy")
 	expect(resolved != install.path_join("pak/items.pak"), "resolve must not serve the original")
@@ -48,10 +52,8 @@ func _init() -> void:
 	expect(Sacred.Pak.resolve(sibling_path) == sibling_path,
 		"an install-prefix sibling must not be redirected into the mod")
 
-	Sacred.Pak.install_root = install + "/"
 	expect(Sacred.Pak.resolve(src) == dst,
-		"a trailing slash on the install root must not disable the overlay")
-	Sacred.Pak.install_root = install
+		"a composed trailing-slash install root resolves correctly")
 
 	# The reader reports provenance: open via the INSTALL path with the
 	# overlay active and the mod serves it.
@@ -74,8 +76,20 @@ func _init() -> void:
 			% changed_definitions)
 
 
-	Sacred.Pak.mod_root = ""
-	Sacred.Pak.install_root = ""
+	Sacred.Pak.clear_profile()
+	_cleanup(mod_root)
 
 	print("mod_overlay_check\tOK")
 	finish(1 if fails > 0 else 0)
+
+func _cleanup(mod_root: String) -> void:
+	# Only this check's uniquely owned files/directories, leaf first.
+	for root: String in [mod_root, mod_root + "-backup"]:
+		var file := root.path_join("pak/items.pak")
+		if FileAccess.file_exists(file):
+			DirAccess.remove_absolute(file)
+		if DirAccess.dir_exists_absolute(root.path_join("pak")):
+			DirAccess.remove_absolute(root.path_join("pak"))
+		if DirAccess.dir_exists_absolute(root):
+			DirAccess.remove_absolute(root)
+	DirAccess.remove_absolute(mod_root.get_base_dir())

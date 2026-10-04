@@ -11,15 +11,11 @@ extends RefCounted
 ## synthetic depth band. FloorView composites the model and its blob shadow
 ## between the appropriate static commands in encoded color space.
 
-## FALLBACK ONLY. main.gd passes the body mesh for its START_CLASS
-## (main.gd's CLASS_MODEL), so the drawn hero follows the class whose
-## StartPosition the run spawns at instead of being fixed here. This default
-## survives for the call sites that want *a* hero rig without caring which --
-## the crowd harness and the parity dumps -- and for a class the map has no
-## mesh for, where drawing the wrong body beats drawing none.
-##
-## ponytail: still no class-SELECTION system; START_CLASS is a constant. The
-## upgrade path is a menu that writes it, not a change here.
+## Geometry-only callers may omit a model name to request a Gladiator rig.
+## Playable startup passes its verified class body explicitly and refuses an
+## unknown or unmapped class before constructing PlayerView. In particular,
+## class 6 resolves items.pak's VLADY_D.GRN; VLADY_N.GRN is its distinct second
+## form, not an excuse to substitute another hero or invent a solar clock.
 const MODEL_NAME := "GLADIATOR.GRN"
 
 ## The built rig, parented into the tree by the caller (main.gd), or null

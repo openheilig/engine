@@ -1,15 +1,20 @@
 extends "res://checks/check.gd"
 ## session_items_check.gd -- C2 wiring: the session OWNS the item instances,
 ## pickup/drop go through the command door, and the save snapshot carries
-## them (schema v2). Ground items spawn at real cells; pickup moves the
+## them with exact resolved profile identity. Ground items spawn at real cells; pickup moves the
 ## instance into the hero's inventory; drop puts it back on the ground at
 ## the hero's cell; the whole state roundtrips through SaveState.
+const ModManifest := preload("res://formats/mod_manifest.gd")
 
 func _init() -> void:
 	super()
 	var fails := 0
 	var install := Sacred.find_install()
 	assert(not install.is_empty(), "retail install is required")
+	var profile := ModManifest.new(install)
+	if not expect(Sacred.Pak.configure_profile(profile) == "", profile.error_text()):
+		finish(1)
+		return
 
 	var s := GameSession.new_game(install, Vector2(3236.5, 2511.5))
 
@@ -48,7 +53,7 @@ func _init() -> void:
 		fails += 1
 		printerr("instance not back on the ground after drop: %s" % str(inst2.to_dict() if inst2 else {}))
 
-	# --- snapshot v2 carries items; roundtrip preserves location ---
+	# --- profile-bound snapshot carries items; roundtrip preserves location ---
 	var snap := s.snapshot()
 	var arr: Array = snap.get("items", [])
 	if arr.size() != s.items.count():
@@ -57,7 +62,7 @@ func _init() -> void:
 	var s2 := GameSession.new_game(install, Vector2(3236.5, 2511.5))
 	if s2.restore(snap) != "":
 		fails += 1
-		printerr("restore refused a v2 snapshot")
+		printerr("restore refused the matching-profile snapshot")
 	var inst3 := s2.items.instance(iid)
 	if inst3 == null or inst3.location != ItemInstances.Location.GROUND \
 			or inst3.cell != drop_cell:

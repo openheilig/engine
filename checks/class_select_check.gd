@@ -2,12 +2,17 @@ extends "res://checks/check.gd"
 ## class_select_check.gd -- G1: every one of the eight classes resolves its
 ## own start template by CharacterType, opens its startcode, and builds a
 ## session with derived level-1 HP. The Seraphim default is untouched.
+const ModManifest := preload("res://formats/mod_manifest.gd")
 
 func _init() -> void:
 	super()
 	var fails := 0
 	var install := Sacred.find_install()
 	assert(not install.is_empty(), "retail install is required")
+	var profile := ModManifest.new(install)
+	if not expect(Sacred.Pak.configure_profile(profile) == "", profile.error_text()):
+		finish(1)
+		return
 	var tdir := install.path_join("templates")
 
 	# Pre-read every shipped template once.
@@ -101,8 +106,11 @@ func _init() -> void:
 		"unknown class must refuse startup instead of substituting a hero")
 	expect(app.start_cell == original_cell, "refusal must preserve the start cell")
 	app._start_class = "type_npc_vampirelady"
-	expect(app.call("_apply_retail_start", install) == false,
-		"unmapped Vampire body must refuse instead of drawing another class")
+	expect(app.call("_apply_retail_start", install) == true,
+		"Vampiress must resolve her native body through the production start path")
+	expect(app._player_model == "VLADY_D.GRN"
+		and app.start_cell == Vector2(3500, 2477) and app._retail_start_layer == 2,
+		"Vampiress must retain her own body, authored start and layer")
 	app._start_class = "type_npc_zwerg"
 	expect(app.call("_apply_retail_start", install) == true,
 		"Dwarf must resolve through the production start path")

@@ -9,22 +9,15 @@ extends "res://checks/check.gd"
 ## looks deliberate rather than broken. So the assertions below are about the
 ## PROPERTY that makes the derivation sound, not about any particular angle:
 ##
-##   1. Every class body has a measurable rest facing.
-##   2. Those facings fall into exactly TWO clusters, 90 degrees apart, and the
-##      cluster is predicted by the net rotation of the chain above Bip01.
-##   3. Correcting by the rest facing COLLAPSES the two clusters into one.
-##
-## (3) is the load-bearing one. Without it a per-model constant is just a fudge
-## factor; with it the two families are demonstrably the same rig.
+##   1. Every mapped class body has a measurable rest facing.
+##   2. Facing families agree with the authored chain above Bip01.
+##   3. Actual face() calls turn the posed production rig correctly, including
+##      absolute world-axis anchors. Algebraic cancellation alone is not proof.
 const Main := preload("res://main.gd")
 const NINETY := PI / 2.0
 ## Measured spread inside a cluster is the bodies' own toe splay: worst
 ## pairwise dot 0.9556 in Bip01 space, about 17 degrees.
 const CLUSTER_TOL := deg_to_rad(25.0)
-## Two bodies build no rig at all (models.pak carries no vampiress and no
-## magician mesh under any spelling tried); that is main.gd's finding and not
-## this gate's problem.
-const WANT_BODIES := 7
 
 
 func _init() -> void:
@@ -52,8 +45,6 @@ func _init() -> void:
 		yaws.append(y)
 		aligns.append(_above_bip01(models, e))
 		names.append(mesh)
-	expect(yaws.size() == WANT_BODIES,
-		"%d class bodies measured, expected %d" % [yaws.size(), WANT_BODIES])
 
 	# (2) THE ALIGNMENT IS QUANTISED. Every body's chain above Bip01 nets to 0
 	# or -90 degrees about the vertical and never to anything between. This is
@@ -88,28 +79,6 @@ func _init() -> void:
 					"%s and %s differ in alignment but face %.1f deg apart, expected ~90" % [
 						names[i], names[j], rad_to_deg(d)])
 
-	# (3) THE CORRECTION COLLAPSES THEM. Facing a common target through
-	# `target - rest_yaw` must land every body on the SAME applied yaw modulo
-	# its own stance -- which is the whole claim.
-	var target := deg_to_rad(37.0)          # arbitrary, and that is the point
-	var applied: Array[float] = []
-	for y in yaws:
-		applied.append(_wrap(target - y))
-	# Every corrected body now faces the target: rest + applied == target.
-	for i in yaws.size():
-		expect(absf(_wrap(yaws[i] + applied[i] - target)) < 1e-5,
-			"%s does not land on the target after correction" % names[i])
-	# And the SPREAD of the corrected directions is the stance spread, not the
-	# 90-degree family spread it was before.
-	var raw_spread := _spread(yaws)
-	var fixed: Array[float] = []
-	for i in yaws.size():
-		fixed.append(_wrap(yaws[i] + applied[i]))
-	var fixed_spread := _spread(fixed)
-	expect(raw_spread > deg_to_rad(60.0),
-		"the raw facings only spread %.1f deg -- the families have merged and (3) proves nothing" % rad_to_deg(raw_spread))
-	expect(fixed_spread < deg_to_rad(1.0),
-		"corrected facings still spread %.1f deg" % rad_to_deg(fixed_spread))
 
 	# The refusal path: a body with no biped feet must come back NAN rather
 	# than 0.0, because 0.0 is a legal facing and would silently mean "east".
@@ -220,8 +189,8 @@ func _init() -> void:
 	var deg := PackedStringArray()
 	for i in yaws.size():
 		deg.append("%s=%.1f/%.0f" % [names[i], rad_to_deg(yaws[i]), rad_to_deg(aligns[i])])
-	print("facing_check\tOK\tbodies=%d\talign_0=%d\talign_-90=%d\traw_spread=%.1f\tcorrected_spread=%.4f" % [
-		yaws.size(), zero, minus90, rad_to_deg(raw_spread), rad_to_deg(fixed_spread)])
+	print("facing_check\tOK\tbodies=%d\talign_0=%d\talign_-90=%d" % [
+		yaws.size(), zero, minus90])
 	print("facing_check\t%s" % " ".join(deg))
 	finish(0)
 
@@ -249,13 +218,6 @@ func _wrap(a: float) -> float:
 	return a
 
 
-## Angular spread of a set of directions, as the largest pairwise separation.
-func _spread(angles: Array[float]) -> float:
-	var worst := 0.0
-	for i in angles.size():
-		for j in range(i + 1, angles.size()):
-			worst = maxf(worst, absf(_wrap(angles[i] - angles[j])))
-	return worst
 
 
 ## Where the POSED body actually points, in world space: the mean of

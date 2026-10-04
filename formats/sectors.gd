@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## `world/sectors.keyx` -- the per-sector ENVIRONMENT record, and with it the
 ## answer to a standing open question: what selects the music and atmosphere as
 ## the player moves (row 960).
@@ -74,7 +75,7 @@ static func sector_of(cell: Vector2) -> Vector2i:
 
 
 func _init(install: String) -> void:
-	_b = FileAccess.get_file_as_bytes(install.path_join("world/sectors.keyx"))
+	_b = FileAccess.get_file_as_bytes(Pak.resolve(install.path_join("world/sectors.keyx")))
 	if _b.size() < HEADER + REC:
 		push_warning("Sectors: world/sectors.keyx is unreadable")
 		return

@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## pak/creature.pak -- the creature type table (autoresearch rows 693, 949).
 ##
 ## A FLAT CIF table, not a Sacred.Pak container: the magic passes but the bytes
@@ -106,7 +107,7 @@ var _order := PackedInt32Array()
 
 
 func _init(pak_dir: String) -> void:
-	var b := FileAccess.get_file_as_bytes(pak_dir.path_join("creature.pak"))
+	var b := FileAccess.get_file_as_bytes(Pak.resolve(pak_dir.path_join("creature.pak")))
 	if b.size() < DATA or (b.size() - DATA) % REC != 0:
 		push_error("Creatures: creature.pak missing or stride broken")
 		return

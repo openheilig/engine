@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## bin/wea.bin -- 256 EQUIPMENT POOLS: for each pool, the items.pak records a
 ## spawner may dress an NPC in. Loaded by retail at startup beside Balance,
 ## World, World2 and wpmod (autoresearch row 923).
@@ -44,7 +45,7 @@ var _pools: Array[PackedInt32Array] = []
 
 
 func _init(install: String) -> void:
-	var raw := FileAccess.get_file_as_bytes(install.path_join("bin/wea.bin"))
+	var raw := FileAccess.get_file_as_bytes(Pak.resolve(install.path_join("bin/wea.bin")))
 	if raw.size() < 4 or raw.size() % 4 != 0:
 		push_warning("Equipment: bin/wea.bin missing or not u32-aligned under %s" % install)
 		return

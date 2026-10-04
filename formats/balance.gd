@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## bin/balance.bin -- the global tuning table, read at the offsets the key map
 ## names (research/formats/generated/balance-keymap.tsv, 354 of 379 keys
 ## resolved to offsets).
@@ -58,7 +59,7 @@ var _b := PackedByteArray()
 
 
 func _init(install: String) -> void:
-	_b = FileAccess.get_file_as_bytes(install.path_join("bin/balance.bin"))
+	_b = FileAccess.get_file_as_bytes(Pak.resolve(install.path_join("bin/balance.bin")))
 	found = _b.size() > 0
 
 

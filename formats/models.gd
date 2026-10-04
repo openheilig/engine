@@ -102,26 +102,13 @@ func magic_offset(entry: int) -> int:
 		return MAGIC_OFF_MOTION
 	return -1
 
-## True on-disk length, derived from the gap to the next entry's offset
-## (or to end of file, for the last entry). NEVER _pak.sizes[entry]: index
-## field 3 averages 1.95x the true gap for kind==64 (the phase-03 research notes
-## "Index field 3 is not a byte length for kind=64, and IS one for
-## kind=65") -- this method does not even branch on kind, because the
-## rule ("derive from offsets, not from the index") is uniform; only the
-## RATIO to field3 differs by kind, and this method never reads field3.
-## Returns 0 for an out-of-range index or a non-positive derived length.
+## Physical entry span from the archive's distinct offsets (or EOF).
+## Kind-64 index field 3 is metadata, not stored byte length; the native
+## corpus averages 1.95x the physical span. Archive-owned extents also
+## handle reordered and aliased indexes without scanning per model.
+## Returns 0 for an out-of-range or empty entry.
 func true_length(entry: int) -> int:
-	if entry < 0 or entry >= _pak.count():
-		return 0
-	var length: int
-	if entry + 1 < _pak.count():
-		length = _pak.entry_offset(entry + 1) - _pak.entry_offset(entry)
-	else:
-		length = _pak.file_size() - _pak.entry_offset(entry)
-	if length <= 0:
-		push_error("Models: entry %d has non-positive derived length %d" % [entry, length])
-		return 0
-	return length
+	return _pak.physical_size(entry)
 
 ## First NAME_LEN bytes of the entry, truncated at the first NUL and
 ## decoded as ASCII. A byte at or above 0x80, or NAME_LEN bytes with no

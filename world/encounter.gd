@@ -152,7 +152,7 @@ func _init(install: String, registry: ActorRegistry, items, creatures, factions,
 	if not _vec.found or not _vec.has_quest(QUEST):
 		push_warning("Encounter: quest %d is not in %s" % [QUEST, _script_tree])
 		return
-	_code = FileAccess.get_file_as_bytes(dir.path_join("funkcode.bin"))
+	_code = FileAccess.get_file_as_bytes(Sacred.Pak.resolve(dir.path_join("funkcode.bin")))
 	if _code.is_empty():
 		push_warning("Encounter: funkcode.bin is unreadable")
 		return
@@ -205,7 +205,7 @@ func _read_hero(install: String) -> void:
 		for i in TEMPLATES:
 			paths.append(install.path_join("templates/hero%02d.ptx" % i))
 	for path in paths:
-		if not FileAccess.file_exists(path):
+		if not FileAccess.file_exists(Sacred.Pak.resolve(path)):
 			continue
 		var h = Sacred.Hero.new(path)
 		if not h.found or (_hero_path.is_empty() and h.character_type != HERO_TYPE):

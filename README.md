@@ -97,26 +97,51 @@ single model, and so on).
 Class selection uses `--class=type_npc_zwerg` (Dwarf), or another supported
 `type_npc_*` class directory. The selected class must have a matching retail
 template, a mapped body model, and an authored `StartPosition`; startup exits
-with an error instead of silently substituting another class. Vampire body
-rendering is not supported by the current class-model map, even though its
-template and script data can be read.
+with an error instead of silently substituting another class. All eight class
+body mappings now include the Vampiress's native day body, `VLADY_D.GRN`
+(class/type 6). `VLADY_N.GRN` is her second form, not a ninth selectable class.
+This does not establish day/night transformations or completed tutorials:
+opcode-3 dialogue execution and storey occlusion remain open.
 Encounter statistics and combat arts use that same selected template (or
 `--hero=<pax>` import), and encounter scripts use the selected campaign tree.
 The fixed demonstration quest is still not a complete campaign quest scheduler.
 
 `--save=<file.json>` and `--load=<file.json>` use engine-owned session saves,
-not retail `gameNN.pak` files. Saves carry the hero class, progression, items,
-and world trigger states. Launch with the matching `--class` when loading;
-a class mismatch is refused before live state is replaced. Older fragment
-saves or snapshots without class identity are refused rather than guessed.
-For example, use `--class=type_npc_zwerg` for both saving and loading a Dwarf.
+not retail `gameNN.pak` files. Schema-3 saves carry the hero class, progression,
+items, world trigger states, and exact resolved content-profile identity.
+Launch with the matching `--class` and the same selected mod packages/content
+when loading. Class/profile mismatches refuse before live state is replaced.
+Older identity-less saves are refused rather than guessed into new numeric
+definitions. For example, use `--class=type_npc_zwerg` for saving and loading
+a Dwarf, and retain the same `--mod` selection.
 
-`--mod=<directory>` supplies whole-archive overrides at the same relative
-paths as the install, for example `<directory>/pak/items.pak`. Overrides are
-configured before startup archives open. An items-only mod can retain the
-base install's `weapon.pak`; sibling dependencies resolve independently.
-Paths outside the install directory are not redirected. Record-level merging,
-general loose-file overrides, and code mods are not implemented by this option.
+Repeat `--mod=<directory>` to select data-only packages. A package's `mod.json`
+declares an ID/version, exact-version dependencies, and logical runtime files:
+
+```json
+{"schema":1,"type":"data-only","id":"my-items","version":"1","dependencies":[],"files":{"pak/items.pak":"pak/items.pak"}}
+```
+
+Dependencies load first; explicit selection order resolves independent ties;
+the last package wins a whole file. Startup prints order, winner, and
+provenance. A directory without `mod.json` becomes one explicit
+content-addressed package. An items-only mod retains the base `weapon.pak`;
+sibling dependencies resolve independently.
+
+The same resolver covers admitted archive, world, balance/script, resource,
+and template data. Outside paths, user saves/config, and derived caches are
+not redirected. Missing/cyclic dependencies, escaping or symlinked package
+paths, executable plugins, invalid archive ranges, and over-budget `.bin`
+replacements are refused. The script/table replacement ceiling is 64 MiB.
+Record-level merges and new record namespaces are not implemented. Arbitrary
+GDScript/PCK/native code is not supported; retail bytecode still refuses
+unsupported executable behavior instead of pretending to run it.
+
+Profile identity hashes full runtime data and executable-table inputs once at
+startup, using bounded streaming reads. It is not a path/mtime shortcut:
+same-size byte changes produce a new identity. This conservative startup I/O
+has not been qualified as a performance guarantee. Mounted inputs must remain
+unchanged for the session; changing content requires restart, not hot reload.
 
 Decoded terrain textures are cached under `user://tex-cache/v2/`. Entries are
 keyed by the source texture bytes and cache/decoder version, so replacing an

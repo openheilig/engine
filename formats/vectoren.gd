@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## bin/TYPE_NPC_*/vectoren.bin -- funkcode.bin's SYMBOL TABLE and the QUEST
 ## TABLE (autoresearch rows 936, 937; research/formats/script-bytecode.md).
 ##
@@ -51,7 +52,7 @@ var _by_name: Dictionary = {}
 
 
 func _init(dir: String) -> void:
-	var b := FileAccess.get_file_as_bytes(dir.path_join("vectoren.bin"))
+	var b := FileAccess.get_file_as_bytes(Pak.resolve(dir.path_join("vectoren.bin")))
 	if b.size() < 4:
 		push_warning("Vectoren: no vectoren.bin under %s" % dir)
 		return

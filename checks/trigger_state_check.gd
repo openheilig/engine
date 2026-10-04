@@ -3,12 +3,17 @@ extends "res://checks/check.gd"
 ## save/load roundtrip. A door opened or a storey entered before saving must
 ## still be open/entered after loading -- retail saves the whole trigger
 ## state table, and a world whose doors reset on load is a different world.
+const ModManifest := preload("res://formats/mod_manifest.gd")
 
 func _init() -> void:
 	super()
 	var fails := 0
 	var install := Sacred.find_install()
 	assert(not install.is_empty(), "retail install is required")
+	var profile := ModManifest.new(install)
+	if not expect(Sacred.Pak.configure_profile(profile) == "", profile.error_text()):
+		finish(1)
+		return
 
 	var world := Sacred.World.new(install.path_join("world"))
 	var statics := Sacred.Statics.new(Sacred.Pak.new(install.path_join("world/static.pak")))

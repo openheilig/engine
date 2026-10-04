@@ -18,6 +18,7 @@ extends Node3D
 ##                      stay "28672 quads, 63 textures".
 
 const SECT: int = Sacred.SECT
+const ModManifest := preload("res://formats/mod_manifest.gd")
 ## The F3 developer overlay. Preloaded, not `class_name`d: a newly added
 ## global class is not in Godot's script-class cache for a `--path` run until
 ## the project is reimported (view/rig_placement.gd documents the same trap).
@@ -68,16 +69,11 @@ const START_SET := 6
 ## dynamically (set_materials_hidden_by_token) on top of this.
 const BASE_HIDE := []
 
-## Script tree -> the class's whole-body mesh in models.pak. These are the
-## short, underscore-free rig names (`SERAPHIM.GRN`, `GLADIATOR.GRN`); the
-## long `SERAPHIM_LEATHER_02.GRN` family beside them is ARMOUR worn over one,
-## which nothing here composes yet.
-##
-## `type_npc_vampirelady` IS ABSENT ON PURPOSE, and the absence is the finding:
-## models.pak carries no vampiress rig under any spelling tried (VAMP, LADY,
-## SUCCU, NOSFE, DRACUL, WEREW). She is an Underworld class, so her mesh is
-## presumably not in this pak at all. A wrong guess here would draw the wrong
-## body silently, so the map has a hole and _apply_retail_start says so.
+## Script tree -> native class body. Vampiress type 6 is VLADY_D.GRN;
+## type 7 is her distinct night form VLADY_N.GRN, not a selectable class.
+## Both forms are identified by items.pak and the native render trace
+## (research/formats/granny-grn.md, row 902). Unknown classes still refuse
+## startup rather than borrowing another hero's body.
 var _export_sera := false               ## --export-sera=path: dump the hero mesh as OBJ for Bevy
 var _export_sera_path := ""
 
@@ -130,12 +126,13 @@ const CLASS_MODEL := {
 	"type_npc_gladiator": "GLADIATOR.GRN",
 	"type_npc_magician": "MAGICIAN.GRN",
 	"type_npc_seraphim": "SERAPHIM.GRN",
+	"type_npc_vampirelady": "VLADY_D.GRN",
 	"type_npc_zwerg": "DWARF.GRN",
 }
 
-## The mesh actually drawn for the player. Set from CLASS_MODEL in
-## _apply_retail_start; falls back to PlayerView's own default so a tree with
-## no mapping still draws a body rather than nothing.
+## The selected native class body. Startup resolves it before session
+## creation; an unknown or unmapped class refuses rather than using this
+## diagnostic-only initial default.
 var _player_model := PlayerView.MODEL_NAME
 var _player_type := 0
 var _shadow_items: Sacred.Items
@@ -490,12 +487,23 @@ func _ready() -> void:
 		return
 
 	var argv := OS.get_cmdline_user_args() + OS.get_cmdline_args()
-	# Archive overrides must exist before texture/items/world archives open.
-	Sacred.Pak.install_root = install
-	Sacred.Pak.mod_root = ""
+	# Resolve and validate the content profile before any archive or table opens.
+	var mod_roots: Array[String] = []
 	for arg in argv:
 		if arg.begins_with("--mod="):
-			Sacred.Pak.mod_root = arg.trim_prefix("--mod=")
+			mod_roots.append(arg.trim_prefix("--mod="))
+	var profile := ModManifest.new(install, mod_roots)
+	if not profile.ok():
+		printerr("content profile: ", profile.error_text())
+		get_tree().quit(1)
+		return
+	var profile_error := Sacred.Pak.configure_profile(profile)
+	if profile_error != "":
+		printerr("content profile: ", profile_error)
+		get_tree().quit(1)
+		return
+	for diagnostic in profile.diagnostics():
+		print("content profile: ", diagnostic)
 
 	var tiles_path := install.path_join("pak/tiles.pak")
 	var tex_pak := Sacred.Pak.new(install.path_join("pak/texture.pak"))
@@ -503,7 +511,9 @@ func _ready() -> void:
 	_install_ref = install
 	_world = Sacred.World.new(install.path_join("world"))
 	var world := _world
-	if not (FileAccess.file_exists(tiles_path) and tex_pak.is_open() and world.is_open()):
+	if not (FileAccess.file_exists(Sacred.Pak.resolve(tiles_path)) and tex_pak.is_open() and world.is_open()):
+		printerr("startup: required tiles/texture/world data could not be opened")
+		get_tree().quit(1)
 		return
 	# Sacred's own pointer, straight from texture.pak. Cosmetic and non-fatal --
 	# a failure warns and leaves the platform cursor. Skipped under --headless,
@@ -3836,7 +3846,8 @@ const NPC_RADIUS := 48.0
 func _build_npcs(install: String, models: Sacred.Models, player_cell: Vector2) -> void:
 	var tex_pak := Sacred.Pak.new(install.path_join("pak/texture.pak"))
 	var start := Time.get_ticks_msec()
-	var sc := Sacred.Startcode.new(install.path_join("bin/type_npc_seraphim"))
+	var base := "bin/addon" if _campaign != "" else "bin"
+	var sc := Sacred.Startcode.new(install.path_join(base).path_join(_start_class))
 	if sc.npcs.is_empty():
 		printerr("npcs\tstartcode.bin decoded no NPC records under %s" % install)
 		return
@@ -4004,7 +4015,7 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 	if hook.is_empty():
 		printerr("quest\tid=%d\tno OnEnter hook" % START_QUEST)
 		return
-	var code := FileAccess.get_file_as_bytes(dir.path_join("funkcode.bin"))
+	var code := FileAccess.get_file_as_bytes(Sacred.Pak.resolve(dir.path_join("funkcode.bin")))
 	var vm := ScriptVM.new()
 	var cast := QuestCast.new()
 	_quest_cast = cast   # E1: retained so Checkpoint.capture can read the live cast
@@ -4755,7 +4766,7 @@ func _run_sector_scripts(s: Vector2i) -> void:
 		_sector_vec = Sacred.Vectoren.new(dir)
 		if _sector_vec.found:
 			_sector_funkcode = FileAccess.get_file_as_bytes(
-				dir.path_join("funkcode.bin"))
+				Sacred.Pak.resolve(dir.path_join("funkcode.bin")))
 	var first: bool = not _sectors_visited.has(s)
 	_sectors_visited[s] = true
 	var vm := ScriptVM.new()

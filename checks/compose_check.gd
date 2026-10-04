@@ -54,18 +54,18 @@ const ROSTER := 24
 ## check wants only its constants, never an instance of it.
 const MainScript := preload("res://main.gd")
 
-## Of main.gd's seven mapped class bodies, how many actually BUILD, and which
-## one does not. The remaining gap is a decoder gap rather than a naming error
-## -- see the block in _init that pins it.
+## Every mapped playable class must build through PlayerView; name resolution
+## alone cannot establish that a body renders.
 ##
 ## RAISED FROM 5 TO 6 when MAGICIAN.GRN's build was repaired, and FROM 6 TO 7
 ## on 2026-08-17 (row 1009), both in the direction that block asks for.
 ## DUNKELELVE.GRN's refusal was the two size-10 FormMeshBone lists competing
 ## for the meshes needing 9 and 10, which no counting or geometric rule could
 ## separate -- and the file states the answer itself, in each FormMesh's
-## payload int, a 1-based all-mesh reference Models._pair_by_reference now
-## reads. All seven mapped class bodies build.
-const CLASS_BODIES_BUILD := 7
+## payload int, a 1-based all-mesh reference Models._pair_by_reference reads.
+## The eighth mapping is class 6's native VLADY_D.GRN day body, named by
+## items.pak record 6. vampire_body_check pins its production start and skins.
+const CLASS_BODIES_BUILD := 8
 const CLASS_BODIES_UNBUILT: Array[String] = []
 
 ## Uriel's Legacy (bin/sets.bin record 6) on its own Seraphim: all seven
@@ -293,7 +293,7 @@ func _init() -> void:
 	# main.gd rather than restated here, so a name edited there and nowhere
 	# else fails this gate instead of silently drawing PlayerView's fallback
 	# Gladiator for a Seraphim run. Distinctness matters as much as existence:
-	# seven classes mapping to one mesh satisfies every per-entry lookup and is
+	# all classes mapping to one mesh satisfies every per-entry lookup and is
 	# exactly what a copy-paste slip produces.
 	var seen_models := {}
 	for cls in MainScript.CLASS_MODEL:

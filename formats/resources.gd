@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## scripts/<lang>/global.res -- every piece of text the engine shows.
 ##
 ## ONE CONTAINER, TWO NAMESPACES, and conflating them is the trap:
@@ -58,7 +59,7 @@ var _slots: PackedStringArray
 var _by_hash: Dictionary          ## name hash -> text, first entry wins
 
 func _init(path: String) -> void:
-	var f := FileAccess.open(path, FileAccess.READ)
+	var f := FileAccess.open(Pak.resolve(path), FileAccess.READ)
 	if f == null:
 		push_error("Resources: cannot open %s (%s)" % [path, error_string(FileAccess.get_open_error())])
 		return

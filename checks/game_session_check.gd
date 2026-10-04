@@ -3,12 +3,17 @@ extends "res://checks/check.gd"
 ## authoritative state. new_game() derives the hero from the start template
 ## (not invented constants), identical inputs produce identical relevant
 ## state, and renderless construction equals the rendered path's state.
+const ModManifest := preload("res://formats/mod_manifest.gd")
 
 func _init() -> void:
 	super()
 	var fails := 0
 	var install := Sacred.find_install()
 	assert(not install.is_empty(), "retail install is required")
+	var profile := ModManifest.new(install)
+	if not expect(Sacred.Pak.configure_profile(profile) == "", profile.error_text()):
+		finish(1)
+		return
 
 	# --- two sessions, same inputs: identical relevant state ---
 	var s1 := GameSession.new_game(install, Vector2(3236.5, 2511.5))

@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## Raw WORLD/TRIGGERS.PAK, not a compressed Pak archive. LGP 0x080EF982 and
 ## Win 2.28 0x00638570 copy header.u32(+4) sixteen-byte records after 256+12
 ## bytes. Record +10 is the authored u16 state; zero-filled slots stay zero.
@@ -10,7 +11,7 @@ const RECORD_SIZE := 16
 var _records := PackedByteArray()
 
 func _init(path: String) -> void:
-	var file := FileAccess.open(path, FileAccess.READ)
+	var file := FileAccess.open(Pak.resolve(path), FileAccess.READ)
 	if file == null:
 		push_error("Triggers: cannot open %s" % path)
 		return

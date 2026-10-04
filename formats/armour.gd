@@ -49,7 +49,7 @@ var _members: Array[Array] = []
 
 func _init(install: String) -> void:
 	var items := Items.new(Pak.new(install.path_join("pak/items.pak")))
-	var raw := FileAccess.get_file_as_bytes(install.path_join("bin/rust.bin"))
+	var raw := FileAccess.get_file_as_bytes(Pak.resolve(install.path_join("bin/rust.bin")))
 	if raw.size() < 4 or raw.size() % 4 != 0:
 		push_warning("Armour: bin/rust.bin missing or not u32-aligned under %s" % install)
 		return

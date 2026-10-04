@@ -3,12 +3,17 @@ extends "res://checks/check.gd"
 ## when it crosses a Progression threshold the hero levels up (level++,
 ## max HP recalculated via ActorStats). Verified against the live-observed
 ## threshold values (L=1→300, 2→1200, 3→3000).
+const ModManifest := preload("res://formats/mod_manifest.gd")
 
 func _init() -> void:
 	super()
 	var fails := 0
 	var install := Sacred.find_install()
 	assert(not install.is_empty(), "retail install is required")
+	var profile := ModManifest.new(install)
+	if not expect(Sacred.Pak.configure_profile(profile) == "", profile.error_text()):
+		finish(1)
+		return
 
 	var s := GameSession.new_game(install, Vector2(3236.5, 2511.5))
 	expect(s.hero_level == 1, "new hero starts at level 1")

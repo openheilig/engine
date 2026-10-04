@@ -3,6 +3,7 @@ extends RefCounted
 
 const Common := preload("res://formats/common.gd")
 const Sectors := preload("res://formats/sectors.gd")
+const Pak := preload("res://formats/pak.gd")
 
 var size := Vector2i.ZERO         ## sector grid, 100x100
 var _f: FileAccess
@@ -19,8 +20,8 @@ var _liq9 := PackedByteArray()
 var _liq10 := PackedByteArray()
 
 func _init(world_dir: String) -> void:
-	var kf := FileAccess.open(world_dir.path_join("sectors.keyx"), FileAccess.READ)
-	_f = FileAccess.open(world_dir.path_join("sectors.wldx"), FileAccess.READ)
+	var kf := FileAccess.open(Pak.resolve(world_dir.path_join("sectors.keyx")), FileAccess.READ)
+	_f = FileAccess.open(Pak.resolve(world_dir.path_join("sectors.wldx")), FileAccess.READ)
 	if kf == null or _f == null:
 		push_error("World: cannot open sectors.keyx / sectors.wldx in %s" % world_dir)
 		return

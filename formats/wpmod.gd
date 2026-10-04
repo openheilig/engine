@@ -101,7 +101,7 @@ var _by_item: Dictionary[int, PackedInt32Array] = {}
 
 
 func _init(install: String) -> void:
-	var raw := FileAccess.get_file_as_bytes(install.path_join("bin/wpmod.bin"))
+	var raw := FileAccess.get_file_as_bytes(Pak.resolve(install.path_join("bin/wpmod.bin")))
 	if raw.size() < 4 or raw.size() % 4 != 0:
 		push_warning("Wpmod: bin/wpmod.bin missing or not u32-aligned under %s" % install)
 		return

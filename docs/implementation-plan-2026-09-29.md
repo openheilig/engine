@@ -448,6 +448,18 @@ Each ticket ends in a small versioned fact sheet: identity, inputs, outputs, ord
 
 ## 13. Continuous performance and release qualification
 
+### Approved policy decisions — 2026-10-04
+
+- Engine-only export/release packages are authorized. This supersedes the
+  earlier source-only/no-export rule, not the prohibition on distributing
+  retail assets, derived caches, captures, or private reverse-engineering
+  evidence. Actual export artifacts must be inspected before release.
+- D2 is restricted to data and verified retail bytecode. Arbitrary GDScript,
+  PCK, native plugins, and other host-executable extensions are not approved.
+  The retail VM is not advertised as an arbitrary-code sandbox. Unsupported
+  executed behavior and over-budget inputs must be refused explicitly.
+
+
 ### Q0. Performance workloads and proposed targets
 
 **Start:** M0, not after campaign implementation.

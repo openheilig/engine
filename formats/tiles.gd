@@ -1,4 +1,5 @@
 extends RefCounted
+const Pak := preload("res://formats/pak.gd")
 ## tiles.pak: 64-byte records, one per tile id, giving the texture.pak id.
 ## ISO magic, NOT a generic PAK container -- read directly from the file
 ## rather than routing through Sacred.Pak (TOOLCHAIN-AUDIT-2026-08-12).
@@ -37,7 +38,7 @@ var _idx: PackedByteArray
 var _n: int
 
 func _init(path: String) -> void:
-	var f := FileAccess.open(path, FileAccess.READ)
+	var f := FileAccess.open(Pak.resolve(path), FileAccess.READ)
 	if f == null:
 		push_error("Tiles: cannot open %s (%s)" % [path, error_string(FileAccess.get_open_error())])
 		return
