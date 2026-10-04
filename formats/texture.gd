@@ -45,9 +45,8 @@ const TYPE_RAW32 := 6        ## uncompressed, w*h*4, BGRA byte order
 ## One raw 32-bit texture. Separate from decode_texture's body because it shares
 ## none of it: no inflate, no channel expansion, and the size check is against
 ## the ENTRY rather than an inflated length.
-static func _raw32(pak: Pak, id: int, w: int, h: int) -> Image:
+static func _raw32(buf: PackedByteArray, id: int, w: int, h: int) -> Image:
 	var want := w * h * 4
-	var buf := pak.blob(id, 80 + want)
 	if buf.size() < 80 + want:
 		push_error("Sacred.decode_texture: id %d holds %d bytes, expected %d" % [
 			id, buf.size() - 80, want])
@@ -64,8 +63,9 @@ static func _raw32(pak: Pak, id: int, w: int, h: int) -> Image:
 	return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, px)
 
 
-static func decode_texture(pak: Pak, id: int, render: bool = false) -> Image:
-	var buf := pak.blob(id, 80)
+static func decode_texture(pak: Pak, id: int, render: bool = false,
+		source: PackedByteArray = PackedByteArray()) -> Image:
+	var buf := source if not source.is_empty() else pak.blob(id, 80)
 	var w := buf.decode_u16(32)
 	var h := buf.decode_u16(34)
 	var kind := buf.decode_u8(36)
@@ -78,7 +78,7 @@ static func decode_texture(pak: Pak, id: int, render: bool = false) -> Image:
 	# with a 262144-byte payload, FX_HORIZON 1024x128 with 524288 -- where type
 	# 4's is a zlib stream inflating to `w*h*2`.
 	if kind == TYPE_RAW32:
-		return _raw32(pak, id, w, h)
+		return _raw32(buf, id, w, h)
 	if kind != TYPE_ARGB4444:
 		push_error("Sacred.decode_texture: id %d has unsupported type %d" % [id, kind])
 		return null

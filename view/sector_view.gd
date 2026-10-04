@@ -1479,43 +1479,44 @@ var _decode_us := 0
 var _decode_count := 0
 
 var _tex_cache_dir := ""
+var _tex_hash := HashingContext.new()
 
-## Q1: decoded textures are pure functions of (install, texid) -- cache them
-## on disk under user:// so later sessions skip the zlib+4444 conversion
-## entirely (the measured ~40-50% of a cold sector build). PNG load is
-## C-speed. Nothing derived ships; user:// is the sanctioned cache location.
+## Decoded tiles are cached by source entry bytes and decoder-cache version,
+## not just archive path. Hash only entries requested for rendering; pass
+## those same bytes to the decoder instead of reading the archive twice.
 func _image(texid: int) -> Image:
 	if _images.has(texid):
 		return _images[texid]
 	if texid >= _tex_pak.count():
 		return null
 	var t0 := Time.get_ticks_usec()
+	var source := _tex_pak.blob(texid, 80)
 	var img: Image = null
+	var cache_path := ""
 	if _tex_cache_dir == "" and _tex_pak_path != "":
-		_tex_cache_dir = "user://tex-cache/%s" % _tex_pak_path.md5_text()
+		_tex_cache_dir = "user://tex-cache/v2/%s" % _tex_pak_path.md5_text()
 		DirAccess.make_dir_recursive_absolute(_tex_cache_dir)
 	if _tex_cache_dir != "":
-		# Raw RGBA8 + a 2-int header: PNG's compression costs ~19 ms/tile,
-		# 30x the decode it was meant to save. Raw write is a memcpy.
-		var p := "%s/%d.itx" % [_tex_cache_dir, texid]
-		if FileAccess.file_exists(p):
-			var f := FileAccess.open(p, FileAccess.READ)
-			if f != null and f.get_32() == 0x49545831:  # "TXI1"
+		_tex_hash.start(HashingContext.HASH_SHA256)
+		_tex_hash.update(source)
+		var fingerprint := _tex_hash.finish().hex_encode()
+		cache_path = "%s/%d-%s.itx" % [_tex_cache_dir, texid, fingerprint]
+		if FileAccess.file_exists(cache_path):
+			var f := FileAccess.open(cache_path, FileAccess.READ)
+			var pixel_bytes := Sacred.TILE * Sacred.TILE * 4
+			if f != null and f.get_length() == 12 + pixel_bytes \
+					and f.get_32() == 0x49545831:
 				var w := f.get_32()
 				var h := f.get_32()
-				var data := f.get_buffer(w * h * 4)
-				if data.size() == w * h * 4:
-					img = Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
-		if img != null:
-			_decode_us += Time.get_ticks_usec() - t0
-			_decode_count += 1
-			_images[texid] = img
-			return img
+				if w == Sacred.TILE and h == Sacred.TILE:
+					var data := f.get_buffer(pixel_bytes)
+					if data.size() == pixel_bytes:
+						img = Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
 	if img == null:
-		img = Sacred.decode_texture(_tex_pak, texid, true)
-		if _tex_cache_dir != "" and img != null:
-			var fo := FileAccess.open("%s/%d.itx" % [_tex_cache_dir, texid],
-				FileAccess.WRITE)
+		img = Sacred.TextureFormat.decode_texture(_tex_pak, texid, true, source)
+		if img != null and img.get_width() == Sacred.TILE \
+				and img.get_height() == Sacred.TILE and cache_path != "":
+			var fo := FileAccess.open(cache_path, FileAccess.WRITE)
 			if fo != null:
 				fo.store_32(0x49545831)
 				fo.store_32(img.get_width())

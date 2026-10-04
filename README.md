@@ -118,6 +118,12 @@ base install's `weapon.pak`; sibling dependencies resolve independently.
 Paths outside the install directory are not redirected. Record-level merging,
 general loose-file overrides, and code mods are not implemented by this option.
 
+Decoded terrain textures are cached under `user://tex-cache/v2/`. Entries are
+keyed by the source texture bytes and cache/decoder version, so replacing an
+archive at the same path does not reuse stale pixels. Truncated or wrong-sized
+cache entries are discarded and decoded again from the archive. These are
+disposable derived files, not bundled game assets.
+
 
 To inspect an authored native motion rather than choose a clip by name:
 
