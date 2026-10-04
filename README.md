@@ -101,7 +101,7 @@ with an error instead of silently substituting another class. All eight class
 body mappings now include the Vampiress's native day body, `VLADY_D.GRN`
 (class/type 6). `VLADY_N.GRN` is her second form, not a ninth selectable class.
 This does not establish day/night transformations or completed tutorials:
-opcode-3 dialogue execution and storey occlusion remain open.
+opcode-3 dialogue execution and in-world actor placement/rendering remain open.
 Encounter statistics and combat arts use that same selected template (or
 `--hero=<pax>` import), and encounter scripts use the selected campaign tree.
 The fixed demonstration quest is still not a complete campaign quest scheduler.
@@ -142,6 +142,12 @@ startup, using bounded streaming reads. It is not a path/mtime shortcut:
 same-size byte changes produce a new identity. This conservative startup I/O
 has not been qualified as a performance guarantee. Mounted inputs must remain
 unchanged for the session; changing content requires restart, not hot reload.
+
+Windowed startup shows a live verification status while one owned worker
+hashes private file inputs. The main thread mounts the result only after
+joining; no gameplay reads a partially resolved profile. Closing during
+verification joins the worker before teardown. Headless batch startup remains
+synchronous so existing `--quit-after` frame contracts are preserved.
 
 Decoded terrain textures are cached under `user://tex-cache/v2/`. Entries are
 keyed by the source texture bytes and cache/decoder version, so replacing an

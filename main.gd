@@ -18,7 +18,7 @@ extends Node3D
 ##                      stay "28672 quads, 63 textures".
 
 const SECT: int = Sacred.SECT
-const ModManifest := preload("res://formats/mod_manifest.gd")
+const ContentLoading := preload("res://view/content_loading.gd")
 ## The F3 developer overlay. Preloaded, not `class_name`d: a newly added
 ## global class is not in Godot's script-class cache for a `--path` run until
 ## the project is reimported (view/rig_placement.gd documents the same trap).
@@ -492,7 +492,16 @@ func _ready() -> void:
 	for arg in argv:
 		if arg.begins_with("--mod="):
 			mod_roots.append(arg.trim_prefix("--mod="))
-	var profile := ModManifest.new(install, mod_roots)
+	var loading := ContentLoading.new()
+	add_child(loading)
+	var profile = await loading.prepare(install, mod_roots)
+	loading.queue_free()
+	if not is_inside_tree():
+		return
+	if profile == null:
+		printerr("content profile: verification did not complete")
+		get_tree().quit(1)
+		return
 	if not profile.ok():
 		printerr("content profile: ", profile.error_text())
 		get_tree().quit(1)
