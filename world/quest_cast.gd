@@ -1,5 +1,5 @@
 class_name QuestCast
-extends QuestLog
+extends "res://world/quest_log.gd"
 ## A QuestLog that can also receive the cast a quest hook creates.
 ##
 ## WHY THIS IS NOT JUST QuestLog. That class documents its own scope as holding
@@ -46,6 +46,44 @@ var _by_handle: Dictionary[String, int] = {}
 ## The quest origin for position-less CreateNPC (the hero's cell), set by
 ## the runner before executing quest hooks.
 var quest_origin := Vector2i.ZERO
+## Canonical session/VM context, supplied by the composition root, never a
+## sector-owned host. Runtime references are not serialized.
+var _session: WeakRef
+var session: Object:
+	get:
+		return _session.get_ref() if _session != null else null
+var dialogue: RefCounted
+var positions: Dictionary = {}
+var quest_targets: Dictionary[int, Dictionary] = {}
+## Parent drains these into its real presentation/audio handlers.
+var effects: Array[Dictionary] = []
+
+
+func bind_runtime(owner: Object) -> void:
+	_session = weakref(owner)
+
+
+func named_variable(name: String) -> Dictionary:
+	for key in script_vars:
+		if key.nocasecmp_to(name) == 0:
+			return {"found": true, "value": int(script_vars[key])}
+	return super.named_variable(name)
+
+
+func named_variables() -> Dictionary:
+	var out := super.named_variables()
+	for key in script_vars:
+		out[key.to_lower()] = int(script_vars[key])
+	return out
+
+
+func set_var(name: String, bit: int) -> void:
+	for key in script_vars:
+		if key.nocasecmp_to(name) == 0:
+			if bit >= 0 and bit < 32:
+				script_vars[key] = int(script_vars[key]) | (1 << bit)
+			return
+	super.set_var(name, bit)
 
 
 ## P1 save/restore: clears the handle index alongside `cast` so a restored
@@ -61,7 +99,15 @@ func reset_handles() -> void:
 ## BIT INDEX. Routing both to one method would write bit 0 of `PoolDLG` and
 ## call it done.
 func set_script_var(name: String, value: int) -> void:
-	script_vars[name] = value
+	for key in script_vars:
+		if key.nocasecmp_to(name) == 0:
+			script_vars[key] = value
+			return
+	var bit_key := _variable_key(name)
+	if not bit_key.is_empty():
+		_var[bit_key] = value
+	else:
+		script_vars[name] = value
 
 
 func create_npc(handle: String, creature: int, name: String, task: String,
@@ -87,7 +133,8 @@ func create_npc(handle: String, creature: int, name: String, task: String,
 		handle = "%s#%d" % [handle, n]
 	_by_handle[key] = cast.size()
 	cast.append({"handle": handle, "creature": creature, "name": name,
-		"task": task, "art": art, "cell": cell, "compass": false})
+		"task": task, "art": art, "cell": cell, "compass": false,
+		"main": 0, "off": 0, "dialogue": 0, "actor_id": 0, "deleted": false})
 
 
 ## Places an already-created NPC. A handle nothing created is a warning and no
@@ -105,6 +152,145 @@ func quest_compass(handle: String) -> void:
 		cast[i]["compass"] = true
 
 
+func configure_npc(handle: String, main_hand: int, off_hand: int, dialog_name: String) -> void:
+	var e: Dictionary = cast[-1] if handle.to_lower() == "non_unique" and not cast.is_empty() else entry(handle)
+	if e.is_empty():
+		return
+	e["main"] = main_hand
+	e["off"] = off_hand
+	if not dialog_name.is_empty() and dialogue != null:
+		dialogue.bind_dialogue(str(e["handle"]), dialogue.definition_index(dialog_name))
+
+
+## Preserves native script handles even when a nearby visual actor is built
+## later. The registry identity is independent of sector rendering lifetime.
+func import_bootstrap(start) -> bool:
+	positions = start.places
+	for npc: Dictionary in start.npcs:
+		var handle := str(npc["handle"])
+		create_npc(handle, int(npc["body"]), str(npc.get("script_name", "")),
+			str(npc.get("task", "")), str(npc.get("art", "")), npc["cell"])
+		var e: Dictionary = cast[-1]
+		handle = str(e["handle"])
+		e["bootstrap"] = true
+		e["layer"] = int(npc["layer"])
+		e["main"] = int(npc["main"])
+		e["off"] = int(npc["off"])
+		if not str(npc.get("dialogue", "")).is_empty():
+			if dialogue == null or not dialogue.bind_dialogue(handle, dialogue.definition_index(npc["dialogue"])):
+				return false
+	return true
+
+
+func script_position(name: String) -> Vector2i:
+	for key in positions:
+		if str(key).nocasecmp_to(name) == 0:
+			return positions[key]
+	return NO_CELL
+
+
+func bind_actor(handle: String, actor_id: int) -> bool:
+	var e := entry(handle)
+	if e.is_empty() or e.get("deleted", false) or session == null or session.registry.get_actor(actor_id) == null:
+		return false
+	var previous := int(e.get("actor_id", 0))
+	if previous != 0 and previous != actor_id:
+		return false
+	e["actor_id"] = actor_id
+	if dialogue != null:
+		dialogue.bind_dialogue(handle, int(e.get("dialogue", 0)))
+	return true
+
+
+func handle_for_actor(actor_id: int) -> String:
+	for e in cast:
+		if int(e.get("actor_id", 0)) == actor_id and not e.get("deleted", false):
+			return str(e["handle"])
+	return ""
+
+
+func entry(handle: String) -> Dictionary:
+	if _by_handle.is_empty() and not cast.is_empty():
+		for i in cast.size():
+			_by_handle[str(cast[i]["handle"]).to_lower()] = i
+	return cast[int(_by_handle[handle.to_lower()])] if _by_handle.has(handle.to_lower()) else {}
+
+
+func npc_state(args: Array) -> bool:
+	if dialogue == null or args.size() != 2 or int(args[0][0]) != 1:
+		return false
+	var index := -1
+	if int(args[1][0]) == 9:
+		index = dialogue.definition_index(str(args[1][1]))
+	elif int(args[1][0]) == 10:
+		index = dialogue.definition_id(int(args[1][1]))
+	else:
+		return false
+	return dialogue.bind_dialogue(str(args[0][1]), index)
+
+
+func define_dialogue(body: PackedByteArray) -> bool:
+	return dialogue != null and dialogue.append_definition(body)
+
+
+func dialogue_text(args: Array) -> bool:
+	return dialogue != null and dialogue.append_text(args)
+
+
+func dialogue_button(args: Array) -> bool:
+	return dialogue != null and dialogue.append_button(args)
+
+
+func dialogue_state(name: String, value: int) -> bool:
+	return dialogue != null and dialogue.set_definition_state(name, value)
+
+
+func start_quest(quest: int) -> bool:
+	return dialogue != null and dialogue.start_quest(quest)
+
+
+func end_quest(quest: int) -> bool:
+	return dialogue != null and dialogue.end_quest(quest)
+
+
+func give_gold(handle: String, amount: int) -> bool:
+	if session == null or handle.nocasecmp_to("hero") != 0:
+		return false
+	session.hero_gold += amount
+	return true
+
+
+func delete_npc(handle: String) -> bool:
+	var e := entry(handle)
+	if e.is_empty():
+		return false
+	if session != null and int(e.get("actor_id", 0)) != 0:
+		session.registry.despawn(int(e["actor_id"]))
+	if dialogue != null:
+		dialogue.bind_dialogue(handle, 0)
+	e["deleted"] = true
+	e["compass"] = false
+	return true
+
+
+func quest_compass_pos(cell: Vector2i, quest: int) -> bool:
+	quest_targets[quest] = {"cell": cell, "radius": 1200}
+	return true
+
+
+func play_sound(name: String) -> bool:
+	if name.is_empty():
+		return false
+	effects.append({"kind": "PlaySound", "name": name})
+	return true
+
+
+## Every extended handler validates shape/semantic prerequisites, including
+## nested quest procedures, before the VM applies any reachable record.
+func validate_script_record(record: Dictionary) -> bool:
+	return dialogue.validate_record(record) if dialogue != null else int(record["op"]) not in [3, 15, 18, 20, 26, 55, 60, 63, 86, 104]
+
+
 # --- queries -----------------------------------------------------------------
 
 ## The cast entries that something actually placed, in creation order. What
@@ -112,14 +298,14 @@ func quest_compass(handle: String) -> void:
 func placed() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	for e: Dictionary in cast:
-		if e["cell"] != NO_CELL:
+		if e["cell"] != NO_CELL and not e.get("deleted", false):
 			out.append(e)
 	return out
 
 
 func _index_of(handle: String, op: String) -> int:
-	var key := handle.to_lower()
-	if not _by_handle.has(key):
+	var e := entry(handle)
+	if e.is_empty():
 		push_warning("QuestCast: %s names handle '%s', which nothing created" % [op, handle])
 		return -1
-	return _by_handle[key]
+	return int(_by_handle[handle.to_lower()])

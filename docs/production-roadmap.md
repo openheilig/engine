@@ -17,11 +17,11 @@ No retail assets, captures, decompiler output, or databases may be published.
 Multiplayer remains out of scope. This is a roadmap, not a claim that the
 missing systems are implemented or that their designs have been recovered.
 
-The current engine README calls the project pre-alpha: a world viewer with a
-simulation core and one completed scripted fight. It explicitly lists inventory,
-skills, dialogue, audio playback, and save/load as absent. Before implementing
-any of these, reconcile the relevant source with `analysis/open-questions.md`
-and the format documents; do not convert an old status paragraph into a spec.
+The earlier README's “world viewer; inventory/audio/save absent” description
+is superseded. Read the current [engine status](../README.md),
+[0.0.1 Seraphim contract](milestone-0.0.1.md) and
+[tooling proof limits](tooling.md). Historical measurements below are retained,
+not current release qualification or an instruction to recreate existing readers.
 
 ## Established benchmark — 2026-09-17
 

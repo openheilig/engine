@@ -8,58 +8,42 @@ this repository. Without a legally obtained copy of the game it does nothing.
 
 ## Status
 
-Pre-alpha, and honest about it: this is a **world viewer with a simulation
-core and one scripted fight that finishes**, not a playable game. What runs
-today:
+Public **development snapshot**, not a released game and not a completed
+0.0.1. The approved release target is the
+[playable Seraphim retail slice](docs/milestone-0.0.1.md): start → walk →
+talk/quest → real combat → loot/equip → save → restart/load → continue,
+with retail-matched presentation and consequences along that bounded route.
 
-- **World streaming.** Sacred's 100×100 sector grid loads straight out of the
-  retail install — terrain mesh, texture arrays, static props, buildings —
-  with the camera driving sector residency.
-- **Terrain and object rendering.** Custom shaders for both, matching the
-  retail isometric projection.
-- **Granny `.GRN` models and animation.** Meshes, skeletons and 3413 of 3421
-  animation clips decode; playback applies authored local bone poses.
-- **A fixed-tick simulation.** Actor registry, movement, path windows,
-  cell-space walkability over Sacred's region grids, interior/exterior swap.
-- **A record/replay harness.** Runs are recorded and replayed deterministically
-  so a change that alters simulation output is caught rather than argued about.
-- **The scripted cast, where retail puts it.** `startcode.bin` decodes to 2565
-  NPCs across the eight character classes plus 16,021 objects, each with its
-  body model, hand items and starting cell; `--npcs` draws them at those cells.
-  Placement only — nothing animates or acts.
-- **The hero, where retail starts her.** The Seraphim at cell 3236,2511 with
-  composed armour and hand items, playing an `IDLE` clip, facing driven through
-  the alignment bone above `Bip01`.
-- **One quest that closes, and one that starts the game.** `world/script.gd`
-  interprets eight opcodes of the quest bytecode and *refuses* the ones it does
-  not know rather than skipping them — and refuses just as firmly when the HOST
-  cannot receive an opcode's effect, so a hook never runs halfway.
-  `world/quest_log.gd` holds quest state; `world/quest_cast.gd` adds the NPCs a
-  hook creates, as data `main.gd` turns into rigs; `world/encounter.gd` runs
-  quest 74 end to end against a hostile NPC. A new game now runs **quest 1
-  (`Tutorial`)**, whose OnEnter stands a novice nun beside the Seraphim as
-  retail does — `--noquests` opts out. `world/combat.gd` implements
-  retail's to-hit **and** its damage resolution — one shared curve used twice,
-  transcribed and then confirmed live under gdb against the retail binary. The
-  gate checks it against numbers the binary itself printed. Only the physical
-  channel is fed: armour and resistances have nothing to read them off an actor
-  until there is an inventory.
-- **Retail's taskbar.** `view/hud.gd` draws the console, wings, buttons and
-  combat-art arc from retail's own 1887-rect table at retail's own coordinates.
-  The life and mana gauges are **not** drawn: all 46 `cUI_Taskbar2` functions
-  were enumerated and the class references no orb art and computes no fraction.
-  The gap is left visible rather than invented.
-- **Measured numbers, not chosen ones.** AT and PA from skill levels over
-  attribute bases, difficulty scaling for non-heroes, per-sector creature level
-  bands, and sector music *selection* (`formats/sectors.gd`) — selection only,
-  since there is no audio layer to hand the result to.
+Current code is substantially newer than the original world viewer, but
+components, ordinary controls and retail acceptance are different claims:
 
-Several readers have no feature behind them yet: the faction matrix, `.pax`
-hero saves, `triggers.pak`, `formats/equipment.gd` and `formats/wpmod.gd` are
-decoded and gated with no production caller.
+| Area | Present in this snapshot | Not yet established |
+|---|---|---|
+| Retail resources/world | Runtime readers, sector streaming, terrain/statics, interiors and native-style floor composition | Complete scene breadth, actor visibility and strict full-frame parity |
+| Models | Granny meshes/poses/animation, equipment rendering, all eight class body mappings including native Vampiress day body | Complete action/equipment/form selection, opening chronology or all class tutorials |
+| Movement | Click/drag commands, fixed-tick simulation, actor registry, path windows and camera follow | Complete Gold admission and continuous retail-equivalent travel |
+| Character/session | Template-derived HP, item instances, progression commands and content-bound state owner | Complete authoritative equipment/stat/action state |
+| Combat | Recovered hit/damage kernels, two-sided demonstration brains and reward/loot APIs | Native quest causality, full damage channels, retail ranges/cadence/arts and ordinary encounter coverage |
+| Inventory | `I` opens a text listing; ownership/transfer APIs exist | Retail grid, ordinary pickup/equip/use controls and correct listing filters |
+| Scripts/dialogue | Expanded VM, selected-class bootstrap, real dialogue/choice components and queued-talk helper | Ordinary talk input, durable task/sector lifecycle and the complete Seraphim conversation→quest route |
+| Persistence | CLI engine-owned JSON save/load with exact content identity and dialogue state | Ordinary save/load UI and complete restart/continue correctness |
+| HUD/audio | Retail sheet taskbar, health/art updates, sector/fight music and script-sound paths | Complete actionable HUD, portrait/journal/compass, audio-event parity |
+| Movies | Explicit CLI playback and display/audio probe using user-local conversion | Normal menu/script/world-return integration or full cinematic coverage |
+| Mods/cache | Data-only whole-file profiles, exact identity, early mounting and source-keyed derived texture caches | Record merges, media replacements, executable mods or hot reload |
 
-Not implemented: inventory, skills, dialogue, sound playback, multiplayer,
-save/load. Do not expect to play anything.
+Fresh production verification on 2026-10-05 reached the 1024×768
+Forward+/Vulkan Seraphim world, accepted a movement click and opened the `I`
+panel. The actual frame still obscured the hero and showed a text-only empty
+inventory. This run used Dummy audio with retail sound muted, so it proves no
+audible playback. Source inspection also found unwired ordinary talk/pickup,
+demonstration combat inputs and incomplete composite save continuation.
+
+The [milestone contract](docs/milestone-0.0.1.md) records these blockers and
+the acceptance gates. No passing check count, improved start-scene ratchet or
+isolated model render is a claim of 1:1 gameplay. Full campaigns, other-class
+qualification, multiplayer and retail world-save interchange are outside
+0.0.1. See [tooling and verification](docs/tooling.md) before treating a
+research harness as a release gate.
 
 ## Start here
 
@@ -82,12 +66,12 @@ You need Godot 4.7 (Forward Plus) and a Sacred Gold install.
 godot --path . -- --install=/path/to/sacred
 ```
 
-`run.sh` wraps this and needs no arguments — the install is found by
-`Sacred.find_install()`. `./run.sh --checks` runs every gate in `checks/` under
-a timeout (a failed `assert()` hangs rather than exits) and prints
-`PASS=n FAIL=n`; `--layers` runs `parity/verify.gd`; `--flags` lists the flags
-`main.gd` actually parses by reading them out of it. Anything else is passed
-through to the game.
+`run.sh` wraps this. Pass `--install` explicitly on a fresh checkout; later
+runs may use `Sacred.find_install()`'s remembered path. `./run.sh --checks`
+runs the existing component gates under a timeout and prints `PASS=n FAIL=n`;
+some require additional private retail fixtures. `--layers` runs
+`parity/verify.gd`; `--flags` lists parsed flags. See the tooling document
+for corpus requirements and the limits of each gate.
 
 The path is remembered in `user://openheilig.cfg` as `install_path`, so later
 runs need no flag. `main.gd` is the composition root: it resolves the install,
@@ -100,20 +84,23 @@ template, a mapped body model, and an authored `StartPosition`; startup exits
 with an error instead of silently substituting another class. All eight class
 body mappings now include the Vampiress's native day body, `VLADY_D.GRN`
 (class/type 6). `VLADY_N.GRN` is her second form, not a ninth selectable class.
-This does not establish day/night transformations or completed tutorials:
-opcode-3 dialogue execution and in-world actor placement/rendering remain open.
+This does not establish day/night transformations or completed tutorials.
+Selected-class dialogue now bootstraps, but ordinary talk and completed
+in-world quest/dialogue journeys remain unqualified.
 Encounter statistics and combat arts use that same selected template (or
 `--hero=<pax>` import), and encounter scripts use the selected campaign tree.
 The fixed demonstration quest is still not a complete campaign quest scheduler.
 
 `--save=<file.json>` and `--load=<file.json>` use engine-owned session saves,
-not retail `gameNN.pak` files. Schema-3 saves carry the hero class, progression,
-items, world trigger states, and exact resolved content-profile identity.
+not retail `gameNN.pak` files. Schema-4 saves carry the hero class, progression,
+items, trigger states, dialogue/NPC bindings and exact content-profile identity.
 Launch with the matching `--class` and the same selected mod packages/content
 when loading. Class/profile mismatches refuse before live state is replaced.
 Older identity-less saves are refused rather than guessed into new numeric
 definitions. For example, use `--class=type_npc_zwerg` for saving and loading
 a Dwarf, and retain the same `--mod` selection.
+Composite continuation is not yet qualified: durable tasks/combat clocks,
+actor-ID gaps and malformed-state transactionality remain release blockers.
 
 Repeat `--mod=<directory>` to select data-only packages. A package's `mod.json`
 declares an ID/version, exact-version dependencies, and logical runtime files:
@@ -211,15 +198,16 @@ Nothing here is inferred from how it looks on screen. Every reader is checked
 against an independent decode:
 
 - `parity/verify.gd` prints the same facts as the Python `verify_ref.py` in the
-  [tools](../tools) repo, so the two implementations can be diffed byte for
+  [tools](https://github.com/openheilig/tools) repo, so the two implementations can be diffed byte for
   byte. Two independent decoders agreeing is the evidence; one decoder looking
   plausible is not.
 - `checks/` holds single-purpose gates, each answering one question against the
   retail data.
 - The replay harness gates simulation changes on identical output.
 
-Every check and probe runs headless and states its own command line in its
-header comment:
+Most component checks run headless and state their command in the header.
+Display/audio probes, including `probes/movie_smoke.gd`, require an actual
+graphical/audio run; headless success does not prove pixels or sound:
 
 ```
 godot --headless --path . --script res://checks/floor_check.gd
@@ -229,9 +217,9 @@ godot --headless --path . --script res://checks/floor_check.gd
 
 This is one of three repositories:
 
-- [research](../research) — what the formats are, and how each finding was
+- [research](https://github.com/openheilig/research) — what the formats are, and how each finding was
   established.
-- [tools](../tools) — the analysis and extraction tools, and the Python half
+- [tools](https://github.com/openheilig/tools) — the analysis and extraction tools, and the Python half
   of every parity gate.
 
 ## Licence

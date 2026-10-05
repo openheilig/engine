@@ -14,6 +14,7 @@ var _types := PackedInt32Array()
 var _parents := PackedInt32Array()
 var _req := PackedInt32Array()
 var _level := PackedInt32Array()
+var _mode := PackedByteArray()
 var _row_of_type: Dictionary = {}
 
 func _init(path: String) -> void:
@@ -34,6 +35,7 @@ func _init(path: String) -> void:
 	_parents.resize(count)
 	_req.resize(count)
 	_level.resize(count)
+	_mode.resize(count)
 	for row in count:
 		file.seek(HEADER_SIZE + row * RECORD_SIZE)
 		# 154 bytes: +148 is the REQUIRED level and +153 the ITEM level --
@@ -45,6 +47,7 @@ func _init(path: String) -> void:
 		_parents[row] = record.decode_u32(36)
 		_req[row] = record[148]
 		_level[row] = record[153]
+		_mode[row] = record[30]
 		var t := _types[row]
 		if t > 0:
 			# Retail's load stamps the reverse index per row, so the LAST row
@@ -64,6 +67,12 @@ func req_level(row: int) -> int:
 ## filters on.
 func item_level(row: int) -> int:
 	return _level[row] if row >= 0 and row < _level.size() else 0
+
+
+## Native cWeapon3D::mode (LGP sub_8368E26, ENG sub_5CEBE0):
+## unsigned byte +30 of the RAW 258-byte descriptor, not item category.
+func mode(row: int) -> int:
+	return int(_mode[row]) if row >= 0 and row < _mode.size() else 0
 
 ## Stamp all weapon-row indices BEFORE copying any inherited definition.
 ## PackedByteArray assignment has value semantics; later parent mutations

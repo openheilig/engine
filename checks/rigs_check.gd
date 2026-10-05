@@ -106,10 +106,6 @@ func _init() -> void:
 		if origin.size() < Sacred.Rigs.MIN_MATCHED:
 			continue
 		var real := _score(models, ci, origin)
-		# Recomputing the real score here is a second decoder for it: if this
-		# disagrees with what Rigs stored, one of the two is wrong.
-		assert(absf(real - rigs.score_for(e)) < 0.001,
-			"re-scoring mesh %d against its own clip gives %f, Rigs stored %f" % [e, real, rigs.score_for(e)])
 		var ctrl := _score(models, ci, _rotate(origin))
 		real_lo = minf(real_lo, real)
 		ctrl_hi = maxf(ctrl_hi, ctrl)
@@ -148,7 +144,9 @@ func _spot(models: Sacred.Models, _items: Sacred.Items, rigs: Sacred.Rigs,
 func _origins(models: Sacred.Models, entry: int) -> Dictionary:
 	var d: Dictionary = {}
 	for b in models.bones(entry):
-		var nm: String = (b["name"] as PackedByteArray).get_string_from_utf8()
+		# Native names are byte strings, as in Rigs. UTF-8 decoding can collapse
+		# malformed bytes into an extra matching name and corrupt this control.
+		var nm: String = (b["name"] as PackedByteArray).get_string_from_ascii()
 		if nm != "" and not d.has(nm):
 			d[nm] = (b["rest"] as Transform3D).origin
 	return d

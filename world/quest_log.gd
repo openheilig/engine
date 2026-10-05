@@ -42,6 +42,9 @@ var _var: Dictionary[String, int] = {}
 ## started" is not answerable from the bytecode alone. Quest 65 does write 1 on
 ## entry, so the two are not even consistent with each other across the corpus.
 var _entered: Dictionary[int, bool] = {}
+## Native quest-table completion, independent of script variables ("03" is
+## NOT the same name as "3"). EndQuest never invents a SetVarBit write.
+var completed: Dictionary[int, bool] = {}
 
 
 # --- ScriptVM host interface -------------------------------------------------
@@ -64,7 +67,8 @@ func set_var(name: String, bit: int) -> void:
 	if bit < 0 or bit >= BITS:
 		push_warning("QuestLog: bit %d for %s is outside the %d-bit array" % [bit, name, BITS])
 		return
-	_var[name] = int(_var.get(name, 0)) | (1 << bit)
+	var key := _variable_key(name)
+	_var[key if not key.is_empty() else name] = int(_var.get(key, 0)) | (1 << bit)
 
 
 ## SetQuestInfo's argument is 3 in every hook read so far and nothing says what
@@ -102,6 +106,10 @@ func mark_entered(quest: int) -> void:
 	_entered[quest] = true
 
 
+
+func mark_finished(quest: int) -> void:
+	completed[quest] = true
+
 ## Every quest id this log has marked entered, ascending -- the save
 ## snapshot's "port bookkeeping" half (P1): _entered is the port's own
 ## flag, separate from the bytecode's bits, and both halves persist.
@@ -130,13 +138,34 @@ func is_running(quest: int) -> bool:
 
 
 func is_done(quest: int) -> bool:
-	return (state_of(quest) & (1 << STATE_DONE)) != 0
+	return completed.has(quest) or (state_of(quest) & (1 << STATE_DONE)) != 0
 
 
 ## Every variable the bytecode has written, for a gate that wants to see the
 ## whole effect of a run rather than one quest's slice.
 func vars() -> Dictionary[String, int]:
 	return _var.duplicate()
+
+
+## Native name lookup requires full length and case-insensitive equality.
+## The found bit matters: IsNotVarBit on an absent variable is also false.
+func named_variable(name: String) -> Dictionary:
+	var key := _variable_key(name)
+	return {"found": not key.is_empty(), "value": int(_var.get(key, 0))}
+
+
+func named_variables() -> Dictionary:
+	var out := {}
+	for key in _var:
+		out[key.to_lower()] = int(_var[key])
+	return out
+
+
+func _variable_key(name: String) -> String:
+	for key in _var:
+		if key.nocasecmp_to(name) == 0:
+			return key
+	return ""
 
 
 ## Fills in each line's `text` from a Sacred.Resources.

@@ -19,6 +19,9 @@ extends Node3D
 
 const SECT: int = Sacred.SECT
 const ContentLoading := preload("res://view/content_loading.gd")
+const MoviePlayer := preload("res://view/movie_player.gd")
+const DialogueRuntime := preload("res://world/dialogue.gd")
+const DialoguePanel := preload("res://view/dialogue_view.gd")
 ## The F3 developer overlay. Preloaded, not `class_name`d: a newly added
 ## global class is not in Godot's script-class cache for a `--path` run until
 ## the project is reimported (view/rig_placement.gd documents the same trap).
@@ -119,6 +122,9 @@ var _hero_brain: HostileBrain = null
 ## scenario actually reached.
 var _quest_log: QuestLog = null
 var _quest_cast: QuestCast = null
+var _dialogue_view: PanelContainer
+var _dialogue_tree_was_paused := false
+var _dialogue_modal := false
 const CLASS_MODEL := {
 	"type_npc_daemonin": "DAEMONIA.GRN",
 	"type_npc_darkelve": "DUNKELELVE.GRN",
@@ -469,6 +475,11 @@ var _sector_env := {}                                ## the current sector's env
 var _music_player: AudioStreamPlayer
 var _music_now := 0
 var _music_noaudio := false                          ## audio unavailable
+var _movie_player: MoviePlayer
+var _movies_enabled := true
+var _movie_tree_was_paused := false
+var _movie_music_was_paused := false
+var _movie_cli := false
 
 # Plan 05-08: crowd benchmark. Opt-in only -- _has_crowd stays false unless
 # --crowd= is literally present, so a bare "0" or a negative value still
@@ -588,6 +599,24 @@ func _ready() -> void:
 			AudioServer.set_bus_mute(AudioServer.get_bus_index("Master"), true)
 		print("settings\tretail config applied: fullscreen=%s sound=%s"
 			% [retail_cfg.wants_fullscreen(), retail_cfg.wants_sound()])
+	_movies_enabled = "--no-movies" not in argv and retail_cfg.int_value("SHOWMOVIE", 1) != 0
+	if "--movies" in argv:
+		_movies_enabled = true
+	for argument in argv:
+		var movie_kind := ""
+		var movie_value := ""
+		for prefix in ["--movie=", "--movie-ui=", "--movie-native="]:
+			if argument.begins_with(prefix):
+				movie_kind = prefix
+				movie_value = argument.trim_prefix(prefix)
+				break
+		if movie_kind != "":
+			_movie_cli = true
+			var problem := _request_movie(install, movie_kind, movie_value, &"cli")
+			if problem != "":
+				printerr("movie: ", problem)
+				get_tree().quit(1)
+			return
 	for a in argv:
 		if a.begins_with("--walk-route="):
 			var route_name := a.trim_prefix("--walk-route=")
@@ -1013,6 +1042,7 @@ func _ready() -> void:
 			_cam.move_click.connect(_on_move_click)
 			if _sim.interior != null:
 				_sim.interior.place_focus(player_cell, _player_type, _retail_start_layer)
+			_initialize_dialogue_runtime(install)
 			# hostile is an actor whether or not anything is drawn.
 			#
 			# RETAIL'S NEW GAME RUNS QUEST 74's OnEnter: its console line
@@ -1259,6 +1289,147 @@ func _run_scenario() -> void:
 			"--drive-out=" + dir, "--drive-clock=frames"])
 	else:
 		await _maybe_screenshot()
+
+func _initialize_dialogue_runtime(install: String) -> void:
+	if _session == null or not _run_quests:
+		return
+	var base := "bin/addon" if _campaign != "" else "bin"
+	var dir := install.path_join(base).path_join(_start_class)
+	var cast := _session.quest_log
+	cast.bind_runtime(_session)
+	cast.quest_origin = _retail_start
+	var resources := Sacred.Resources.new(install.path_join("scripts/us/global.res"))
+	var runtime := DialogueRuntime.new(dir, cast, resources)
+	if not runtime.bootstrap(Sacred.Startcode.new(dir)):
+		printerr("dialogue bootstrap: ", runtime.last_error)
+		return
+	_session.dialogue_runtime = runtime
+	_quest_cast = cast
+	_quest_log = cast
+	var layer := CanvasLayer.new()
+	layer.layer = 105
+	layer.process_mode = Node.PROCESS_MODE_ALWAYS
+	add_child(layer)
+	_dialogue_view = DialoguePanel.new()
+	_dialogue_view.process_mode = Node.PROCESS_MODE_ALWAYS
+	layer.add_child(_dialogue_view)
+	_dialogue_view.bind_runtime(runtime)
+	_dialogue_view.result_ready.connect(_on_dialogue_result)
+	_dialogue_view.closed.connect(_on_dialogue_closed)
+
+
+func _on_dialogue_result(result: Dictionary) -> void:
+	if not result.get("ok", false):
+		printerr("dialogue: ", result.get("error", "unknown execution error"))
+	_drain_script_effects()
+	_sync_deleted_script_actors()
+
+
+func _on_dialogue_closed() -> void:
+	if _dialogue_modal:
+		get_tree().paused = _dialogue_tree_was_paused
+		_dialogue_modal = false
+
+
+func _open_actor_dialogue(handle: String) -> void:
+	if _dialogue_view == null or _session == null or _session.dialogue_runtime == null:
+		return
+	_dialogue_tree_was_paused = get_tree().paused
+	_dialogue_modal = true
+	get_tree().paused = true
+	_dialogue_view.show_dialogue(handle)
+
+
+func _sync_deleted_script_actors() -> void:
+	for id: int in _scripted_views.keys():
+		if _registry.get_actor(id) != null:
+			continue
+		var view: PlayerView = _scripted_views[id]
+		_scripted_views.erase(id)
+		_creature_views.erase(view)
+		if view.node != null:
+			view.node.queue_free()
+
+
+func _drain_script_effects() -> void:
+	if _session == null:
+		return
+	var effects := _session.quest_log.effects
+	_session.quest_log.effects = []
+	for effect: Dictionary in effects:
+		match effect.get("kind", ""):
+			"PlaySound":
+				_play_script_sound(str(effect["name"]))
+			_:
+				printerr("script effect: unsupported presentation ", effect)
+
+
+func _play_script_sound(name: String) -> void:
+	var id := -1
+	var names := Sacred.SoundNames.table(_install_ref)
+	var wanted := name.trim_prefix(Sacred.SoundNames.PREFIX)
+	for candidate in names:
+		if str(names[candidate]).nocasecmp_to(wanted) == 0:
+			id = int(candidate)
+			break
+	var relative := Sacred.SoundNames.ogg_relpath(id, _install_ref)
+	if relative.is_empty():
+		printerr("script sound: unresolved ", name)
+		return
+	var stream := AudioStreamOggVorbis.load_from_file(_install_ref.path_join(relative))
+	if stream == null:
+		printerr("script sound: cannot decode ", relative)
+		return
+	var player := AudioStreamPlayer.new()
+	player.process_mode = Node.PROCESS_MODE_ALWAYS
+	player.stream = stream
+	add_child(player)
+	player.finished.connect(player.queue_free)
+	player.play()
+
+
+## The controller returns to this exact owner after audio stops and conversion
+## joins. No arbitrary scene/resource path comes from the movie or a save.
+func _request_movie(install: String, kind: String, value: String, owner: StringName) -> String:
+	if _movie_player == null:
+		_movie_player = MoviePlayer.new()
+		_movie_player.returned.connect(_on_movie_returned)
+		add_child(_movie_player)
+	_movie_player.movies_enabled = _movies_enabled
+	var problem := ""
+	match kind:
+		"--movie=":
+			problem = _movie_player.play_movie(install, value, owner)
+		"--movie-ui=":
+			if not value.is_valid_int():
+				return "native UI movie command is not an integer"
+			problem = _movie_player.play_native_ui(install, int(value), owner)
+		"--movie-native=":
+			if not value.is_valid_int():
+				return "native movie ID is not an integer"
+			problem = _movie_player.play_native_movie(install, int(value), owner)
+		_:
+			return "unknown movie request kind"
+	if problem != "":
+		return problem
+	_movie_tree_was_paused = get_tree().paused
+	_movie_music_was_paused = _music_player.stream_paused if _music_player != null else false
+	if _music_player != null:
+		_music_player.stream_paused = true
+	get_tree().paused = true
+	return ""
+
+
+func _on_movie_returned(movie_id: String, owner: StringName, outcome: StringName, message: String) -> void:
+	get_tree().paused = _movie_tree_was_paused
+	if _music_player != null:
+		_music_player.stream_paused = _movie_music_was_paused
+	print("movie\tid=%s\towner=%s\toutcome=%s\tmessage=%s" % [movie_id, owner, outcome, message])
+	if outcome == &"error":
+		push_error("movie: %s" % message)
+	if _movie_cli:
+		get_tree().quit(1 if outcome == &"error" else 0)
+
 
 
 func _read_json(path: String) -> Dictionary:
@@ -1799,6 +1970,8 @@ func _begin_encounter(install: String, items) -> void:
 		push_warning("encounter: '%s' is not in this tree -- no hostile spawned" % Encounter.FOE_PLACE)
 		_encounter = null
 		return
+	if _session != null:
+		_encounter.log = _session.quest_log
 	_encounter.begin()
 	print(_encounter.status_line())
 	# E1: the encounter's quest log IS the scenario's quest state. Held once,
@@ -4014,34 +4187,20 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		print("quest\tid=%d\tskipped=--noquests" % START_QUEST)
 		return
 	var start := Time.get_ticks_msec()
-	var base := "bin/addon" if _campaign != "" else "bin"
-	var dir := install.path_join(base).path_join(_start_class)
-	var vec := Sacred.Vectoren.new(dir)
-	if not vec.found or not vec.has_quest(START_QUEST):
-		printerr("quest\tid=%d\tnot in %s" % [START_QUEST, dir])
+	if _session == null or _session.dialogue_runtime == null:
+		printerr("quest\tselected-class dialogue runtime is unavailable")
 		return
-	var hook: Dictionary = vec.hook(START_QUEST, Sacred.Vectoren.H_ON_ENTER)
-	if hook.is_empty():
-		printerr("quest\tid=%d\tno OnEnter hook" % START_QUEST)
+	var runtime = _session.dialogue_runtime
+	var vec = runtime.table
+	var vm = runtime.vm
+	var cast := _session.quest_log
+	_quest_cast = cast
+	_quest_log = cast
+	if not runtime.start_quest(START_QUEST):
+		printerr("quest\tid=%d\t%s" % [START_QUEST, runtime.last_error])
 		return
-	var code := FileAccess.get_file_as_bytes(Sacred.Pak.resolve(dir.path_join("funkcode.bin")))
-	var vm := ScriptVM.new()
-	var cast := QuestCast.new()
-	_quest_cast = cast   # E1: retained so Checkpoint.capture can read the live cast
-	# F1: position-less quest CreateNPC spawns at the hero's cell (retail's
-	# nun appears on the hero, and her Goto walk pushes the hero south).
-	vm.quest_origin = _retail_start
-	cast.quest_origin = _retail_start
-	cast.quest_origin = vm.quest_origin
-	if not vm.run(code, hook["offset"], hook["length"], cast):
-		# A REFUSAL IS REPORTED, NOT SWALLOWED. ScriptVM refuses a whole hook
-		# rather than skipping the opcode it cannot run, so this is "she is
-		# absent and here is exactly why", which is what a silent return would
-		# have cost the last three sessions.
-		printerr("quest\tid=%d\trefused_op=%d\t(nothing executed)" % [
-			START_QUEST, vm.refused_op])
-		return
-	cast.mark_entered(START_QUEST)
+	_drain_script_effects()
+	# Keep registry identity keyed by native handle, never by shared creature type.
 
 	# Resolve every mesh BEFORE building any rig, so Sacred.Rigs decodes the
 	# clip corpus ONCE for the whole cast -- the same reason _build_npcs does
@@ -4055,19 +4214,25 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 	# becomes a simulation actor, so NPC_Goto drives real movement and later
 	# quests can walk the same res: handle (quest 9 does exactly that). The
 	# renderer then follows the actor, exactly like the hero.
-	var scripted: Dictionary[int, ActorState] = {}
+	var scripted: Dictionary[String, ActorState] = {}
 	var registry := _registry
 	for e: Dictionary in placed:
+		if e.get("deleted", false) or Vector2(e["cell"]).distance_to(_session.player_cell) > NPC_RADIUS:
+			continue
 		var nm: String = items.name_of(int(e["creature"]))
 		var mi := models.index_of(nm) if nm != "" else -1
 		if mi < 0:
 			unresolved += 1
 			continue
 		if registry != null and _sim != null:
-			var id := registry.spawn(int(e["creature"]),
-				Vector2(e["cell"]) + GOTO_CELL_CENTRE, 40, 40)
+			var id := int(e.get("actor_id", 0))
+			if id == 0:
+				var attrs := _shadow_creatures.base_all(int(e["creature"]))
+				var hp := ActorStats.max_hp(attrs[0], attrs[3], attrs[0], attrs[3], 1)
+				id = registry.spawn(int(e["creature"]), Vector2(e["cell"]) + GOTO_CELL_CENTRE, hp, hp)
+				cast.bind_actor(str(e["handle"]), id)
 			if id != ActorRegistry.INVALID_ID:
-				scripted[int(e["creature"])] = registry.get_actor(id)
+				scripted[str(e["handle"])] = registry.get_actor(id)
 		# A GOTO DESTINATION IS A CELL CENTRE, not a cell corner. `cell_to_world`
 		# maps an integer cell to its corner vertex, which is right for the hero --
 		# she is SPAWNED at a cell and her feet land on retail's to the pixel
@@ -4088,7 +4253,8 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 		# and not a spawn point. The port does not simulate the walk, so it draws
 		# where she ends up.
 		picks.append({"type": int(e["creature"]), "name": nm, "mesh": mi,
-			"cell": Vector2(e["cell"]) + GOTO_CELL_CENTRE})
+			"handle": str(e["handle"]), "main": int(e.get("main", 0)), "off": int(e.get("off", 0)),
+			"layer": int(e.get("layer", 0)), "cell": Vector2(e["cell"]) + GOTO_CELL_CENTRE})
 		if not wanted.has(mi):
 			wanted.append(mi)
 	var rigs: Sacred.Rigs = Sacred.Rigs.new(models, wanted) if not wanted.is_empty() else null
@@ -4108,7 +4274,7 @@ func _build_quest_cast(install: String, models: Sacred.Models, items: Sacred.Ite
 			unresolved += 1
 			continue
 		add_child(pv.node)
-		var actor: ActorState = scripted.get(int(pick["type"]))
+		var actor: ActorState = scripted.get(str(pick["handle"]))
 		var cell: Vector2 = actor.cell if actor != null else pick["cell"]
 		pv.update(cell)
 		# The scripted Goto supplies the initial world-space travel direction;

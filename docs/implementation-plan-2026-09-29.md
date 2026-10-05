@@ -8,9 +8,16 @@
 
 **Tech stack:** Current observed baseline Godot4.7.2.stable.arch_linux.ed1daf0bf, GDScript, Forward+/Vulkan, existing Python/shell research tools and retail oracles. Native extensions are conditional on measured need or an explicit codec requirement, not a planned language migration.
 
-**Spec:** [Research audit and proposed product contract](../../research/engine/engine-revision-2026-09-29.md). This relative link is resolved from the engine repository's `docs/` directory via the sibling research repository.
+**Spec:** [September29 research audit](https://github.com/openheilig/research/blob/main/engine/engine-revision-2026-09-29.md).
 
-**Status:** Proposal only. No engine implementation started. Research established current paths, product scope, several corrections and concrete RE entry points. It did **not** establish every class ability, item modifier or save-section semantic. Tasks with an unresolved semantic prerequisite must produce the stated evidence contract before code is authorized; they may not substitute guessed rules. This is a scope/dependency/acceptance plan, not a claim that all remaining rules are already executable specifications.
+**Status, updated 2026-10-05:** Long-term implementation reference. Work has
+started and several foundations exist, but source/components and historical
+checkboxes do not establish a completed player journey. The approved
+[0.0.1 Seraphim contract](milestone-0.0.1.md) now controls the next release's
+bounded scope; [tooling.md](tooling.md) records current proof limits. This
+publication revision does not resume the paused broad implementation.
+Unknown class ability, item modifier and save-section contracts still require
+their stated evidence before code; they may not be replaced with guessed rules.
 
 ## Global constraints
 
@@ -524,4 +531,4 @@ Before any implementation phase is accepted:
 - [ ] Performance comparison reports environment/state/quality, percentiles and memory; no unmeasured speedup claim.
 - [ ] Proprietary evidence remains private; authored result logged with provenance and limitations.
 
-**Recommended first authorized work:** E1 + R0, then W1/S0 and C1/P1 with their concrete prerequisite tickets. Run resource-profile work and scenario instrumentation independently; do not start by polishing the remaining cathedral pixels or introducing a new engine/framework. Implementation remains stopped pending the user's decision on this proposal.
+**Next implementation boundary:** choose the earliest failed checkpoint in the approved [0.0.1 Seraphim contract](milestone-0.0.1.md), recover its exact native witness, then complete that one player-visible outcome. Do not restart the entire breadth plan, polish an unmatched screenshot or introduce a new engine/framework under the publication task.

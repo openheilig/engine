@@ -127,6 +127,9 @@ var objects: Array[Dictionary] = []
 ## three would reject more than half the shipped files.
 var start_cell := NO_CELL
 var start_layer := 0
+## Retained for control-flow-preserving named-variable/dialogue initialization.
+## Never independently scan all writes and execute guarded ones unconditionally.
+var code := PackedByteArray()
 
 var _unresolved := 0
 
@@ -137,6 +140,7 @@ func _init(dir: String) -> void:
 	if b.is_empty():
 		push_error("Startcode: cannot read startcode.bin in %s" % dir)
 		return
+	code = b
 	# Two passes: an opcode-1 record may name a position declared later in the
 	# file, so every label has to exist before any of them is resolved.
 	var pending: Array[Dictionary] = []
@@ -154,11 +158,11 @@ func _init(dir: String) -> void:
 			match opcode:
 				OP_PLACE: _read_place(args)
 				OP_START: _read_start(args)
-				_: pending.append({"op": opcode, "args": args})
+				_: pending.append({"op": opcode, "args": args, "offset": off})
 		off += length
 	for rec in pending:
 		if rec["op"] == OP_NPC:
-			npcs.append(_read_npc(rec["args"]))
+			npcs.append(_read_npc(rec["args"], int(rec["offset"])))
 		else:
 			objects.append(_read_obj(rec["args"]))
 
@@ -256,9 +260,14 @@ func _read_start(args: Array) -> void:
 	start_layer = v[2] if v.size() > 2 else 0
 
 
-func _read_npc(args: Array) -> Dictionary:
+func _read_npc(args: Array, source_offset: int) -> Dictionary:
 	var ids := _ids(args)
 	var pos := _position(args)
+	var handle := _first(args, 0x01)
+	# Unnamed placements have no native script handle. Give their persistent
+	# engine identity a source-record key, never a display name or body ID.
+	if handle.is_empty():
+		handle = "startcode:%d" % source_offset
 	return {
 		"body": ids[0] if ids.size() > 0 else 0,
 		"main": ids[1] if ids.size() > 1 else 0,
@@ -267,7 +276,22 @@ func _read_npc(args: Array) -> Dictionary:
 		"layer": pos[1],
 		"place": pos[2],
 		"name": _first(args, 0x01),
+		"handle": handle,
+		"source_offset": source_offset,
+		"script_name": _nth_string(args, 0x01, 1),
+		"dialogue": _first(args, 0x09),
+		"task": _first(args, 0x05),
+		"art": _first(args, 0x67),
 	}
+
+
+func _nth_string(args: Array, tag: int, occurrence: int) -> String:
+	for arg in args:
+		if int(arg[0]) == tag:
+			if occurrence == 0:
+				return str(arg[1])
+			occurrence -= 1
+	return ""
 
 
 func _read_obj(args: Array) -> Dictionary:

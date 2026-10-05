@@ -17,13 +17,14 @@ GODOT=${GODOT:-godot}
 
 case "${1:-}" in
 --checks)
+	shift
 	pass=0 fail=0
 	for c in "$DIR"/checks/*_check.gd; do
 		name=$(basename "$c" .gd)
 		# A failed assert() HANGS rather than exits, which is why every gate
 		# is under a timeout: a hung gate must be a red line, not a red evening.
 		if timeout 300 "$GODOT" --headless --path "$DIR" \
-			--script "res://checks/$name.gd" >/dev/null 2>&1; then
+			--script "res://checks/$name.gd" -- "$@" >/dev/null 2>&1; then
 			pass=$((pass + 1))
 		else
 			fail=$((fail + 1))
@@ -41,7 +42,8 @@ case "${1:-}" in
 	grep -ohE '"--[a-z-]+=?' "$DIR/main.gd" "$DIR/drive.gd" | tr -d '"' | sort -u
 	;;
 --layers)
-	exec "$GODOT" --headless --path "$DIR" --script res://parity/verify.gd
+	shift
+	exec "$GODOT" --headless --path "$DIR" --script res://parity/verify.gd -- "$@"
 	;;
 *)
 	exec "$GODOT" --path "$DIR" -- "$@"

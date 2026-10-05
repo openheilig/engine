@@ -3,11 +3,12 @@ extends SceneTree
 ## tree, refuse a bogus root with a precise reason, classify a Windows-mixed
 ## layout by probing (created in a temp dir), and never silently pick a
 ## case-fold collision.
+const SacredData := preload("res://sacred.gd")
 
 func _init() -> void:
 	var fails := 0
 	# 1. the real install
-	var real := InstallProfile.probe("/home/rlinev/Projects/openheilig/donotpublish/install")
+	var real := InstallProfile.probe(SacredData.find_install())
 	if real.errors.is_empty() and real.family == InstallProfile.Family.LGP_LINUX \
 			and real.layout == InstallProfile.Layout.LOWERCASE \
 			and real.executable_format == "elf32":
@@ -23,13 +24,9 @@ func _init() -> void:
 	else:
 		fails += 1
 		printerr("FAIL ghost root accepted")
-	# 3. a mixed-case tree in a temp dir: PAK/, WORLD/ uppercase copies.
-	# A PREVIOUS RUN of this check leaves its step-4 lowercase dirs behind,
-	# which would turn this run's step 3 into a collision case -- so the
-	# scratch tree is removed, not reused.
-	var tmp := "/tmp/openheilig-r0-mixed"
-	OS.move_to_trash(tmp)   # best effort; a non-empty stale tree must go
-	DirAccess.remove_absolute(tmp)
+	# 3. A fresh engine-owned scratch tree: no developer path or shared /tmp.
+	var tmp := ProjectSettings.globalize_path("user://checks/install-profile-%s-%s"
+		% [OS.get_process_id(), Time.get_ticks_usec()])
 	DirAccess.make_dir_recursive_absolute(tmp + "/PAK")
 	DirAccess.make_dir_recursive_absolute(tmp + "/WORLD")
 	FileAccess.open(tmp + "/PAK/TILES.PAK", FileAccess.WRITE).close()
@@ -57,8 +54,9 @@ func _init() -> void:
 		printerr("FAIL collision accepted: layout=%d ok=%s errors=%s" % [coll.layout, coll.ok(), coll.error_text()])
 	# 5. an explicit --install refusal is sacred.gd's job; here just confirm
 	# the probe alone refuses an empty dir (no files at all)
-	DirAccess.make_dir_recursive_absolute("/tmp/openheilig-r0-empty")
-	var empty := InstallProfile.probe("/tmp/openheilig-r0-empty")
+	var empty_root := tmp + "/empty"
+	DirAccess.make_dir_recursive_absolute(empty_root)
+	var empty := InstallProfile.probe(empty_root)
 	if not empty.ok() and empty.error_text().contains("tiles.pak"):
 		print("ok\tempty root refused with tiles.pak reason")
 	else:

@@ -30,10 +30,10 @@ const START_CLASS := "type_npc_seraphim"
 const START_TEMPLATE := "hero01.ptx"
 ## bin/ tree for the class's script bytecode and start position.
 const START_SET := 6
-## Composite schema v3 adds exact resolved content identity. Earlier saves
-## cannot be proven to refer to the same numbered items, so are refused;
+## Composite schema v4 adds durable dialogue/NPC bindings to exact content
+## identity. Older snapshots cannot resume the same conversation/quest state;
 ## no implicit migration attaches current definitions to old numeric IDs.
-const SCHEMA := 3
+const SCHEMA := 4
 const ContentProfile := preload("res://formats/mod_manifest.gd")
 const SCHEMA_KEY_ITEMS := "items"
 
@@ -43,6 +43,7 @@ var start_class := START_CLASS
 var start_template := START_TEMPLATE
 var registry: ActorRegistry
 var quest_log: QuestCast
+var dialogue_runtime: RefCounted
 var sim: Sim
 var items: ItemInstances
 var player_id: int = ActorRegistry.INVALID_ID
@@ -285,6 +286,7 @@ func snapshot() -> Dictionary:
 		return {}
 	var snap := SaveState.snapshot(_as_session_dict())
 	snap["content_identity"] = content_identity()
+	snap["dialogue"] = dialogue_runtime.snapshot() if dialogue_runtime != null else null
 	snap[SCHEMA_KEY_ITEMS] = items.snapshot()
 	snap["start_class"] = start_class
 	snap["hero_level"] = hero_level
@@ -315,6 +317,25 @@ func restore(snap: Dictionary) -> String:
 		return "save does not identify its hero class"
 	if saved_class != start_class:
 		return "save class %s does not match session class %s" % [saved_class, start_class]
+	var dialogue_state: Variant = snap.get("dialogue")
+	if dialogue_runtime != null:
+		if not dialogue_state is Dictionary or not snap.get("cast") is Array \
+				or not snap.get("actors") is Array:
+			return "save does not carry valid dialogue/NPC binding state"
+		var incoming_ids := PackedInt64Array()
+		for actor: Variant in snap["actors"]:
+			if not actor is Dictionary or not (actor.get("id") is int or actor.get("id") is float):
+				return "invalid actor identity in dialogue save"
+			var id: Variant = actor["id"]
+			if id < 1 or id != int(id):
+				return "invalid actor identity in dialogue save"
+			incoming_ids.append(int(id))
+		var binding_error: String = dialogue_runtime.validate_bindings(
+			dialogue_state, snap["cast"], incoming_ids)
+		if binding_error != "":
+			return binding_error
+	elif dialogue_state != null:
+		return "saved dialogue state requires an initialized selected-class runtime"
 	var trigger_states := PackedInt32Array()
 	if sim != null and sim.interior != null and snap.has("trigger_states"):
 		var raw_states: Variant = snap["trigger_states"]
@@ -348,6 +369,10 @@ func restore(snap: Dictionary) -> String:
 	hero_base_rephy = int(snap.get("hero_base_rephy", hero_base_rephy))
 	if not trigger_states.is_empty():
 		sim.interior.triggers.restore_states(trigger_states)
+	if dialogue_runtime != null:
+		var dialogue_error: String = dialogue_runtime.restore(dialogue_state)
+		if dialogue_error != "":
+			return dialogue_error
 	var p := registry.get_actor(player_id)
 	if p != null:
 		player_cell = p.cell

@@ -46,3 +46,16 @@ tmp/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# Private work and regenerable caches must stay excluded even with source suffixes.
+/donotpublish/
+/install/
+/assets/
+/analysis/
+/decomp/
+/captures/
+/traces/
+/cache/
+/vendor/
+/.codegraph/
+/.remember/

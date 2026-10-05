@@ -104,8 +104,8 @@ func quest_ids() -> PackedInt32Array:
 func procedure(name: String) -> Dictionary:
 	if _by_name.is_empty():
 		for p in _proc:
-			_by_name[p["name"]] = p
-	return _by_name.get(name, {})
+			_by_name[str(p["name"]).to_lower()] = p
+	return _by_name.get(name.to_lower(), {})
 
 
 func has_quest(qid: int) -> bool:

@@ -8,15 +8,10 @@ extends RefCounted
 ## against the interpreter's own `movsx eax, WORD PTR [ebx+0x2]`). Opcode NAMES
 ## come from retail's own script-compiler keyword tables, 120 of 141 (row 938).
 ##
-## WHY THIS REFUSES INSTEAD OF SKIPPING. Retail's dispatcher default case is
-## `mov ecx,1; ret`, so an opcode with no handler is silently skipped by its
-## length field -- and it is tempting to copy that and call an unimplemented
-## opcode a no-op. THAT IS WRONG HERE, and the reason is `IF`. Retail skipping
-## an opcode it never implemented leaves behaviour it never had; this class
-## skipping `IF` (opcode 58, 3.3% of quest records) would run a guarded body
-## UNCONDITIONALLY, which is not "less behaviour" but different behaviour. So
-## run() refuses a hook containing any opcode outside IMPLEMENTED, and a caller
-## finds out before anything executes rather than halfway through.
+## Unsupported EXECUTED records are refused before applying the hook. Native
+## IF/ELSEIF/ELSE traversal selects the reachable records first; an unsupported
+## record inside a skipped branch is not an executed effect. Conditions are
+## evaluated against a shadow of the named variables, including earlier writes.
 ##
 ## Nothing here touches the scene tree, a node, or a thread (R10.1): a hook is
 ## bytes in, effects on a HOST object out.
@@ -71,7 +66,7 @@ const WIDTH := {
 const END_TAGS := {0x00: true}
 
 const OP_CREATE_NPC := 1        ## CreateNPC(handle, creature, name, task, ?, art)
-const OP_SET_NPC_STATE := 3     ## NOT implemented -- named for the refusal arm
+const OP_SET_NPC_STATE := 3
 const OP_QUEST_COMPASS := 64    ## QuestKompassObj(handle)
 const OP_SET_VAR := 67          ## SetVar(name, value)
 const OP_NPC_GOTO := 72         ## NPC_Goto(handle, cell)
@@ -79,6 +74,20 @@ const OP_QUEST_BOOK := 53       ## QuestBook(quest_id, kind, res_key)
 const OP_SET_VAR_BIT := 68      ## SetVarBit(name, value)
 const OP_SET_QUEST_INFO := 87   ## SetQuestInfo(value)
 const OP_AUTOSAVE := 121        ## AutoSave(value)
+const OP_TEXT := 26
+const OP_IF := 58
+const OP_ELSE := 59
+const OP_BUTTON := 60
+const OP_NOP := 62
+const OP_ELSEIF := 66
+const OP_START_QUEST := 20
+const OP_END_QUEST := 15
+const OP_GOLD := 18
+const OP_DELETE_NPC := 55
+const OP_COMPASS_POS := 63
+const OP_DIALOG_STATE := 86
+const OP_SOUND := 104
+const OP_DIALOG_DEF := 40
 
 ## The opcodes run() will execute. Deliberately small: every one of these was
 ## read from a real quest's disassembly and its argument shape checked against
@@ -95,6 +104,21 @@ const IMPLEMENTED := {
 	OP_SET_VAR_BIT: "SetVarBit",
 	OP_SET_QUEST_INFO: "SetQuestInfo",
 	OP_AUTOSAVE: "AutoSave",
+	OP_SET_NPC_STATE: "NPCstate",
+	OP_TEXT: "Text",
+	OP_IF: "IF",
+	OP_ELSE: "ELSE",
+	OP_ELSEIF: "ELSEIF",
+	OP_BUTTON: "SetButton",
+	OP_NOP: "NOP",
+	OP_START_QUEST: "StartQuest",
+	OP_END_QUEST: "EndQuest",
+	OP_GOLD: "GiveGold",
+	OP_DELETE_NPC: "DelNPC",
+	OP_COMPASS_POS: "QuestKompassPos",
+	OP_DIALOG_STATE: "SetDialogState",
+	OP_SOUND: "PlaySound",
+	OP_DIALOG_DEF: "DialogDefinition",
 }
 
 ## Opcode -> the host method it calls. Checked BEFORE anything executes, in the
@@ -112,6 +136,17 @@ const HOST_METHOD := {
 	OP_CREATE_NPC: "create_npc",
 	OP_NPC_GOTO: "npc_goto",
 	OP_QUEST_COMPASS: "quest_compass",
+	OP_SET_NPC_STATE: "npc_state",
+	OP_TEXT: "dialogue_text",
+	OP_BUTTON: "dialogue_button",
+	OP_START_QUEST: "start_quest",
+	OP_END_QUEST: "end_quest",
+	OP_GOLD: "give_gold",
+	OP_DELETE_NPC: "delete_npc",
+	OP_COMPASS_POS: "quest_compass_pos",
+	OP_DIALOG_STATE: "dialogue_state",
+	OP_SOUND: "play_sound",
+	OP_DIALOG_DEF: "define_dialogue",
 }
 
 ## QuestBook's second argument. Measured on quests 65 and 74: the log TITLE
@@ -127,18 +162,8 @@ var refused_op := -1            ## the opcode that caused the last refusal
 var quest_origin := Vector2i.ZERO
 
 
-## Runs one hook. `host` receives the effects and must implement
-## quest_book(), set_var(), quest_info(), autosave(), set_script_var(),
-## create_npc(), npc_goto() and quest_compass() -- QuestLog answers the first
-## four and QuestCast the rest. Returns false without executing anything when
-## the span is unreadable or names an opcode this class does not implement --
-## `refused_op` says which.
-##
-## `skip_ops`: opcodes to execute as NO-OPS instead of refusing. Retail's
-## dispatcher default skips unhandled opcodes (mov ecx,1; ret), and the E2
-## gates proved 8 (CreateObj), 100 (SpawnValues) and 115 are decoded here
-## and side-effect-free at the VM level, so the sector scheduler passes
-## them; the QUEST hooks keep the strict refusal (the IF argument).
+## Executes a preflighted reachable path. Sector-only skip_ops is unchanged;
+## dialogue callers never pass it. Host validation includes nested quest hooks.
 func run(code: PackedByteArray, offset: int, length: int, host: Object,
 		skip_ops: PackedInt32Array = PackedInt32Array()) -> bool:
 	refused_op = -1
@@ -146,16 +171,114 @@ func run(code: PackedByteArray, offset: int, length: int, host: Object,
 	if recs.is_empty():
 		return length == 0        # an empty hook runs vacuously, and every
 		                          # Trigger in the corpus is exactly that
-	for r: Dictionary in recs:
-		if IMPLEMENTED.has(r["op"]) and host.has_method(HOST_METHOD[r["op"]]):
+	var selected := reachable(recs, host.named_variables() if host.has_method("named_variables") else {})
+	if not selected.get("ok", false):
+		return false
+	var path: Array = selected["records"]
+	for r: Dictionary in path:
+		var op := int(r["op"])
+		if op == OP_NOP:
 			continue
-		if not skip_ops.has(int(r["op"])):
-			refused_op = r["op"]
+		if not IMPLEMENTED.has(op) or not HOST_METHOD.has(op) or not host.has_method(HOST_METHOD[op]):
+			if not skip_ops.has(op):
+				refused_op = op
+				return false
+		elif host.has_method("validate_script_record") and not host.validate_script_record(r):
+			refused_op = op
 			return false
-	for r: Dictionary in recs:
-		_apply(r, host)
+	for r: Dictionary in path:
+		if not _apply(r, host):
+			refused_op = int(r["op"])
+			return false
 		executed += 1
 	return true
+
+
+## LGP sub_82A77C0: predicates are ANDed and stop on the first false.
+## Unknown evaluated predicates return -1, never guessed true/false.
+func condition(args: Array, variables: Dictionary) -> int:
+	var i := 0
+	while i < args.size():
+		var tag := int(args[i][0])
+		if tag == 0xa0:
+			# IsNotMultiplayer, native !byte_94FE644. Engine single-player only.
+			i += 1
+			continue
+		if tag not in [0x49, 0x4a, 0x6d, 0x6e] or i + 1 >= args.size():
+			return -1
+		var operand := int(args[i][1])
+		var name := str(args[i + 1][1]).to_lower()
+		if int(args[i + 1][0]) != tag:
+			return -1
+		if not variables.has(name):
+			return 0
+		var value := int(variables[name])
+		var success := false
+		match tag:
+			0x49: success = ((value >> (operand & 31)) & 1) != 0
+			0x4a: success = ((value >> (operand & 31)) & 1) == 0
+			0x6d: success = value > operand
+			0x6e: success = value < operand
+		if not success:
+			return 0
+		i += 2
+	return 1
+
+
+## Native IF false scans to the first successful ELSEIF or ELSE; successful
+## branch encountering ELSEIF skips through ELSE AND its next record.
+## ELSE encountered normally skips precisely the next record. No invented
+## nesting/end-if convention: retail's scanner is flat.
+func reachable(recs: Array, variables: Dictionary) -> Dictionary:
+	var shadow := variables.duplicate()
+	var out: Array[Dictionary] = []
+	var i := 0
+	while i < recs.size():
+		var r: Dictionary = recs[i]
+		var op := int(r["op"])
+		if op == OP_IF:
+			var result := condition(r["args"], shadow)
+			if result < 0:
+				refused_op = op
+				return {"ok": false, "error": "unsupported IF predicate"}
+			if result == 0:
+				i += 1
+				while i < recs.size():
+					var next_op := int(recs[i]["op"])
+					if next_op == OP_ELSE:
+						break
+					if next_op == OP_ELSEIF:
+						result = condition(recs[i]["args"], shadow)
+						if result < 0:
+							refused_op = next_op
+							return {"ok": false, "error": "unsupported ELSEIF predicate"}
+						if result == 1:
+							break
+					i += 1
+				if i >= recs.size():
+					refused_op = op
+					return {"ok": false, "error": "IF has no branch terminator"}
+		elif op == OP_ELSEIF:
+			while i < recs.size() and int(recs[i]["op"]) != OP_ELSE:
+				i += 1
+			if i + 1 >= recs.size():
+				refused_op = op
+				return {"ok": false, "error": "ELSEIF has no ELSE/following record"}
+			i += 1
+		elif op == OP_ELSE:
+			if i + 1 >= recs.size():
+				refused_op = op
+				return {"ok": false, "error": "ELSE has no following record"}
+			i += 1
+		else:
+			out.append(r)
+			var a: Array = r["args"]
+			if op in [OP_SET_VAR, OP_SET_VAR_BIT] and a.size() == 2:
+				var name := str(a[0][1]).to_lower()
+				var value := int(a[1][1])
+				shadow[name] = value if op == OP_SET_VAR else int(shadow.get(name, 0)) | (1 << value)
+		i += 1
+	return {"ok": true, "records": out}
 
 
 ## Splits a span into records without executing anything: [{op, args}], where
@@ -173,16 +296,26 @@ func decode(code: PackedByteArray, offset: int, length: int) -> Array[Dictionary
 		if l < 4 or p + l > end:
 			push_error("ScriptVM: record at %d declares length %d" % [p, l])
 			return []
-		var args: Variant = _args(code, p + 4, p + l)
+		var args: Variant
+		if op == OP_DIALOG_DEF:
+			if l != 84:
+				push_error("ScriptVM: dialogue definition is not 80 bytes")
+				return []
+			args = []
+		else:
+			args = _args(code, p + 4, p + l, op in [OP_IF, OP_ELSEIF])
 		if args == null:
 			return []
-		out.append({"op": op, "args": args})
+		var record := {"op": op, "args": args, "offset": p, "length": l}
+		if op == OP_DIALOG_DEF:
+			record["definition"] = code.slice(p + 4, p + l)
+		out.append(record)
 		p += l
-	return out
+	return out if p == end else []
 
 
 ## One record's tagged argument list, or null on an unknown tag.
-func _args(code: PackedByteArray, from: int, to: int) -> Variant:
+func _args(code: PackedByteArray, from: int, to: int, keep_markers: bool = false) -> Variant:
 	var out: Array = []
 	var p := from
 	while p < to:
@@ -199,6 +332,8 @@ func _args(code: PackedByteArray, from: int, to: int) -> Variant:
 			# `inc [esi]; jmp epilogue` -- a ZERO-WIDTH marker. The old
 			# narrow-table decoder refused here; refusing a marker is what
 			# made real hooks undecodable (finding 1293).
+			if keep_markers:
+				out.append([tag, 0])
 			continue
 		var w: int = WIDTH[tag]
 		if w == VARIANT:
@@ -300,9 +435,11 @@ func _args(code: PackedByteArray, from: int, to: int) -> Variant:
 	return out
 
 
-func _apply(rec: Dictionary, host: Object) -> void:
+func _apply(rec: Dictionary, host: Object) -> bool:
 	var a: Array = rec["args"]
 	match int(rec["op"]):
+		OP_DIALOG_DEF:
+			return host.define_dialogue(rec["definition"])
 		OP_QUEST_BOOK:
 			# (i32 quest id, i32 kind, string res key). The quest id is in the
 			# record rather than implied by the hook, which is why it is passed
@@ -328,23 +465,40 @@ func _apply(rec: Dictionary, host: Object) -> void:
 			if a.size() >= 2:
 				host.set_script_var(str(a[0][1]), int(a[1][1]))
 		OP_CREATE_NPC:
-			# QUEST shape: (string handle, i32 creature, string name, string
-			# task, i16, string art), NO POSITION -- retail spawns the NPC
-			# at the QUEST ORIGIN (the hero's cell: quest 1's nun spawns on
-			# the hero and walks to her Goto target, displacing her via the
-			# creature push), and the later NPC_Goto then walks her.
-			# SECTOR shape (Sector50039Enter et al): (string handle -- the
-			# placeholder "NON_UNIQUE", i32 creature, VARIANT cell as an
-			# (x, y, 0) triple, i32 seed) -- the cell is INLINE and there is
-			# no name/task/art.
-			if a.size() >= 3 and a[2][1] is Vector3i:
-				var sc: Vector3i = a[2][1]
-				host.create_npc(str(a[0][1]), int(a[1][1]), "", "",
-					"", Vector2i(sc.x, sc.y))
-			elif a.size() >= 3:
-				host.create_npc(str(a[0][1]), int(a[1][1]), str(a[2][1]),
-					str(a[3][1]) if a.size() >= 4 else "",
-					str(a[5][1]) if a.size() >= 6 else "", quest_origin)
+			var handle := ""
+			var name := ""
+			var task := ""
+			var art := ""
+			var ids: Array[int] = []
+			var cell := quest_origin
+			var dialogue := ""
+			for arg in a:
+				match int(arg[0]):
+					0x01:
+						if handle.is_empty(): handle = str(arg[1])
+						else: name = str(arg[1])
+					0x02: ids.append(int(arg[1]))
+					0x04:
+						if arg[1] is Vector3i:
+							var c: Vector3i = arg[1]
+							cell = Vector2i(c.x, c.y)
+						else:
+							name = str(arg[1])
+							if host.has_method("script_position"):
+								var placed: Vector2i = host.script_position(name)
+								if placed != Vector2i(-1, -1):
+									cell = placed
+					0x05: task = str(arg[1])
+					0x09:
+						task = str(arg[1])
+						dialogue = str(arg[1])
+					0x67: art = str(arg[1])
+			if handle.is_empty() or ids.is_empty():
+				return false
+			host.create_npc(handle, ids[0], name, task, art, cell)
+			if host.has_method("configure_npc"):
+				host.configure_npc(handle, ids[1] if ids.size() > 1 else 0,
+					ids[2] if ids.size() > 2 else 0, dialogue)
 		OP_NPC_GOTO:
 			# (string handle, VARIANT cell). The cell is the (x, y, z) triple;
 			# z is 0 on every record read so far and is dropped HERE rather than
@@ -358,6 +512,29 @@ func _apply(rec: Dictionary, host: Object) -> void:
 			# art has not been identified and guessing it would be invention.
 			if a.size() >= 1:
 				host.quest_compass(str(a[0][1]))
+		OP_NOP:
+			pass
+		OP_SET_NPC_STATE:
+			return host.npc_state(a)
+		OP_TEXT:
+			return host.dialogue_text(a)
+		OP_BUTTON:
+			return host.dialogue_button(a)
+		OP_START_QUEST:
+			return host.start_quest(int(a[0][1]))
+		OP_END_QUEST:
+			return host.end_quest(int(a[0][1]))
+		OP_GOLD:
+			return host.give_gold(str(a[0][1]), int(a[1][1]))
+		OP_DELETE_NPC:
+			return host.delete_npc(str(a[0][1]))
+		OP_COMPASS_POS:
+			return host.quest_compass_pos(Vector2i(int(a[0][1]), int(a[1][1])), int(a[2][1]))
+		OP_DIALOG_STATE:
+			return host.dialogue_state(str(a[0][1]), int(a[1][1]))
+		OP_SOUND:
+			return host.play_sound(str(a[0][1]))
+	return true
 
 
 ## Every opcode a span uses, for a caller deciding whether it can run the hook
