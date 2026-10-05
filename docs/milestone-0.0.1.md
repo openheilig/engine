@@ -97,3 +97,20 @@ Do not reopen all eight classes, optional movies, arbitrary mod APIs or campaign
 The development snapshot is not a completed 0.0.1 candidate. A fresh 1024×768 Forward+/Vulkan production run opened the Seraphim world, accepted a click (`click_goal` cell 3243,2508), and displayed the `I` inventory panel. Actual presented frames showed an obscured hero and a text-only empty inventory. The run used Dummy audio and the retail configuration had sound muted; it does not prove audible playback. Startup also printed repeated IDLE↔WALK transitions. These observations block fidelity/travel/presentation claims; they are not causes inferred from pixels.
 
 Source includes authoritative session/item/progression work, selected-class dialogue/talk integration, native-body mappings, data-only profiles, engine-owned saves, audio and movie paths. Presence and component checks do not establish the combined C0–C5 journey. Remaining exact causal/timing/UI/stat/save contracts must pass the gates above. No 0.0.1 tag, finished reel or full-game parity claim is authorized by repository publication.
+
+## GitHub tracking
+
+[Milestone 0.0.1](https://github.com/openheilig/engine/milestone/1) remains open.
+Work order follows the contract, not issue-number or creation order:
+
+1. [Native C0–C5 route and fail-closed oracle](https://github.com/openheilig/engine/issues/2).
+2. [Opening visibility and continuous travel](https://github.com/openheilig/engine/issues/6).
+3. [Ordinary talk and causal quests](https://github.com/openheilig/engine/issues/3).
+4. [Native combat, loot and equipment](https://github.com/openheilig/engine/issues/7).
+5. [Transactional save and restart continuation](https://github.com/openheilig/engine/issues/5).
+6. [Route UI, audio and runtime budget](https://github.com/openheilig/engine/issues/1).
+7. [Fresh-checkout/package qualification before tagging](https://github.com/openheilig/engine/issues/4).
+
+The separate [historical findings-log repair](https://github.com/openheilig/research/issues/1)
+preserves provenance rather than silently rewriting old evidence. Publication
+does not authorize resuming the entire broader implementation plan.
