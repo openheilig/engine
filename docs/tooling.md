@@ -86,6 +86,22 @@ Optional-tool metadata and the earlier REA assessment are not fresh execution cl
 
 The current development snapshot reaches the windowed Seraphim scene and accepts input; the `I` text panel is visibly reachable. That observation does not close ordinary talk, pickup/equip, save UI, canonical combat/rewards, movement/actor visibility or complete save continuation. Audio requires an actual audible or mixer-side witness, not a printed `playing=true` on a muted/Dummy run.
 
+Observed on 2026-10-05: a fresh source checkout imported, then passed
+`PASS=87 FAIL=0` with explicit LGP install and Windows Gold PE fixture.
+A separate actual Forward+/Vulkan intro-media run produced two differing
+decoded frames, mixer peak 0.537200 and one `extras-smoke` skipped return.
+That is real media-component proof, not world→movie→world or audible
+gameplay-event parity. The normal scene smoke was muted/Dummy and cannot
+inherit the media probe's audio evidence.
+
+The layer verifier was also exercised after publication cleanup:
+`files=41 violations=0`, exit 0. A temporary forbidden scene mutation under
+`world/` produced `violations=1`, exit 1, and was removed. The old scanner
+printed violations but exited successfully; this false-green behavior is
+corrected without weakening the boundary. Inventory presentation now lives
+in `view/`; the self-ticking movie lifecycle controller lives at the root,
+like the existing camera and debug-overlay controllers.
+
 Qualification of **0.0.1** requires the selected authored C0–C5 Seraphim route, after-action state checkpoints, aligned full-frame retail presentation, actual audio and fresh-process save/load continuation, plus negative controls and inspected asset-free artifacts. Research tools and passing component totals cannot waive those requirements.
 
 ### Historical findings-log gate

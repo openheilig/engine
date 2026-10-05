@@ -38,6 +38,11 @@ inventory. This run used Dummy audio with retail sound muted, so it proves no
 audible playback. Source inspection also found unwired ordinary talk/pickup,
 demonstration combat inputs and incomplete composite save continuation.
 
+A fresh source checkout imported and passed **87/87 component checks** with
+explicit LGP install and optional Windows Gold UI-table fixture on 2026-10-05.
+An actual intro-media probe produced two changing frames, mixer peak 0.537200
+and a clean skip return. Neither establishes the missing gameplay journey.
+
 The [milestone contract](docs/milestone-0.0.1.md) records these blockers and
 the acceptance gates. No passing check count, improved start-scene ratchet or
 isolated model render is a claim of 1:1 gameplay. Full campaigns, other-class
@@ -163,6 +168,7 @@ sacred.gd      the Sacred namespace: install discovery + a facade over formats/
 iso_camera.gd  the isometric camera (owns a _process, so not a view/ file)
 drive.gd       --drive=/--shots=: scripted input and timed captures
 debug_overlay.gd  the F3 developer overlay (owns a _process, so not a view/ file)
+movie_player.gd  media lifecycle controller (owns a _process; not in view/)
 formats/       the runtime readers, one file per retail format
 world/         the fixed-tick simulation: actors, movement, walkability, replay
 view/          rendering: sector streaming, Granny models, player, cursor
@@ -179,9 +185,10 @@ shaders/       encoded floor composition, spatial objects, actors and liquids
 | `formats/` | [The runtime readers](formats/), one file per retail format — pak, world, texture, regions, models, saves, script bytecode. |
 | `iso_camera.gd` | The isometric camera. Not in `view/` — it owns a `_process`, which `view/` forbids. |
 | `debug_overlay.gd` | The developer overlay: resolution, framerate, camera and mouse cell, player, sim tick, sector residency, draw calls and memory. **F3** toggles it; `--overlay` starts it shown so a `--shot=`/`--drive` capture can carry it. Hidden by default, so a run that never presses F3 photographs exactly what it photographed before. Not in `view/` — it owns a `_process`. |
+| `movie_player.gd` | The asynchronous conversion/playback/return controller. Owns its per-frame lifecycle outside the passive `view/` layer. |
 | `drive.gd` | `--drive=`/`--shots=`: plays a timeline of scripted input and captures at stated milliseconds. Speaks the retail autopilot's own `ms verb args` grammar, so one script drives both engines. Refuses `--shots=` at anything but 1024×768 — the only size retail can be captured at. Front-ended by `tools/drive/session.sh`. |
 | `world/` | Simulation: `sim.gd` fixed-tick loop, actor registry and state, movement, path windows, walkability, interiors, record/replay. |
-| `view/` | Rendering: `sector_view.gd` world streaming, `model_view.gd` Granny renderer, player and cursor views, rig placement. |
+| `view/` | Rendering and passive presentation: streaming, Granny/player/cursor views, rig placement and the inventory panel. |
 | `parity/` | [`verify.gd` and `grnwalk.gd`](parity/) — the two scripts the Python side diffs against. |
 | `checks/` | [Single-purpose gates](checks/), all sharing `check.gd`. Each answers one question against the retail data. |
 | `probes/` | [One-shot investigations](probes/). How the facts in `research/` were found; kept for reproduction, not run in normal work. |

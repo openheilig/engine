@@ -19,7 +19,7 @@ extends Node3D
 
 const SECT: int = Sacred.SECT
 const ContentLoading := preload("res://view/content_loading.gd")
-const MoviePlayer := preload("res://view/movie_player.gd")
+const MoviePlayer := preload("res://movie_player.gd")
 const DialogueRuntime := preload("res://world/dialogue.gd")
 const DialoguePanel := preload("res://view/dialogue_view.gd")
 ## The F3 developer overlay. Preloaded, not `class_name`d: a newly added

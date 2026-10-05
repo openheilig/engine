@@ -12,7 +12,7 @@ extends "res://checks/check.gd"
 ## count as evidence that a cinematic actually animated with embedded audio.
 const SacredData := preload("res://sacred.gd")
 const Profile := preload("res://formats/mod_manifest.gd")
-const MoviePlayer := preload("res://view/movie_player.gd")
+const MoviePlayer := preload("res://movie_player.gd")
 const MediaCache := preload("res://formats/media_cache.gd")
 var _options: Dictionary = {}
 var _player: MoviePlayer

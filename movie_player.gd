@@ -1,6 +1,6 @@
 extends CanvasLayer
 ## Actual Theora animation + embedded Vorbis through one VideoStreamPlayer.
-## The owner, not this view, suspends simulation/music and restores game/menu.
+## The owner, not this controller, suspends simulation/music and restores game/menu.
 ## Every accepted request emits exactly one returned signal after audio stops
 ## and its owned conversion worker joins. Back is cancellation, not completion.
 ## Native evidence: LGP original 0x83D0FB4 selects movie ids; 0x82C9F02

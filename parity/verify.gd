@@ -117,7 +117,11 @@ func _init() -> void:
 
 	for id: int in TEXTURES:
 		var t0 := Time.get_ticks_usec()
-		var img := Sacred.decode_texture(tex_pak, id)
+		# Empty directory slots are the declared negative sample, not an image
+		# header. Do not ask the decoder to read fields from zero bytes.
+		var img: Image = null
+		if tex_pak.offsets[id] > 0 and tex_pak.sizes[id] > 0:
+			img = Sacred.decode_texture(tex_pak, id)
 		if img == null:
 			print("texture\t%d\tERROR" % id)
 			continue
@@ -227,8 +231,7 @@ func _init() -> void:
 			idx, models.entry_name(idx), int(c["bones"]), records.size(), float(c["length"]), keys,
 			_md5(models.clip_bytes(idx))])
 
-	_layer_check()
-	finish(0)
+	finish(0 if _layer_check() == 0 else 1)
 
 
 func _pak_facts(label: String, p: Sacred.Pak) -> void:
@@ -240,13 +243,14 @@ func _pak_facts(label: String, p: Sacred.Pak) -> void:
 func _md5(b: PackedByteArray) -> String:
 	var ctx := HashingContext.new()
 	ctx.start(HashingContext.HASH_MD5)
-	ctx.update(b)
+	if not b.is_empty():
+		ctx.update(b)
 	return ctx.finish().hex_encode()
 
 
 ## Forbidden-token scan; violations print file:line:token on stderr, last
 ## stdout line is always "layer\tfiles=<n>\tviolations=<n>".
-func _layer_check() -> void:
+func _layer_check() -> int:
 	var files := 0
 	var violations := 0
 	var dirs := LAYER_RULES.keys()
@@ -267,6 +271,7 @@ func _layer_check() -> void:
 						violations += 1
 						printerr("%s:%d:%s" % [path, i + 1, token])
 	print("layer\tfiles=%d\tviolations=%d" % [files, violations])
+	return violations
 
 
 ## Blanks comment-only lines, truncates inline ones -- preserves line count.
